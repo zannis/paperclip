@@ -1536,8 +1536,16 @@ export function createPluginWorkerHandle(
     route.terminalized = true;
     route.state = "closed";
     route.listener = null;
-    route.buffered = [];
-    route.bufferedChars = 0;
+    // Keep `buffered` intact. Ending the route stops new data; it does not
+    // retract data the host already admitted. Every buffered chunk passed the
+    // session match, the per-chunk limit, the cumulative byte cap, and the
+    // pre-bind bounds, and its bytes are already counted in `totalDataBytes`, so
+    // draining it later cannot carry the route past any bound. A listener that
+    // was already bound received those chunks live and terminalizing cannot take
+    // them back, so dropping them only for a listener that had not attached yet
+    // would make delivery depend on attach timing — the route is opened with an
+    // `await`, so that window is unavoidable for every consumer. `onData` drains
+    // the buffer on a terminalized route without binding the listener.
     route.preOpen = [];
     clearDuplexChannelLifetimeTimer(route);
     // A terminalized route reports a null exit code, which the caller treats as a
@@ -1710,8 +1718,9 @@ export function createPluginWorkerHandle(
     route.terminalized = true;
     route.state = "closed";
     route.listener = null;
-    route.buffered = [];
-    route.bufferedChars = 0;
+    // Keep `buffered` for the same reason `terminalizeDuplexChannelRoute` does:
+    // a worker exit ends the route but does not un-admit the bytes the host
+    // already accepted from it.
     route.preOpen = [];
     clearDuplexChannelLifetimeTimer(route);
     settleRouteWait(route, { exitCode: null });
@@ -1825,7 +1834,13 @@ export function createPluginWorkerHandle(
 
     return {
       onData(listener: (chunk: string) => void): void {
-        route.listener = listener;
+        // Bind the listener only while the route can still carry data. A
+        // terminalized route never routes another frame, so holding a listener
+        // on it would keep a live delivery target for a dead route.
+        if (!route.terminalized) route.listener = listener;
+        // Drain either way: the buffer holds chunks the host already admitted,
+        // and they are owed to the consumer whether or not the route has since
+        // ended.
         if (route.buffered.length > 0) {
           const pending = route.buffered;
           route.buffered = [];

@@ -397,6 +397,67 @@ describe("plugin worker manager duplex channel route", () => {
     }
   });
 
+  it("drains an admitted pre-bind chunk to a listener that attaches after the total cap ended the route", async () => {
+    const handle = makeDuplexHandle({
+      duplexChannelLimits: { maxTotalDataBytes: 4 },
+    });
+    try {
+      await handle.start();
+      // Force the ordering the test above only reaches by luck.
+      // `batchWithOpenReply` writes the open reply and both data frames in one
+      // stdout write, so both frames are held pre-bind and replayed by the bind
+      // drain — inside `openDuplexChannel`, strictly before it resolves and
+      // therefore before any listener can attach. The host admits the first
+      // chunk (3 bytes ≤ 4) into the pre-bind buffer, then the second brings the
+      // total to 6 bytes (> 4) and ends the route.
+      const session = await handle.openDuplexChannel(
+        duplexOpenInput({
+          workerSessionId: "ws-A",
+          batchWithOpenReply: true,
+          data: [{ chunk: "€" }, { chunk: "€" }],
+        }),
+      );
+      await expect(session.wait()).resolves.toEqual({ exitCode: null });
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // The first chunk passed every bound, so the host already accepted it and
+      // owes it to the consumer: ending the route must not retract data that was
+      // admitted under the cap. A bound listener would have received it live, so
+      // an unbound one receives it from the drain. The second chunk breached the
+      // cap and is never delivered, which is what proves the cap counts bytes
+      // rather than characters.
+      expect(chunks).toEqual(["€"]);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("drains an admitted pre-bind chunk to a listener that attaches after the worker exits", async () => {
+    const handle = makeDuplexHandle();
+    try {
+      await handle.start();
+      // The bind drain buffers both chunks before `openDuplexChannel` resolves,
+      // so no listener can have attached. Neither chunk breaches a bound here —
+      // the route ends because the worker goes away.
+      const session = await handle.openDuplexChannel(
+        duplexOpenInput({
+          workerSessionId: "ws-A",
+          batchWithOpenReply: true,
+          data: [{ chunk: "one" }, { chunk: "two" }],
+        }),
+      );
+      await handle.stop();
+      await expect(session.wait()).resolves.toEqual({ exitCode: null });
+      const chunks: string[] = [];
+      session.onData((chunk) => chunks.push(chunk));
+      // A worker exit is the same case as a limit breach: the bytes were already
+      // admitted, so the consumer still gets them, in order.
+      expect(chunks).toEqual(["one", "two"]);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("ends the active route when the lifetime timer expires", async () => {
     const handle = makeDuplexHandle({
       duplexChannelLimits: { maxDurationMs: 100 },
