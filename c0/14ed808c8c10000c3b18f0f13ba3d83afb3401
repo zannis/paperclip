@@ -1,0 +1,20 @@
+Dockerfile
+  s_c6ca2d5704ce8d::t_f4478ea3585f31 103-119
+  s_c6ca2d5704ce8d::t_697f91b4090142 140-141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "c014ed808c8c10000c3b18f0f13ba3d83afb3401",
+  "prompts": {},
+  "sessions": {
+    "s_c6ca2d5704ce8d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5b45dff-27e8-4f6e-b6e2-015097d8954d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
