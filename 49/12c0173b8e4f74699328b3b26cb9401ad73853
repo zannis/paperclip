@@ -1,0 +1,29 @@
+packages/adapters/codex-local/src/server/codex-home.ts
+  s_4e317cbef89ba2::t_dcf6d9754a6d70 296
+packages/adapters/codex-local/src/server/codex-home.test.ts
+  s_8ff4aff282b547::t_0a8bac64178e6b 880-884
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "4912c0173b8e4f74699328b3b26cb9401ad73853",
+  "prompts": {},
+  "sessions": {
+    "s_4e317cbef89ba2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8f5af8f4-8d93-49fd-a845-a22ce55857b6",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_8ff4aff282b547": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9163476d-8a4a-43be-bce6-f9afb28a678f",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
