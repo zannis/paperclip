@@ -568,6 +568,7 @@ Detailed ownership, execution, blocker, active-run watchdog, crash-recovery, and
 | Manage responsible user's inbox state | yes | yes (default-open policy) |
 | Manage another user's inbox state | yes | saved target-user opt-in or scoped `inbox:manage` grant |
 | Set work-object visibility (issue/project) | no | no (pro gate) |
+| Grant an agent a protected-change permission | yes (caller must hold `agents:configure`) | no |
 
 Agent resume is the only grant-gated exception in the lifecycle-route group. An
 agent actor calling `POST /agents/:agentId/resume` must pass the protected
@@ -575,6 +576,22 @@ agent actor calling `POST /agents/:agentId/resume` must pass the protected
 access does not bypass that decision, and `agents:suggest-changes` alone cannot
 apply the lifecycle change. Pause, clear-error, terminate, approval, and
 key-management routes remain board-only.
+
+The protected-change grants themselves — `agents:configure` and
+`agents:suggest-changes` — are set through `changeGrants` on
+`PATCH /api/agents/:id/permissions`. A company's first `agents:configure` grant
+is still seeded automatically onto a lone root CEO agent, and this field is how
+the board changes that afterwards. Three properties hold:
+
+- **Board only.** An agent actor that sends `changeGrants` is refused, even the
+  CEO agent that may otherwise manage permissions. Delegating configuration
+  authority stays a board decision.
+- **No self-escalation.** The board caller must itself hold `agents:configure`
+  to set either key in either direction, so a caller can never hand out more
+  authority than it has. `agents:create` alone is not enough.
+- **Per-key and additive.** An omitted key leaves that grant as it was; an
+  explicit `false` revokes. A client that does not send the field cannot
+  silently drop a grant.
 
 ### 9.3.1 Shared default-open issue writes
 
