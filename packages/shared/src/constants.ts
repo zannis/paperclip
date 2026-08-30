@@ -1025,6 +1025,23 @@ export const PERMISSION_KEYS = [
 ] as const;
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
 
+/**
+ * The protected-change permission keys a board caller can grant to an agent
+ * through `PATCH /api/agents/:id/permissions`.
+ *
+ * These are the two tiers the authorization layer already pairs for
+ * `agent_config:update`: `agents:configure` applies an agent change directly,
+ * while `agents:suggest-changes` only lets the holder start one on the routes
+ * that support change consent, so the change still needs an accepted
+ * confirmation before it applies.
+ */
+export const GRANTABLE_AGENT_CHANGE_PERMISSION_KEYS = [
+  "agents:configure",
+  "agents:suggest-changes",
+] as const;
+export type GrantableAgentChangePermissionKey =
+  (typeof GRANTABLE_AGENT_CHANGE_PERMISSION_KEYS)[number];
+
 export const TOOL_APPLICATION_TYPES = ["mcp_http", "mcp_stdio", "paperclip_plugin", "a2a"] as const;
 export type ToolApplicationType = (typeof TOOL_APPLICATION_TYPES)[number];
 

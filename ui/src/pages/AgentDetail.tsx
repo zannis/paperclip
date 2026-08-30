@@ -2158,6 +2158,10 @@ function ConfigurationTab({
   const canCreateAgents = Boolean(agent.permissions?.canCreateAgents);
   const canCreateSkills = agent.permissions?.canCreateSkills !== false;
   const canAssignTasks = Boolean(agent.access?.canAssignTasks);
+  const heldGrantKeys = new Set((agent.access?.grants ?? []).map((grant) => grant.permissionKey));
+  const canConfigureAgents = heldGrantKeys.has("agents:configure");
+  const canSuggestAgentChanges = heldGrantKeys.has("agents:suggest-changes");
+  const basePermissionUpdate = { canCreateAgents, canCreateSkills, canAssignTasks };
   const taskAssignSource = agent.access?.taskAssignSource ?? "none";
   const taskAssignLocked = agent.role === "ceo" || canCreateAgents;
   const taskAssignHint =
@@ -2275,6 +2279,42 @@ function ConfigurationTab({
                 })
               }
               disabled={updatePermissions.isPending || taskAssignLocked}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 text-sm">
+            <div className="space-y-1">
+              <div>Can suggest changes to other agents</div>
+              <p className="text-xs text-muted-foreground">
+                Lets this agent start a change to another agent's instructions or profile. The change still needs an accepted confirmation before it applies.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={canSuggestAgentChanges}
+              onCheckedChange={() =>
+                updatePermissions.mutate({
+                  ...basePermissionUpdate,
+                  changeGrants: { "agents:suggest-changes": !canSuggestAgentChanges },
+                })
+              }
+              disabled={updatePermissions.isPending}
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4 text-sm">
+            <div className="space-y-1">
+              <div>Can configure other agents</div>
+              <p className="text-xs text-muted-foreground">
+                Applies changes to other agents directly, with no confirmation step. This is normally reserved for the root CEO agent — grant it only when a second configurator is genuinely wanted.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={canConfigureAgents}
+              onCheckedChange={() =>
+                updatePermissions.mutate({
+                  ...basePermissionUpdate,
+                  changeGrants: { "agents:configure": !canConfigureAgents },
+                })
+              }
+              disabled={updatePermissions.isPending}
             />
           </div>
         </div>

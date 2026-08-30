@@ -13,10 +13,12 @@ import {
   createAgentHireSchema,
   createAgentSchema,
   deriveAgentUrlKey,
+  GRANTABLE_AGENT_CHANGE_PERMISSION_KEYS,
   isUuidLike,
   normalizeIssueIdentifier,
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
+  type AgentChangeGrants,
   type AgentDesiredSkillEntry,
   type AgentSkillAssignmentMode,
   type AgentSkillSnapshot,
@@ -1257,6 +1259,25 @@ export function agentRoutes(
     });
     if (decision.allowed) return;
     throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+  }
+
+  // Delegating protected-change authority takes the direct tier, for both keys
+  // and in both directions. `agents:configure` is the stronger half of the pair
+  // the authorization layer falls back through, so a caller that holds it can
+  // hand out either tier without handing out more than it has. A caller that
+  // does not hold it — an operator, say, who still has `agents:create` — cannot
+  // mint a configurator, and cannot strip one either.
+  async function assertBoardCanGrantAgentChangePermissions(req: Request, companyId: string) {
+    const decision = await access.decide({
+      actor: req.actor,
+      action: "agents:configure",
+      resource: { type: "company", companyId },
+    });
+    if (decision.allowed) return;
+    throw forbidden(
+      `Changing protected-change permission grants requires agents:configure. ${decision.explanation}`,
+      authorizationDeniedDetails(decision),
+    );
   }
 
   // The single owner-authorization helper for the three adapter login routes. It
@@ -3864,6 +3885,14 @@ export function agentRoutes(
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
 
+    // Only the keys the caller actually sent are touched. An omitted key keeps
+    // whatever grant the agent already has, so an older client that knows
+    // nothing about this field cannot revoke a grant by not sending it.
+    const requestedChangeGrants = (req.body.changeGrants ?? {}) as AgentChangeGrants;
+    const requestedChangeGrantKeys = GRANTABLE_AGENT_CHANGE_PERMISSION_KEYS.filter(
+      (permissionKey) => requestedChangeGrants[permissionKey] !== undefined,
+    );
+
     if (req.actor.type === "agent") {
       const actorAgent = req.actor.agentId ? await svc.getById(req.actor.agentId) : null;
       if (!actorAgent || actorAgent.companyId !== existing.companyId) {
@@ -3874,16 +3903,38 @@ export function agentRoutes(
         res.status(403).json({ error: "Only CEO can manage permissions" });
         return;
       }
+      // The board keeps sole authority over the protected-change grants. An
+      // agent principal cannot seed a second direct configurator, so the
+      // single-root-configurator default stays a board decision.
+      if (requestedChangeGrantKeys.length > 0) {
+        res.status(403).json({
+          error: "Only board callers can change protected-change permission grants",
+        });
+        return;
+      }
     } else {
       await assertBoardCanManageAgentsForCompany(req, existing.companyId);
+      if (requestedChangeGrantKeys.length > 0) {
+        await assertBoardCanGrantAgentChangePermissions(req, existing.companyId);
+      }
     }
 
-    const agent = await svc.updatePermissions(id, req.body);
+    // The grants live in principal_permission_grants, not in the agent's
+    // permissions blob, and `agentPermissionsSchema` has a catchall that would
+    // otherwise persist them there too.
+    const permissionsPatch = { ...(req.body as Record<string, unknown>) };
+    delete permissionsPatch.changeGrants;
+
+    const agent = await svc.updatePermissions(
+      id,
+      permissionsPatch as Record<string, unknown> & { canCreateAgents: boolean },
+    );
     if (!agent) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
 
+    const grantedByUserId = req.actor.type === "board" ? (req.actor.userId ?? null) : null;
     const effectiveCanAssignTasks =
       agent.role === "ceo" || Boolean(agent.permissions?.canCreateAgents) || req.body.canAssignTasks;
     await access.ensureMembership(agent.companyId, "agent", agent.id, "member", "active");
@@ -3893,8 +3944,22 @@ export function agentRoutes(
       agent.id,
       "tasks:assign",
       effectiveCanAssignTasks,
-      req.actor.type === "board" ? (req.actor.userId ?? null) : null,
+      grantedByUserId,
     );
+
+    const appliedChangeGrants: Record<string, boolean> = {};
+    for (const permissionKey of requestedChangeGrantKeys) {
+      const enabled = requestedChangeGrants[permissionKey] === true;
+      await access.setPrincipalPermission(
+        agent.companyId,
+        "agent",
+        agent.id,
+        permissionKey,
+        enabled,
+        grantedByUserId,
+      );
+      appliedChangeGrants[permissionKey] = enabled;
+    }
 
     const actor = getActorInfo(req);
     await logActivity(db, {
@@ -3912,6 +3977,7 @@ export function agentRoutes(
         canCreateSkills: agent.permissions?.canCreateSkills ?? true,
         canAssignTasks: effectiveCanAssignTasks,
         trustPreset: agent.permissions?.trustPreset ?? "standard",
+        ...(requestedChangeGrantKeys.length > 0 ? { changeGrants: appliedChangeGrants } : {}),
       },
     });
 

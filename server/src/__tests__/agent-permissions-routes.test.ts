@@ -1710,6 +1710,250 @@ describe.sequential("agent permission routes", () => {
     expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
   });
 
+  describe("protected-change permission grants", () => {
+    function boardApp() {
+      return createApp({
+        type: "board",
+        userId: "board-user",
+        source: "local_implicit",
+        isInstanceAdmin: true,
+        companyIds: [companyId],
+      });
+    }
+
+    function changeGrantCalls() {
+      return mockAccessService.setPrincipalPermission.mock.calls.filter(
+        (call: unknown[]) => call[3] !== "tasks:assign",
+      );
+    }
+
+    it("grants agents:suggest-changes to a non-root agent for a board caller", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:suggest-changes": true },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAccessService.setPrincipalPermission).toHaveBeenCalledWith(
+        companyId,
+        "agent",
+        agentId,
+        "agents:suggest-changes",
+        true,
+        "board-user",
+      );
+    });
+
+    it("grants agents:configure to a non-root agent for a board caller", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:configure": true },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAccessService.setPrincipalPermission).toHaveBeenCalledWith(
+        companyId,
+        "agent",
+        agentId,
+        "agents:configure",
+        true,
+        "board-user",
+      );
+    });
+
+    it("revokes a protected-change grant when the key is sent as false", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:configure": false },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAccessService.setPrincipalPermission).toHaveBeenCalledWith(
+        companyId,
+        "agent",
+        agentId,
+        "agents:configure",
+        false,
+        "board-user",
+      );
+    });
+
+    it("leaves an omitted protected-change key untouched", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:suggest-changes": true },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(changeGrantCalls().map((call: unknown[]) => call[3])).toEqual([
+        "agents:suggest-changes",
+      ]);
+    });
+
+    it("writes no protected-change grant when the field is absent", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({ canCreateAgents: false, canAssignTasks: true }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(changeGrantCalls()).toEqual([]);
+    });
+
+    it("keeps the grants out of the agent permissions blob", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:configure": true },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockAgentService.updatePermissions).toHaveBeenCalledWith(agentId, {
+        canCreateAgents: false,
+        canAssignTasks: true,
+      });
+    });
+
+    it("records the applied grants on the permissions activity entry", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:suggest-changes": true, "agents:configure": false },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          action: "agent.permissions_updated",
+          details: expect.objectContaining({
+            changeGrants: { "agents:configure": false, "agents:suggest-changes": true },
+          }),
+        }),
+      );
+    });
+
+    it("rejects a board caller that does not itself hold agents:configure", async () => {
+      mockAccessService.decide.mockImplementation(async (input: { action?: string }) => {
+        const allowed = input.action !== "agents:configure";
+        return {
+          allowed,
+          reason: allowed ? "allow_explicit_grant" : "deny_missing_grant",
+          explanation: allowed ? "Allowed by test grant" : "Missing test grant for agents:configure",
+        };
+      });
+
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:suggest-changes": true },
+        }));
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("agents:configure");
+      expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+      expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
+    });
+
+    it("rejects a CEO agent caller trying to grant a protected-change permission", async () => {
+      const ceoAgentId = "44444444-4444-4444-8444-444444444444";
+      mockAgentService.getById.mockImplementation(async (id: string) =>
+        id === ceoAgentId ? { ...baseAgent, id: ceoAgentId, role: "ceo" } : baseAgent,
+      );
+
+      const app = await createApp({
+        type: "agent",
+        agentId: ceoAgentId,
+        companyId,
+        runId: "run-1",
+        source: "agent_key",
+      });
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "agents:configure": true },
+        }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toContain("board");
+      expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+      expect(mockAccessService.setPrincipalPermission).not.toHaveBeenCalled();
+    });
+
+    it("still lets a CEO agent caller update the non-grant permissions", async () => {
+      const ceoAgentId = "44444444-4444-4444-8444-444444444444";
+      mockAgentService.getById.mockImplementation(async (id: string) =>
+        id === ceoAgentId ? { ...baseAgent, id: ceoAgentId, role: "ceo" } : baseAgent,
+      );
+
+      const app = await createApp({
+        type: "agent",
+        agentId: ceoAgentId,
+        companyId,
+        runId: "run-1",
+        source: "agent_key",
+      });
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({ canCreateAgents: false, canAssignTasks: true }));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(changeGrantCalls()).toEqual([]);
+    });
+
+    it("rejects a permission key outside the grantable protected-change set", async () => {
+      const app = await boardApp();
+
+      const res = await requestApp(app, (baseUrl) => request(baseUrl)
+        .patch(`/api/agents/${agentId}/permissions`)
+        .send({
+          canCreateAgents: false,
+          canAssignTasks: true,
+          changeGrants: { "tasks:assign": true },
+        }));
+
+      expect(res.status).toBe(400);
+      expect(mockAgentService.updatePermissions).not.toHaveBeenCalled();
+    });
+  });
+
   it("exposes a dedicated agent route for the inbox mine view", async () => {
     mockIssueService.list.mockResolvedValue([
       {

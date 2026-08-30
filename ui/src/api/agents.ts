@@ -27,6 +27,7 @@ import type {
   AgentConfigRevision,
   ClearAgentErrorResponse,
   AgentApiKeyScope,
+  GrantableAgentChangePermissionKey,
 } from "@paperclipai/shared";
 import type {
   AdapterModelProfileDefinition,
@@ -86,6 +87,11 @@ export interface AgentPermissionUpdate {
   canAssignTasks: boolean;
   trustPreset?: AgentPermissions["trustPreset"];
   authorizationPolicy?: AgentPermissions["authorizationPolicy"];
+  /**
+   * Protected-change permission grants. Board callers only, and an omitted key
+   * leaves that grant untouched.
+   */
+  changeGrants?: Partial<Record<GrantableAgentChangePermissionKey, boolean>>;
 }
 
 export interface AgentWakeRequest {

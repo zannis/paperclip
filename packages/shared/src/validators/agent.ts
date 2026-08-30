@@ -3,8 +3,10 @@ import {
   AGENT_ICON_NAMES,
   AGENT_ROLES,
   AGENT_STATUSES,
+  GRANTABLE_AGENT_CHANGE_PERMISSION_KEYS,
   INBOX_MINE_ISSUE_STATUS_FILTER,
 } from "../constants.js";
+import type { GrantableAgentChangePermissionKey } from "../constants.js";
 import { agentAdapterTypeSchema } from "../adapter-type.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema, trustPresetSchema } from "./trust-policy.js";
@@ -233,12 +235,29 @@ export const testAdapterEnvironmentSchema = z.object({
 
 export type TestAdapterEnvironment = z.infer<typeof testAdapterEnvironmentSchema>;
 
+/**
+ * Per-key toggles for the protected-change grants. Every key is optional: an
+ * omitted key leaves the existing grant untouched, so a client that does not
+ * know about this field cannot silently revoke a grant it never sent. An
+ * explicit `false` revokes.
+ */
+export const agentChangeGrantsSchema = z
+  .strictObject(
+    Object.fromEntries(
+      GRANTABLE_AGENT_CHANGE_PERMISSION_KEYS.map((key) => [key, z.boolean()]),
+    ) as Record<GrantableAgentChangePermissionKey, z.ZodBoolean>,
+  )
+  .partial();
+
+export type AgentChangeGrants = z.infer<typeof agentChangeGrantsSchema>;
+
 export const updateAgentPermissionsSchema = z.object({
   canCreateAgents: z.boolean(),
   canCreateSkills: z.boolean().optional(),
   canAssignTasks: z.boolean(),
   trustPreset: trustPresetSchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
+  changeGrants: agentChangeGrantsSchema.optional(),
 });
 
 export type UpdateAgentPermissions = z.infer<typeof updateAgentPermissionsSchema>;

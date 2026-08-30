@@ -368,6 +368,7 @@ export {
   resetAgentSessionSchema,
   testAdapterEnvironmentSchema,
   agentPermissionsSchema,
+  agentChangeGrantsSchema,
   updateAgentPermissionsSchema,
   type CreateAgent,
   type BuiltInAgentProvision,
@@ -385,6 +386,7 @@ export {
   type WakeAgent,
   type ResetAgentSession,
   type TestAdapterEnvironment,
+  type AgentChangeGrants,
   type UpdateAgentPermissions,
 } from "./agent.js";
 
