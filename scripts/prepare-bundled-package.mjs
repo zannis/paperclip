@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
-export function materializePublishManifest(pkg) {
+export function materializePublishManifest(pkg, workspaceVersions = {}) {
   const publishConfig = pkg.publishConfig ?? {};
   const publishManifest = { ...pkg };
 
@@ -22,13 +22,39 @@ export function materializePublishManifest(pkg) {
         if (typeof specifier !== "string" || !specifier.startsWith("workspace:")) return [name, specifier];
         const range = specifier.slice("workspace:".length);
         const prefix = range === "^" || range === "~" ? range : "";
-        return [name, `${prefix}${pkg.version}`];
+        // Workspace packages version independently (plugin-sdk is 1.0.0 while
+        // the rest are 0.3.x), so `workspace:*` must materialize to the
+        // DEPENDENCY's version, not the consumer's — pnpm pack does the same.
+        return [name, `${prefix}${workspaceVersions[name] ?? pkg.version}`];
       }),
     );
   }
 
   delete publishManifest.publishConfig;
   return publishManifest;
+}
+
+export function readWorkspacePackageVersions(root = repoRoot) {
+  const versions = {};
+  const candidates = ["server", "ui", "cli"];
+  for (const group of ["packages", "packages/adapters", "packages/plugins", "packages/plugins/examples"]) {
+    const groupDir = resolve(root, group);
+    if (!existsSync(groupDir)) continue;
+    for (const entry of readdirSync(groupDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) candidates.push(`${group}/${entry.name}`);
+    }
+  }
+  for (const dir of candidates) {
+    const manifestPath = resolve(root, dir, "package.json");
+    if (!existsSync(manifestPath)) continue;
+    try {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      if (manifest.name && manifest.version) versions[manifest.name] = manifest.version;
+    } catch {
+      // A malformed manifest in a non-workspace dir is not this script's problem.
+    }
+  }
+  return versions;
 }
 
 export function createBundledInstallManifest(publishManifest, bundledDependencies) {
@@ -171,7 +197,7 @@ export function prepareBundledPackage(sourceDir, destinationDir) {
   }
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
-  const publishManifest = materializePublishManifest(sourcePackage);
+  const publishManifest = materializePublishManifest(sourcePackage, readWorkspacePackageVersions());
   // Everything the manifest promises is already materialized in the staged
   // copy, and the staged dir has no workspace or ../scripts to build from —
   // npm pack must not re-run the source package's lifecycle builds here.
