@@ -1,0 +1,31 @@
+patches/acpx@0.12.0.patch
+  s_c68e1dbe3b756f::t_ccb1b3a56653d8 2,23-52,58-63,67-69,71-77,101,111,126,140
+patches/acpx@0.13.1.patch
+  s_8c64ed9ef3e931::t_7c7de40e0a36d2 2,14-41,62,75,97,111,131,145,218,298
+pnpm-lock.yaml
+  s_c68e1dbe3b756f::t_35555e8a334c7e 20,23,135,473,886,12416,12428
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "85506e1ea4067500642410d9775f1c9b4f890e36",
+  "prompts": {},
+  "sessions": {
+    "s_8c64ed9ef3e931": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124804bf-82be-4ca0-b1c0-2c9416f697d6",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
