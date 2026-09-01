@@ -1191,6 +1191,61 @@ export async function heartbeatRunIsTerminalOrMissing(
 }
 
 /**
+ * Whether the runs named by an ownership conflict can still make progress.
+ *
+ * A 409 caller must pick between two opposite responses, and the run ids alone
+ * do not tell it which: a live holder means yield (the item belongs to a
+ * sibling run, so retrying only burns budget), while a terminal or
+ * unresolvable holder means recover (the self-heal paths clear it, so a retry
+ * is the correct move).
+ *
+ * "live" wins over "terminal" when the two holders disagree. A live execution
+ * run keeps clearCheckoutRunIfTerminal from releasing an already-terminal
+ * checkout run, so the lock is not recoverable while either holder is alive.
+ */
+export type OwnershipHolderLiveness = {
+  checkoutRunStatus: string | null;
+  executionRunStatus: string | null;
+  holderLiveness: "live" | "terminal" | "unknown";
+};
+
+export async function describeOwnershipHolderLiveness(
+  dbOrTx: Pick<Db, "select">,
+  holder: { checkoutRunId: string | null; executionRunId: string | null },
+): Promise<OwnershipHolderLiveness> {
+  const readStatus = async (runId: string | null) => {
+    if (!runId) return null;
+    return dbOrTx
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows: Array<{ status: string }>) => rows[0]?.status ?? null);
+  };
+
+  const [checkoutRunStatus, executionRunStatus] = await Promise.all([
+    readStatus(holder.checkoutRunId),
+    readStatus(holder.executionRunId),
+  ]);
+
+  const named = [
+    { runId: holder.checkoutRunId, status: checkoutRunStatus },
+    { runId: holder.executionRunId, status: executionRunStatus },
+  ].filter((entry) => entry.runId != null);
+
+  // No run is named, or a named run's row could not be resolved. Either way the
+  // caller cannot be told to yield, so report the gap instead of guessing.
+  const holderLiveness = named.length === 0
+    ? "unknown"
+    : named.some((entry) => entry.status != null && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(entry.status))
+    ? "live"
+    : named.every((entry) => entry.status != null)
+    ? "terminal"
+    : "unknown";
+
+  return { checkoutRunStatus, executionRunStatus, holderLiveness };
+}
+
+/**
  * Returns whether a specific run's sync-back on a specific execution workspace
  * has settled — i.e. the accept/review gates that guard against a still-in-flight
  * worktree sync no longer need to block on this run.
@@ -8628,23 +8683,31 @@ export function issueService(db: Db) {
       const resolvedLatest = await resolveOwnership(latest);
       if (resolvedLatest.ownership) return resolvedLatest.ownership;
       if (resolvedLatest.latest) {
+        const holder = await describeOwnershipHolderLiveness(db, resolvedLatest.latest);
         throw conflict("Issue run ownership conflict", {
           issueId: resolvedLatest.latest.id,
           status: resolvedLatest.latest.status,
           assigneeAgentId: resolvedLatest.latest.assigneeAgentId,
           checkoutRunId: resolvedLatest.latest.checkoutRunId,
           executionRunId: resolvedLatest.latest.executionRunId,
+          checkoutRunStatus: holder.checkoutRunStatus,
+          executionRunStatus: holder.executionRunStatus,
+          holderLiveness: holder.holderLiveness,
           actorAgentId,
           actorRunId,
         });
       }
 
+      const holder = await describeOwnershipHolderLiveness(db, latest);
       throw conflict("Issue run ownership conflict", {
         issueId: latest.id,
         status: latest.status,
         assigneeAgentId: latest.assigneeAgentId,
         checkoutRunId: latest.checkoutRunId,
         executionRunId: latest.executionRunId,
+        checkoutRunStatus: holder.checkoutRunStatus,
+        executionRunStatus: holder.executionRunStatus,
+        holderLiveness: holder.holderLiveness,
         actorAgentId,
         actorRunId,
       });

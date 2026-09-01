@@ -19,6 +19,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+import { describeOwnershipHolderLiveness, issueService } from "../services/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -33,11 +34,13 @@ if (!embeddedPostgresSupport.supported) {
 
 describeEmbeddedPostgres("stale issue execution lock routes", () => {
   let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-stale-execution-lock-routes-");
     db = createDb(tempDb.connectionString);
+    svc = issueService(db);
   }, 20_000);
 
   afterEach(async () => {
@@ -347,6 +350,193 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
 
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     expect(res.body?.error).toBe("Issue run ownership conflict");
+    expect(res.body?.details).toMatchObject({
+      checkoutRunId: liveOwnerRunId,
+      executionRunId: liveOwnerRunId,
+      checkoutRunStatus: "running",
+      executionRunStatus: "running",
+      holderLiveness: "live",
+    });
+  });
+
+  // The holder-liveness fields let a 409 caller pick between two opposite
+  // responses: yield to a live sibling run, or retry because the lock is
+  // terminal/unresolvable and the self-heal paths will clear it. The route
+  // test above covers the payload reaching the HTTP body; these cover the two
+  // emit sites in assertCheckoutOwner without the unrelated route guards.
+  describe("assertCheckoutOwner conflict payloads", () => {
+    async function seedSecondTerminalRun(companyId: string, agentId: string) {
+      const staleActorRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: staleActorRunId,
+        companyId,
+        agentId,
+        status: "cancelled",
+        invocationSource: "manual",
+        finishedAt: new Date(),
+      });
+      return staleActorRunId;
+    }
+
+    it("reports live when a terminal checkout holder is pinned by a live execution holder", async () => {
+      const { companyId, agentId, failedRunId } = await seedCompanyAgentAndRuns();
+      const staleActorRunId = await seedSecondTerminalRun(companyId, agentId);
+      const liveExecutionRunId = randomUUID();
+      const issueId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: liveExecutionRunId,
+        companyId,
+        agentId,
+        status: "running",
+        invocationSource: "manual",
+        startedAt: new Date(),
+      });
+      // clearCheckoutRunIfTerminal refuses to clear the terminal checkout run
+      // while a different execution run is still live, so both ids survive to
+      // the conflict payload with disagreeing statuses.
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Terminal checkout pinned by live execution",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agentId,
+        checkoutRunId: failedRunId,
+        executionRunId: liveExecutionRunId,
+        executionAgentNameKey: "codexcoder",
+        executionLockedAt: new Date(),
+      });
+
+      await expect(svc.assertCheckoutOwner(issueId, agentId, staleActorRunId)).rejects.toMatchObject({
+        status: 409,
+        message: "Issue run ownership conflict",
+        details: {
+          checkoutRunId: failedRunId,
+          executionRunId: liveExecutionRunId,
+          checkoutRunStatus: "failed",
+          executionRunStatus: "running",
+          holderLiveness: "live",
+        },
+      });
+    });
+
+    it("reports unknown when no run holds the lock", async () => {
+      const { companyId, agentId } = await seedCompanyAgentAndRuns();
+      const staleActorRunId = await seedSecondTerminalRun(companyId, agentId);
+      const issueId = randomUUID();
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Unheld lock",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agentId,
+        checkoutRunId: null,
+        executionRunId: null,
+      });
+
+      await expect(svc.assertCheckoutOwner(issueId, agentId, staleActorRunId)).rejects.toMatchObject({
+        status: 409,
+        message: "Issue run ownership conflict",
+        details: {
+          checkoutRunId: null,
+          executionRunId: null,
+          checkoutRunStatus: null,
+          executionRunStatus: null,
+          holderLiveness: "unknown",
+        },
+      });
+    });
+
+    it("reports unknown after the self-heal clears a wholly terminal holder", async () => {
+      const { companyId, agentId, failedRunId } = await seedCompanyAgentAndRuns();
+      const staleActorRunId = await seedSecondTerminalRun(companyId, agentId);
+      const issueId = randomUUID();
+      // A wholly terminal holder is cleared by clearExecutionRunIfTerminal /
+      // clearCheckoutRunIfTerminal before the payload is built, so these emit
+      // sites report "unknown" here. holderLiveness "terminal" needs the holder
+      // to reach a terminal status after those clears run, which is a race;
+      // the resolver covers that shape directly below.
+      await db.insert(issues).values({
+        id: issueId,
+        companyId,
+        title: "Wholly terminal holder",
+        status: "in_progress",
+        priority: "high",
+        assigneeAgentId: agentId,
+        checkoutRunId: failedRunId,
+        executionRunId: failedRunId,
+        executionAgentNameKey: "codexcoder",
+        executionLockedAt: new Date(),
+      });
+
+      await expect(svc.assertCheckoutOwner(issueId, agentId, staleActorRunId)).rejects.toMatchObject({
+        status: 409,
+        message: "Issue run ownership conflict",
+        details: {
+          checkoutRunStatus: null,
+          executionRunStatus: null,
+          holderLiveness: "unknown",
+        },
+      });
+    });
+  });
+
+  describe("describeOwnershipHolderLiveness", () => {
+    it("reports terminal when every holder run has reached a terminal status", async () => {
+      const { failedRunId } = await seedCompanyAgentAndRuns();
+
+      await expect(
+        describeOwnershipHolderLiveness(db, {
+          checkoutRunId: failedRunId,
+          executionRunId: failedRunId,
+        }),
+      ).resolves.toEqual({
+        checkoutRunStatus: "failed",
+        executionRunStatus: "failed",
+        holderLiveness: "terminal",
+      });
+    });
+
+    it("reports a missing holder run row as null status and unknown liveness", async () => {
+      await seedCompanyAgentAndRuns();
+
+      await expect(
+        describeOwnershipHolderLiveness(db, {
+          checkoutRunId: randomUUID(),
+          executionRunId: null,
+        }),
+      ).resolves.toEqual({
+        checkoutRunStatus: null,
+        executionRunStatus: null,
+        holderLiveness: "unknown",
+      });
+    });
+
+    it("lets a live holder win over a terminal one", async () => {
+      const { failedRunId, currentRunId } = await seedCompanyAgentAndRuns();
+
+      await expect(
+        describeOwnershipHolderLiveness(db, {
+          checkoutRunId: failedRunId,
+          executionRunId: currentRunId,
+        }),
+      ).resolves.toEqual({
+        checkoutRunStatus: "failed",
+        executionRunStatus: "running",
+        holderLiveness: "live",
+      });
+    });
+
+    it("reports unknown when no holder run is named", async () => {
+      await expect(
+        describeOwnershipHolderLiveness(db, { checkoutRunId: null, executionRunId: null }),
+      ).resolves.toEqual({
+        checkoutRunStatus: null,
+        executionRunStatus: null,
+        holderLiveness: "unknown",
+      });
+    });
   });
 
   it("preserves live checkout ownership on checkout conflicts without retry side effects", async () => {
