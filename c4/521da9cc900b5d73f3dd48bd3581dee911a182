@@ -1,0 +1,18 @@
+Dockerfile
+  h_f81d3033687456 123-156,177-178
+packages/adapters/codex-local/src/server/codex-home.test.ts
+  h_f81d3033687456 387-404,960-965,990
+packages/adapters/codex-local/src/server/codex-home.ts
+  h_f81d3033687456 10-16,30-31,684
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "c4521da9cc900b5d73f3dd48bd3581dee911a182",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
