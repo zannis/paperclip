@@ -1,0 +1,14 @@
+packages/paperclip-runner/runner/crates/runner-core/tests/codex_provider.rs
+  h_f81d3033687456 1289-1313,1437-1443,1445-1479,1481
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "05c241d75869cdad4eb90c02cc77880282c55607",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
