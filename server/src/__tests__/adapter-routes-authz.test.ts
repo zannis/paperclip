@@ -248,11 +248,11 @@ describe.sequential("adapter management route authorization", () => {
     registerRouteMocks();
     vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
 
-    const [routes, middleware, registry] = await Promise.all([
-      import("../routes/adapters.js"),
-      import("../middleware/index.js"),
-      vi.importActual<typeof import("../adapters/registry.js")>("../adapters/registry.js"),
-    ]);
+    // Sequential on purpose: concurrent vi.importActual() calls can drop a
+    // factory mock, because Vitest keeps one shared mock-resolution callstack.
+    const routes = await import("../routes/adapters.js");
+    const middleware = await import("../middleware/index.js");
+    const registry = await vi.importActual<typeof import("../adapters/registry.js")>("../adapters/registry.js");
     adapterRoutes = routes.adapterRoutes;
     errorHandler = middleware.errorHandler;
     registerServerAdapter = registry.registerServerAdapter;
