@@ -1,0 +1,23 @@
+server/src/__tests__/execution-workspace-policy.test.ts
+  s_c68e1dbe3b756f::t_04a3ba82e1bc4b 9,535-844
+server/src/services/execution-workspace-policy.ts
+  s_c68e1dbe3b756f::t_1ac5072fb1a2ba 167-377,526-528,531
+server/src/services/heartbeat.ts
+  s_c68e1dbe3b756f::t_ccd712f6f445b5 292,294,17821-17825,18503-18559,19356-19358
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "7527b1522b7eb652230bb5f993901106403240b0",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
