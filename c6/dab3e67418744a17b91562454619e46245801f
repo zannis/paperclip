@@ -1,0 +1,33 @@
+server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts
+  s_c68e1dbe3b756f::t_88a909555694d4 22-26,90-91,164-165,441-480
+server/src/__tests__/recovery-stale-issue-lock-sweep.test.ts
+  s_9a0fa3387f1322::t_0753206d99c89c 20-24,332-381
+server/src/services/local-service-supervisor.ts
+  s_9a0fa3387f1322::t_19639569dc4357 218,245-253,466,606
+server/src/services/recovery/service.ts
+  s_c68e1dbe3b756f::t_bcb0705ccd10a7 36,203,1680,1707,5800
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "c6dab3e67418744a17b91562454619e46245801f",
+  "prompts": {},
+  "sessions": {
+    "s_9a0fa3387f1322": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "69862a81-f111-4edf-8d79-53f83fff59b1",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
