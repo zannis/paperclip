@@ -316,6 +316,13 @@ export interface ResumeCapabilityLiveSessionInput {
   sessionId: string;
   attemptId: string;
   resumeOf: string;
+  // Sets the turn timeout of the session from this resume onward. The
+  // value persists into the saved checkpoint, so a later resume() call
+  // that omits this option keeps the value set here.
+  // A caller with a bounded recovery window should pass a value smaller
+  // than that window, so a stall inside the resumed turn reports which
+  // turn stalled instead of surfacing only as the caller's own timeout.
+  turnTimeoutMs?: number;
 }
 
 export interface CapabilityLiveTurnResult {
@@ -932,6 +939,9 @@ export class CapabilityLiveSessionService {
       status: "starting",
       attempts,
       currentAttemptId: input.attemptId,
+      ...(input.turnTimeoutMs === undefined ? {} : {
+        config: { ...snapshot.config, turnTimeoutMs: input.turnTimeoutMs },
+      }),
     };
     await this.#store.save(prepared);
     try {
