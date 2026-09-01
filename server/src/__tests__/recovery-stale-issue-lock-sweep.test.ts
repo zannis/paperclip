@@ -329,6 +329,7 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
       executionRunId: issues.executionRunId,
     }).from(issues).where(eq(issues.id, issueId)))
       .resolves.toEqual([{ checkoutRunId: runningRunId, executionRunId: runningRunId }]);
+  });
 
   // The zombie shape is built from /proc, so this case only runs on Linux.
   it.skipIf(process.platform !== "linux")("terminalizes an orphaned running run whose recorded pid is an unreaped zombie, then clears the lock", async () => {

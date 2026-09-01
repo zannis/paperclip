@@ -362,17 +362,6 @@ async function spawnOrphanedProcessGroup() {
   };
 }
 
-function readLinuxProcessState(pid: number) {
-  try {
-    const stat = fsSync.readFileSync(`/proc/${pid}/stat`, "utf8");
-    const commandEnd = stat.lastIndexOf(")");
-    if (commandEnd < 0) return null;
-    return stat.slice(commandEnd + 1).trim().split(/\s+/)[0] ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function waitForZombiePid(pid: number, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1274,10 +1263,14 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // therefore returns while the last two writes are still in flight, so any
     // unpolled read of them races the writer. Waiting here for the activity row
     // (the pass's final write) makes this helper a barrier for the whole pass.
-    const escalationActivity = await waitForActivityEvent(db, input.issueId, (event) =>
-      (event.details as Record<string, unknown> | null)?.recoveryActionId === action.id,
-    );
-    expect(escalationActivity).toBeTruthy();
+    // Infra terminations never escalate to the board, so their pass writes no
+    // recovery-action activity row — the redispatch waits above are their barrier.
+    if (!infraTerminated) {
+      const escalationActivity = await waitForActivityEvent(db, input.issueId, (event) =>
+        (event.details as Record<string, unknown> | null)?.recoveryActionId === action.id,
+      );
+      expect(escalationActivity).toBeTruthy();
+    }
 
     const sourceIssue = await db
       .select()

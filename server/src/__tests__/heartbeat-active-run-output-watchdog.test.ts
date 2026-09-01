@@ -476,8 +476,6 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     }
   });
 
-  it("still escalates terminal source issues without same-run terminal evidence", async () => {
-
   it("does not fold or create review work for a terminal source without same-run evidence", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
     const seeded = await seedRunningRun({
