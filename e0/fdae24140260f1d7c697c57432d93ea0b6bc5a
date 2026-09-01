@@ -1,0 +1,19 @@
+server/src/services/local-service-supervisor.ts
+  s_c68e1dbe3b756f::t_f0120522f1cf4d 400,405-409
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "e0fdae24140260f1d7c697c57432d93ea0b6bc5a",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
