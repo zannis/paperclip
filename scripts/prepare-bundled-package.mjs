@@ -147,15 +147,20 @@ export function prepareBundledPackage(sourceDir, destinationDir) {
 
   rmSync(destinationDir, { recursive: true, force: true });
   mkdirSync(destinationDir, { recursive: true });
-  // Git installs stage the server package without release.sh's prepack step,
-  // so the ui-dist the manifest promises does not exist yet. Build it here —
-  // the prepare script reuses ui/dist when the earlier build already made it.
+  // Git installs stage the server package without release.sh's staging steps,
+  // so files the manifest promises do not exist yet: ui-dist (release.sh runs
+  // prepack's prepare:ui-dist) and skills (release.sh copies the repo-root
+  // catalog into the package dir). Recreate both here; the ui prepare script
+  // reuses ui/dist when the earlier build already made it.
   if ((sourcePackage.files ?? []).includes("ui-dist") && !existsSync(resolve(sourceDir, "ui-dist"))) {
     execFileSync("bash", [resolve(repoRoot, "scripts/prepare-server-ui-dist.sh")], {
       cwd: repoRoot,
       stdio: "inherit",
       env: { ...process.env, PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" },
     });
+  }
+  if ((sourcePackage.files ?? []).includes("skills") && !existsSync(resolve(sourceDir, "skills")) && existsSync(resolve(repoRoot, "skills"))) {
+    cpSync(resolve(repoRoot, "skills"), resolve(sourceDir, "skills"), { recursive: true });
   }
   for (const entry of sourcePackage.files ?? []) {
     cpSync(resolve(sourceDir, entry), resolve(destinationDir, entry), { recursive: true });
