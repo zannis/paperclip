@@ -1,0 +1,19 @@
+scripts/prepare-bundled-package.mjs
+  s_c68e1dbe3b756f::t_5607c005624136 150-154,162-164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "a83aa20f8cf7b7a28426101e3deb69165afed41e",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
