@@ -1,0 +1,19 @@
+server/src/__tests__/heartbeat-suppressed-execution-workspace-policy.test.ts
+  s_c68e1dbe3b756f::t_fc11d738be405c 1-543
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "633172c8ad0b7c768019d7f383b2e46d933dbc05",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
