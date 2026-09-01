@@ -1,0 +1,31 @@
+server/src/__tests__/agent-live-run-routes.test.ts
+  s_c68e1dbe3b756f::t_fd316ce5096dd9 135-142,145,439-547
+server/src/__tests__/openapi-routes.test.ts
+  s_c68e1dbe3b756f::t_6d3cd3fd97db93 371-385
+server/src/routes/agents.ts
+  s_c68e1dbe3b756f::t_8a0b4570c4772a 6214-6216,6218,6224
+server/src/routes/openapi.ts
+  s_c68e1dbe3b756f::t_2eaffe8c33fa6f 4582-4584,4586
+ui/src/api/client.test.ts
+  s_c68e1dbe3b756f::t_731ccc5827e76c 157-171
+ui/src/api/heartbeats.test.ts
+  s_c68e1dbe3b756f::t_72edbfc1c6e007 32-53
+ui/src/api/heartbeats.ts
+  s_c68e1dbe3b756f::t_dd30cc3412e045 217-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "a217bee0e90a597c93d1402a7be643ab6231beb1",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
