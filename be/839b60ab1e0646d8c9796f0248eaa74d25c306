@@ -1,0 +1,22 @@
+docs/api/issues.md
+  h_f81d3033687456 54-72
+server/src/__tests__/issue-create-project-inference-routes.test.ts
+  h_f81d3033687456 1-358
+server/src/__tests__/issue-project-inference.test.ts
+  h_f81d3033687456 1-168
+server/src/routes/issues.ts
+  h_f81d3033687456 210,3061-3074,9146-9158,9162,9184,9191
+server/src/services/issue-project-inference.ts
+  h_f81d3033687456 1-336
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "be839b60ab1e0646d8c9796f0248eaa74d25c306",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
