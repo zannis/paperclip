@@ -1,0 +1,103 @@
+server/src/__tests__/adapter-auth-signal-routes.test.ts
+  s_8c64ed9ef3e931::t_85ec64f5743359 128-133
+server/src/__tests__/adapter-model-refresh-routes.test.ts
+  s_8c64ed9ef3e931::t_b1cc5aa2615614 107-112
+server/src/__tests__/adapter-routes-authz.test.ts
+  s_c68e1dbe3b756f::t_04f33efcb2e08f 251-255
+server/src/__tests__/agent-adapter-validation-routes.test.ts
+  s_8c64ed9ef3e931::t_c74f8c4fc64888 150-155
+server/src/__tests__/agent-device-login-routes.test.ts
+  s_8c64ed9ef3e931::t_53102bae7099aa 325-330
+server/src/__tests__/agent-instructions-routes.test.ts
+  s_8c64ed9ef3e931::t_fbe64b960ed4de 118-123
+server/src/__tests__/agent-live-run-routes.test.ts
+  s_c68e1dbe3b756f::t_b9a2a78a51227a 147-152
+server/src/__tests__/agent-permissions-routes.test.ts
+  s_8c64ed9ef3e931::t_32d99ae4e91a83 267-272
+server/src/__tests__/agent-skills-routes.test.ts
+  s_8c64ed9ef3e931::t_6061271ab3e25b 181-186
+server/src/__tests__/agent-test-environment-routes.test.ts
+  s_8c64ed9ef3e931::t_32360d35d0573c 104-109
+server/src/__tests__/artifact-review-document-routes.test.ts
+  s_8c64ed9ef3e931::t_a013e419b93b57 140-145
+server/src/__tests__/built-in-agent-routes.test.ts
+  s_8c64ed9ef3e931::t_1b841a73208ed8 87-92
+server/src/__tests__/company-branding-route.test.ts
+  s_8c64ed9ef3e931::t_d17bce71de8166 80-85
+server/src/__tests__/company-skills-routes.test.ts
+  s_8c64ed9ef3e931::t_093c5eafff50b4 201-206
+server/src/__tests__/concurrent-import-actual-guard.test.ts
+  s_8c64ed9ef3e931::t_76bb1c27f9edd4 1-130
+server/src/__tests__/costs-service.test.ts
+  s_8c64ed9ef3e931::t_08ab6c7d310fe1 133-138
+server/src/__tests__/document-annotation-routes.test.ts
+  s_8c64ed9ef3e931::t_0df31a58b5f901 161-166
+server/src/__tests__/external-object-routes.test.ts
+  s_8c64ed9ef3e931::t_5f6e1ba03942e0 103-108
+server/src/__tests__/instance-settings-routes.test.ts
+  s_8c64ed9ef3e931::t_1eaad67d32ad8e 56-61
+server/src/__tests__/invite-summary-route.test.ts
+  s_8c64ed9ef3e931::t_8c2369549ac271 52-57
+server/src/__tests__/issue-activity-events-routes.test.ts
+  s_8c64ed9ef3e931::t_55da1314dc9413 130-135
+server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+  s_8c64ed9ef3e931::t_13269dee88301a 351-356
+server/src/__tests__/issue-assigned-backlog-contract-routes.test.ts
+  s_8c64ed9ef3e931::t_689350a8221d05 118-123
+server/src/__tests__/issue-attachment-routes.test.ts
+  s_8c64ed9ef3e931::t_32f377d4a6ebc2 158-163
+server/src/__tests__/issue-closed-workspace-routes.test.ts
+  s_8c64ed9ef3e931::t_ba8483e6ac8a77 199-204
+server/src/__tests__/issue-dependency-wakeups-routes.test.ts
+  s_8c64ed9ef3e931::t_47a0d3e3b6dac1 135-140
+server/src/__tests__/issue-document-restore-routes.test.ts
+  s_8c64ed9ef3e931::t_8a6c095ca568b8 184-189
+server/src/__tests__/issue-telemetry-routes.test.ts
+  s_8c64ed9ef3e931::t_11ed9e444ccec8 133-138
+server/src/__tests__/issue-update-comment-wakeup-routes.test.ts
+  s_8c64ed9ef3e931::t_65fd1efacffc13 193-198
+server/src/__tests__/issue-workspace-command-authz.test.ts
+  s_8c64ed9ef3e931::t_5d325945e2cb26 155-160
+server/src/__tests__/llms-routes.test.ts
+  s_8c64ed9ef3e931::t_99776623ce11fa 30-35
+server/src/__tests__/project-routes-env.test.ts
+  s_8c64ed9ef3e931::t_fc67ac4b7e0e64 85-90
+server/src/__tests__/project-workspace-managed-sandbox-routes.test.ts
+  s_8c64ed9ef3e931::t_a44e005ffe2d20 107-112
+server/src/__tests__/routine-document-annotation-routes.test.ts
+  s_8c64ed9ef3e931::t_1a6ffd025c01f6 129-134
+server/src/__tests__/routines-routes.test.ts
+  s_8c64ed9ef3e931::t_e52ca463b66197 169-174
+server/src/__tests__/summary-slot-routes.test.ts
+  s_8c64ed9ef3e931::t_68730855b28442 75-80
+server/src/__tests__/teams-catalog-routes.test.ts
+  s_8c64ed9ef3e931::t_46c15a7b5913e4 37-42
+server/src/__tests__/user-profile-routes.test.ts
+  s_8c64ed9ef3e931::t_96e9984ad1c7e6 49-54
+server/src/routes/setup-token-route.test.ts
+  s_8c64ed9ef3e931::t_b51b7662b197d2 355-362,365
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "aea9c8d70010514367b9708b38a174de18d1f9d2",
+  "prompts": {},
+  "sessions": {
+    "s_8c64ed9ef3e931": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124804bf-82be-4ca0-b1c0-2c9416f697d6",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
