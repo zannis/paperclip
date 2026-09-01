@@ -33,7 +33,7 @@ import { runningProcesses } from "../../adapters/index.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
-import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local-service-supervisor.js";
+import { isProcessGroupAlive, isProcessPidAlive, terminateLocalService } from "../local-service-supervisor.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { isUniqueViolation } from "../../db-errors.js";
 import { logActivity } from "../activity-log.js";
@@ -200,7 +200,7 @@ const NATIVE_RUNNER_RECOVERY_CAUSES = new Set<StrandedRecoveryCause>([
 ]);
 
 export function shouldRouteRecoveryToOriginalAgent(cause: StrandedRecoveryCause): boolean {
-  return cause === "process_lost"
+  return cause === "infra_terminated"
     || cause === SUCCESSFUL_RUN_MISSING_STATE_REASON
     || cause === "codex_output_inactivity_monitor"
     || NATIVE_RUNNER_RECOVERY_CAUSES.has(cause);
@@ -1677,7 +1677,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     }
 
     const wasAlive =
-      (typeof pid === "number" && isPidAlive(pid)) ||
+      (typeof pid === "number" && isProcessPidAlive(pid)) ||
       (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
     if (!wasAlive) {
       runningProcesses.delete(input.run.id);
@@ -1704,7 +1704,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       );
       runningProcesses.delete(input.run.id);
       const stillAlive =
-        (typeof pid === "number" && isPidAlive(pid)) ||
+        (typeof pid === "number" && isProcessPidAlive(pid)) ||
         (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
       return {
         attempted: true,
@@ -5797,7 +5797,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     if (!runningProcesses.get(run.id)) {
       if (typeof pid === "number" || typeof processGroupId === "number") {
         const processAlive =
-          (typeof pid === "number" && isPidAlive(pid)) ||
+          (typeof pid === "number" && isProcessPidAlive(pid)) ||
           (typeof processGroupId === "number" && isProcessGroupAlive(processGroupId));
         processGone = !processAlive;
       }

@@ -20,6 +20,11 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import {
+  disposeZombieLeadProcessGroup,
+  readLinuxProcessState,
+  spawnZombieLeadProcessGroup,
+} from "./helpers/zombie-process.js";
+import {
   ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS,
   ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS,
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
@@ -82,6 +87,8 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     sourceStatus?: "in_progress" | "blocked" | "done" | "cancelled";
     sourceOriginKind?: string;
     sameRunTerminalEvidence?: boolean;
+    processPid?: number;
+    processGroupId?: number | null;
   }) {
     const companyId = randomUUID();
     const managerId = randomUUID();
@@ -154,6 +161,8 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       lastOutputSeq: opts.withOutput ? 3 : 0,
       lastOutputStream: opts.withOutput ? "stdout" : null,
       contextSnapshot: { issueId },
+      processPid: opts.processPid ?? null,
+      processGroupId: opts.processGroupId ?? null,
       logBytes: 0,
     });
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
@@ -428,6 +437,46 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     ))).toHaveLength(0);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.companyId, seeded.companyId))).toHaveLength(0);
   });
+
+  // The zombie shape is built from /proc, so this case only runs on Linux.
+  it.skipIf(process.platform !== "linux")("reports a folded run's recorded pid as not running when it is an unreaped zombie", async () => {
+    const zombie = await spawnZombieLeadProcessGroup();
+    try {
+      expect(readLinuxProcessState(zombie.zombiePid)).toBe("Z");
+      const now = new Date("2026-04-22T20:00:00.000Z");
+      const { companyId, runId } = await seedRunningRun({
+        now,
+        ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+        sourceStatus: "done",
+        sameRunTerminalEvidence: true,
+        // The run recorded a pid that has since terminated without being
+        // reaped. Signalling it can never do anything, so the fold must report
+        // it as already gone instead of running a terminate/verify cycle
+        // against it and then reporting the failure to kill it.
+        processPid: zombie.zombiePid,
+      });
+      const heartbeat = heartbeatService(db);
+
+      const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+      expect(result).toMatchObject({ created: 0, folded: 1, skipped: 0 });
+
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(run?.status).toBe("succeeded");
+      expect(run?.resultJson).toMatchObject({
+        sourceResolvedWatchdogFold: {
+          cleanup: {
+            attempted: false,
+            outcome: "not_running",
+            pid: zombie.zombiePid,
+          },
+        },
+      });
+    } finally {
+      disposeZombieLeadProcessGroup(zombie);
+    }
+  });
+
+  it("still escalates terminal source issues without same-run terminal evidence", async () => {
 
   it("does not fold or create review work for a terminal source without same-run evidence", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
