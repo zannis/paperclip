@@ -1,0 +1,19 @@
+server/src/services/heartbeat.ts
+  s_c68e1dbe3b756f::t_a6d9a8ecdb9f5f 277,12737,16774
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "caa86f4c59c9d9c3c113bcf36b8f6e40d2ee83fb",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
