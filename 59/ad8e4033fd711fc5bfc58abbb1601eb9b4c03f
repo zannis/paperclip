@@ -1,0 +1,25 @@
+packages/adapters/codex-local/src/server/codex-home.ts
+  s_c6ca2d5704ce8d::t_f7835e2ff35f77 30-31
+  s_c6ca2d5704ce8d::t_3dfa6883b28be4 684
+  s_c6ca2d5704ce8d::t_1d0827a6df87e4 10-16
+Dockerfile
+  s_c6ca2d5704ce8d::t_f23e1e0bd18426 90-104,106-120
+packages/adapters/codex-local/src/server/codex-home.test.ts
+  s_c6ca2d5704ce8d::t_f9c70aabdcd4ea 387-404,960-965,990
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "59ad8e4033fd711fc5bfc58abbb1601eb9b4c03f",
+  "prompts": {},
+  "sessions": {
+    "s_c6ca2d5704ce8d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e5b45dff-27e8-4f6e-b6e2-015097d8954d",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
