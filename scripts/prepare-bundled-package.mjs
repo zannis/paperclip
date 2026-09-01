@@ -172,6 +172,14 @@ export function prepareBundledPackage(sourceDir, destinationDir) {
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
   const publishManifest = materializePublishManifest(sourcePackage);
+  // Everything the manifest promises is already materialized in the staged
+  // copy, and the staged dir has no workspace or ../scripts to build from —
+  // npm pack must not re-run the source package's lifecycle builds here.
+  if (publishManifest.scripts) {
+    for (const hook of ["prepack", "postpack", "prepare", "prepublishOnly"]) {
+      delete publishManifest.scripts[hook];
+    }
+  }
   const installManifest = createBundledInstallManifest(publishManifest, bundledDependencies);
   writeFileSync(deployedPackagePath, `${JSON.stringify(installManifest, null, 2)}\n`);
 
