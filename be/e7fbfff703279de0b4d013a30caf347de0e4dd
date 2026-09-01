@@ -1,0 +1,28 @@
+server/src/__tests__/heartbeat-process-recovery.test.ts
+  h_f81d3033687456 109,1012-1017,1034,1047-1054,1072-1115,1553,4406-4573,6996-7000,7419-7423
+server/src/__tests__/issue-recovery-actions.test.ts
+  h_f81d3033687456 611-613,667-761
+server/src/__tests__/productivity-review-service.test.ts
+  h_f81d3033687456 123-128,134-135,140-144,225-302,826-893
+server/src/services/heartbeat-stop-metadata.ts
+  h_f81d3033687456 15-41
+server/src/services/productivity-review.ts
+  h_f81d3033687456 16,52-69,109-113,131-147,460,491,495,504-505,513,519-544,563,624,635,661,942,947,974-989,993,1045-1048,1053-1054
+server/src/services/recovery/infra-redispatch-backoff.test.ts
+  h_f81d3033687456 1-144
+server/src/services/recovery/infra-redispatch-backoff.ts
+  h_f81d3033687456 1-159
+server/src/services/recovery/service.ts
+  h_f81d3033687456 58,74-79,183,232-233,301-306,313-316,423-428,918-1040,2278,2290,2311,2316-2317,2333,2343,2368,2373,2375-2377,2393-2397,2406,2410-2411,2416,2433,2437-2439,3391,3394-3395,3400,3409,3728,3875-3898
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "bee7fbfff703279de0b4d013a30caf347de0e4dd",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
