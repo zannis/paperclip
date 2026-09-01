@@ -1,0 +1,25 @@
+packages/paperclip-runner/src/contracts/durable-recovery.ts
+  s_c68e1dbe3b756f::t_302b53bc791c63 40-56,98-104
+packages/paperclip-runner/src/control-plane/durable-prp-control-plane.test.ts
+  s_c68e1dbe3b756f::t_aa8f97787e9ec9 675-768
+packages/paperclip-runner/src/control-plane/durable-prp-control-plane.ts
+  s_c68e1dbe3b756f::t_2346b6eae868a4 383-389,1648-1652,1656-1657
+packages/paperclip-runner/src/control-plane/prp-transport-types.ts
+  s_c68e1dbe3b756f::t_4a365abf6731d5 17-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ca2f3aeb44a99035f6637d0de073297c89235763",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
