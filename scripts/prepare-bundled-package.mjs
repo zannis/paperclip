@@ -147,6 +147,16 @@ export function prepareBundledPackage(sourceDir, destinationDir) {
 
   rmSync(destinationDir, { recursive: true, force: true });
   mkdirSync(destinationDir, { recursive: true });
+  // Git installs stage the server package without release.sh's prepack step,
+  // so the ui-dist the manifest promises does not exist yet. Build it here —
+  // the prepare script reuses ui/dist when the earlier build already made it.
+  if ((sourcePackage.files ?? []).includes("ui-dist") && !existsSync(resolve(sourceDir, "ui-dist"))) {
+    execFileSync("bash", [resolve(repoRoot, "scripts/prepare-server-ui-dist.sh")], {
+      cwd: repoRoot,
+      stdio: "inherit",
+      env: { ...process.env, PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" },
+    });
+  }
   for (const entry of sourcePackage.files ?? []) {
     cpSync(resolve(sourceDir, entry), resolve(destinationDir, entry), { recursive: true });
   }
