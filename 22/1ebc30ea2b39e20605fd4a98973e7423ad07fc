@@ -1,0 +1,21 @@
+server/src/__tests__/local-service-supervisor.test.ts
+  s_c68e1dbe3b756f::t_f2ca67057bf59a 35-37
+server/src/services/local-service-supervisor.ts
+  s_c68e1dbe3b756f::t_d1116e5dd31395 3,67-92,653,684-702,704-725,727,744,752-754
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "221ebc30ea2b39e20605fd4a98973e7423ad07fc",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
