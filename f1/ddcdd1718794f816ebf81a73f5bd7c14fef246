@@ -1,0 +1,21 @@
+server/src/__tests__/recovery-stale-issue-lock-sweep.test.ts
+  s_c68e1dbe3b756f::t_95fe6f285163c9 332
+server/src/__tests__/heartbeat-process-recovery.test.ts
+  s_c68e1dbe3b756f::t_8dca019b340565 1266-1273
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "f1ddcdd1718794f816ebf81a73f5bd7c14fef246",
+  "prompts": {},
+  "sessions": {
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
