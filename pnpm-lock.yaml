@@ -17,10 +17,10 @@ patchedDependencies:
     hash: grbydorkxatbzksnwwfuawwtim
     path: patches/@agentclientprotocol__codex-acp@1.6.2.patch
   acpx@0.12.0:
-    hash: b2ggqg6aj4hdob4whk6vq6jmc4
+    hash: n6ino662uinqqs5v2tep7nroou
     path: patches/acpx@0.12.0.patch
   acpx@0.13.1:
-    hash: lzpwjtiaybzoijy455dfycwavu
+    hash: twzb3z6gjmhbh2brkebl5kw3om
     path: patches/acpx@0.13.1.patch
   embedded-postgres@18.1.0-beta.16:
     hash: 55uhvnotpqyiy37rn3pqpukhei
@@ -132,7 +132,7 @@ importers:
         version: link:../shared
       acpx:
         specifier: 0.12.0
-        version: 0.12.0(patch_hash=b2ggqg6aj4hdob4whk6vq6jmc4)
+        version: 0.12.0(patch_hash=n6ino662uinqqs5v2tep7nroou)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -470,7 +470,7 @@ importers:
         version: 1.6.2(patch_hash=grbydorkxatbzksnwwfuawwtim)
       acpx:
         specifier: 0.13.1
-        version: 0.13.1(patch_hash=lzpwjtiaybzoijy455dfycwavu)
+        version: 0.13.1(patch_hash=twzb3z6gjmhbh2brkebl5kw3om)
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -883,7 +883,7 @@ importers:
         version: 0.6.1(better-auth@1.7.0(@opentelemetry/api@1.9.1)(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(kysely@0.29.5)(pg@8.18.0)(postgres@3.4.9))(pg@8.18.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.10(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(esbuild@0.28.2)(jiti@2.7.0)(jsdom@30.0.1(@noble/hashes@2.3.0))(tsx@4.23.12)))
       acpx:
         specifier: 0.13.1
-        version: 0.13.1(patch_hash=lzpwjtiaybzoijy455dfycwavu)
+        version: 0.13.1(patch_hash=twzb3z6gjmhbh2brkebl5kw3om)
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -7136,7 +7136,6 @@ packages:
 
   opencode-ai@1.18.17:
     resolution: {integrity: sha512-Pc2D3Y6iQ3BAjcKw9E+9J7VTWNazIwFknFfrolufMCrJ0FLxOIZfndoHmJrx4x1oqpK2CPAqK9D2V6nsp6Oebw==}
-    cpu: [arm64, x64]
     os: [darwin, linux, win32]
     hasBin: true
 
@@ -12414,7 +12413,7 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  acpx@0.12.0(patch_hash=b2ggqg6aj4hdob4whk6vq6jmc4):
+  acpx@0.12.0(patch_hash=n6ino662uinqqs5v2tep7nroou):
     dependencies:
       '@agentclientprotocol/sdk': 1.2.1(zod@4.4.3)
       commander: 15.0.0
@@ -12426,7 +12425,7 @@ snapshots:
       - bare-buffer
       - react-native-b4a
 
-  acpx@0.13.1(patch_hash=lzpwjtiaybzoijy455dfycwavu):
+  acpx@0.13.1(patch_hash=twzb3z6gjmhbh2brkebl5kw3om):
     dependencies:
       '@agentclientprotocol/sdk': 1.4.0(zod@4.4.3)
       commander: 15.0.0
