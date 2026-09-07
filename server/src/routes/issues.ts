@@ -4368,6 +4368,53 @@ export function issueRoutes(
     });
   }
 
+  // Resolving an interaction takes it out of the issue's waiting paths, which
+  // are a fingerprint input in their own right — so without this the resolution
+  // reads as somebody else's change and locks the run out of its own summary
+  // comment, which is the defect this whole mechanism exists to fix.
+  //
+  // Only a resolution that actually landed is declared: an interaction still
+  // `pending` after the call (a verdict that does not yet complete the set) has
+  // not left the waiting paths, and claiming it had would reject the run's next
+  // mutation for a shrink that never happened.
+  //
+  // Issues the resolution created are declared the same way the create routes
+  // declare theirs. The interaction service creates them with no blockers and no
+  // waiting paths of their own, so those fields are known without a re-read.
+  function noteTaskWatchdogResolvedInteraction(
+    res: Response,
+    issue: { id: string },
+    interaction: { id: string; status: string },
+    createdIssues: readonly {
+      id: string;
+      status: string;
+      assigneeAgentId: string | null;
+      assigneeUserId?: string | null;
+    }[] = [],
+  ) {
+    if (interaction.status !== "pending") {
+      noteTaskWatchdogAuthorizedWrite(res, {
+        issueId: issue.id,
+        declared: {},
+        resolvedInteractionIds: [interaction.id],
+      });
+    }
+    for (const created of createdIssues) {
+      noteTaskWatchdogAuthorizedWrite(res, {
+        issueId: created.id,
+        created: true,
+        declared: {
+          status: created.status,
+          assigneeAgentId: created.assigneeAgentId ?? null,
+          assigneeUserId: created.assigneeUserId ?? null,
+          blockerIssueIds: [],
+          pendingInteractionIds: [],
+          pendingApprovalIds: [],
+        },
+      });
+    }
+  }
+
   function taskWatchdogLedgerBaselineOf(
     revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
   ) {
@@ -4424,11 +4471,13 @@ export function issueRoutes(
             timer.unref?.();
           }),
         ]);
-        // Not recording is fail-closed rather than an error, but it is still
-        // worth a record: the run's next watched-subtree mutation will be
-        // rejected and this is the only place that says why.
+        // Not recording is fail-closed rather than an error, but it is not a
+        // quiet condition: the run's next watched-subtree mutation will be
+        // rejected with a 409 it cannot explain from the outside, and this line
+        // is the only place that says why. Warn, so it is findable from the
+        // 409 rather than only with debug logging already turned on.
         if (!outcome?.recorded) {
-          logger.debug(
+          logger.warn(
             { ...context, reason: outcome?.reason ?? null },
             "task watchdog authorized mutation was not recorded",
           );
@@ -11727,15 +11776,30 @@ export function issueRoutes(
 
     // `issue` is the row this request's own `UPDATE ... RETURNING` produced, so
     // these are the values this run wrote — not a re-read that a concurrent
-    // writer could already have overwritten. Status and assignee are the two
-    // watchdog-granted transitions; blockers are only claimed when this request
-    // asked for them, since otherwise it did not write them.
+    // writer could already have overwritten.
+    //
+    // Every field is claimed only when the request body asked for it. The
+    // returned row reports the issue's *current* value whether or not this
+    // request set it, so declaring a field the body omitted would hand a
+    // concurrent writer's value to the ledger as the run's own — the exact
+    // laundering the declared-writes model exists to prevent. A field the
+    // request did change but did not ask for (an implicit transition, say) is
+    // simply left undeclared, which reads as somebody else's and rejects the
+    // run's next mutation: conservative, and no worse than before any of this
+    // existed.
     noteTaskWatchdogAuthorizedWrite(res, {
       issueId: issue.id,
       declared: {
-        status: issue.status,
-        assigneeAgentId: issue.assigneeAgentId ?? null,
-        assigneeUserId: issue.assigneeUserId ?? null,
+        ...(req.body?.status !== undefined ? { status: issue.status } : {}),
+        // The two assignee columns are written as a pair — handing an issue to a
+        // user clears the agent and vice versa — so asking for either declares
+        // both. Asking for neither declares neither.
+        ...(req.body?.assigneeAgentId !== undefined || req.body?.assigneeUserId !== undefined
+          ? {
+            assigneeAgentId: issue.assigneeAgentId ?? null,
+            assigneeUserId: issue.assigneeUserId ?? null,
+          }
+          : {}),
         ...(Array.isArray(req.body?.blockedByIssueIds)
           ? { blockerIssueIds: requestedBlockerIssueIds(req) }
           : {}),
@@ -12556,6 +12620,7 @@ export function issueRoutes(
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
         suggestedTaskEffectsAuthorized,
       });
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction, createdIssues);
       const toolAction = interaction.payload && typeof interaction.payload === "object"
         ? (interaction.payload as { toolAction?: { actionRequestId?: unknown } }).toolAction
         : null;
@@ -12799,6 +12864,7 @@ export function issueRoutes(
         userId: actor.actorType === "user" ? actor.actorId : null,
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
       });
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction);
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -12871,6 +12937,7 @@ export function issueRoutes(
         userId: actor.actorType === "user" ? actor.actorId : null,
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
       });
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction);
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -12941,6 +13008,7 @@ export function issueRoutes(
           resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
         },
       );
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction);
 
       await logActivity(db, {
         companyId: issue.companyId,

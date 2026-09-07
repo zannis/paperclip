@@ -601,7 +601,12 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
   // window; they stand in for the stopped leaves a recovery run acts on.
   async function seedWokenWatchdogRun(
     identifier: string,
-    options: { establishedChildren?: string[] } = {},
+    options: {
+      establishedChildren?: string[];
+      // Runs before the watchdog is reconciled, so anything it seeds is part of
+      // the state the run gets pinned to rather than drift against it.
+      beforePin?: (seeded: { companyId: string; sourceId: string; agentId: string; childIds: string[] }) => Promise<void>;
+    } = {},
   ) {
     const companyId = await seedCompany();
     const sourceId = await seedIssue(companyId, { identifier, status: "done" });
@@ -615,6 +620,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       }));
     }
     await seedWatchdog(companyId, sourceId, agentId);
+    await options.beforePin?.({ companyId, sourceId, agentId, childIds });
     const { service } = createService();
 
     await service.reconcileTaskWatchdogs({ companyId });
@@ -683,6 +689,27 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     assigneeUserId: null,
     ...overrides,
   });
+
+  // Installs a reviewed snapshot the run's wake state is *not* a shrink of —
+  // it omits `leafId`, which is still a live material leaf — so the run wakes
+  // `stopped`. Once the run closes that leaf, the leaves that remain are
+  // exactly the reviewed ones and `isShrinkOfReviewedSnapshot` starts holding,
+  // which is how an ordinary recovery lands in `already_reviewed`.
+  async function seedReviewedSnapshotWithout(sourceId: string, leafId: string) {
+    const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const observed = watchdog!.lastObservedStopSnapshot as {
+      materialLeaves: { issueId: string }[];
+    };
+    expect(observed.materialLeaves.some((leaf) => leaf.issueId === leafId)).toBe(true);
+    await db.update(issueWatchdogs)
+      .set({
+        lastReviewedStopSnapshot: {
+          ...observed,
+          materialLeaves: observed.materialLeaves.filter((leaf) => leaf.issueId !== leafId),
+        },
+      })
+      .where(eq(issueWatchdogs.id, watchdog!.id));
+  }
 
   const declaredCreatedLeaf = (overrides: Record<string, unknown> = {}) => ({
     status: "todo",
@@ -965,6 +992,177 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(
       "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
     ).toEqual([sourceId]);
+  });
+
+  // WDOG-001B. Ledger membership is not causation. Of the writes the mandate
+  // grants, only creating an issue, transitioning its status, reassigning it,
+  // and resolving one of its interactions can start work on it. A run that
+  // touched some other field has not started anything, so a run appearing on
+  // that leaf afterwards is a third party's and must still stop this run dead.
+  it("rejects a live path on a leaf this run only touched in a way that starts nothing", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-INERT", { establishedChildren: ["WDOG-LIVE-INERT-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    // A blocker-list write. It is declared, so the leaf is in the ledger — but
+    // it leaves the issue exactly as idle as it was.
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: { blockerIssueIds: [] } },
+    ])).recorded).toBe(true);
+
+    // Somebody else now starts a run on that same leaf.
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
+  // WDOG-006. Resolving an interaction is one of the four granted operations
+  // that rotate the fingerprint: the waiting paths are a fingerprint input in
+  // their own right. Without a declaration the resolution reads as somebody
+  // else's change and the run is locked out of its own summary comment, which
+  // is the exact defect this whole mechanism exists to fix.
+  it("lets the run keep working after resolving an interaction it declared", async () => {
+    const interactionId = randomUUID();
+    const { childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-INTERACTION", {
+        establishedChildren: ["WDOG-INTERACTION-A"],
+        beforePin: async ({ companyId, agentId, childIds: seeded }) => {
+          await db.insert(issueThreadInteractions).values({
+            id: interactionId,
+            companyId,
+            issueId: seeded[0]!,
+            kind: "request_confirmation",
+            status: "pending",
+            payload: { version: 1, prompt: "Confirm the recovery." },
+            createdByAgentId: agentId,
+          });
+        },
+      });
+    const leafId = childIds[0]!;
+
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+    // The run's sanctioned resolution.
+    await db.update(issueThreadInteractions)
+      .set({ status: "accepted" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: {}, resolvedInteractionIds: [interactionId] },
+    ])).recorded).toBe(true);
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(true);
+  });
+
+  it("rejects an interaction that left the waiting paths without this run declaring it", async () => {
+    const interactionId = randomUUID();
+    const { agentId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-INTERACTION-FOREIGN", {
+        establishedChildren: ["WDOG-INTERACTION-FOREIGN-A"],
+        beforePin: async ({ companyId, agentId: seededAgentId, childIds: seeded }) => {
+          await db.insert(issueThreadInteractions).values({
+            id: interactionId,
+            companyId,
+            issueId: seeded[0]!,
+            kind: "request_confirmation",
+            status: "pending",
+            payload: { version: 1, prompt: "Confirm the recovery." },
+            createdByAgentId: seededAgentId,
+          });
+        },
+      });
+    const leafId = childIds[0]!;
+
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+
+    // A board user answers the interaction. The run declared nothing about it,
+    // so the shrink in the waiting paths is nobody's but theirs.
+    await db.update(issueThreadInteractions)
+      .set({ status: "accepted" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
+  // WDOG-002. Closing a stale leaf makes the current snapshot a shrink of the
+  // reviewed one, so an ordinary recovery lands the subtree in
+  // `already_reviewed` on the run's *first* sanctioned action. Skipping ledger
+  // attribution for that state left the mandated summary comment 409ing — the
+  // reported lockout, reached by a different classifier branch.
+  it("lets the run keep working when its own action left the subtree already-reviewed", async () => {
+    const { sourceId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-REVIEWED", {
+        establishedChildren: ["WDOG-REVIEWED-A", "WDOG-REVIEWED-B"],
+      });
+    const [closedLeafId] = childIds as [string, string];
+    await seedReviewedSnapshotWithout(sourceId, closedLeafId);
+
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, closedLeafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: closedLeafId, declared: declaredLeaf({ status: "done" }) },
+    ])).recorded).toBe(true);
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.classification?.state).toBe("already_reviewed");
+    expect(revalidated.allowed).toBe(true);
+  });
+
+  it("still rejects a third-party change once the subtree is already-reviewed", async () => {
+    const { sourceId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-REVIEWED-CONTROL", {
+        establishedChildren: ["WDOG-REVIEWED-CONTROL-A", "WDOG-REVIEWED-CONTROL-B"],
+      });
+    const [closedLeafId, otherLeafId] = childIds as [string, string];
+    await seedReviewedSnapshotWithout(sourceId, closedLeafId);
+
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, closedLeafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: closedLeafId, declared: declaredLeaf({ status: "done" }) },
+    ])).recorded).toBe(true);
+
+    // Admitting `already_reviewed` into ledger attribution must not admit
+    // anybody else's change along with it.
+    await db.update(issues)
+      .set({ status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, otherLeafId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([otherLeafId]);
   });
 
   // The ledger's baseline is the state the run was last genuinely validated

@@ -2267,12 +2267,73 @@ describe("agent issue mutation checkout ownership", () => {
         expect.objectContaining({ kind: "watchdog" }),
         {
           ledgerBaseline,
-          mutations: [{
-            issueId,
-            declared: { status: "todo", assigneeAgentId: ownerAgentId, assigneeUserId: null },
-          }],
+          mutations: [{ issueId, declared: { status: "todo" } }],
         },
       );
+    });
+
+    // The returned row reports every column's current value, including ones
+    // this request never wrote. Declaring those would hand a concurrent
+    // writer's change to the ledger as this run's own, and the guard would then
+    // find the subtree exactly where it "expected" it and never flag the third
+    // party again — the laundering the declared-writes model exists to stop.
+    it("does not claim an assignee the request never asked to change", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      // A board user reassigned the issue in the window between revalidation
+      // and this update, so the row this request gets back carries *their*
+      // assignee even though the body only asked for a status change.
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: "concurrently-reassigned-agent", assigneeUserId: null }),
+        ...patch,
+      }));
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: true,
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test", stopSnapshot },
+        ledgerBaseline,
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const [, entry] = mockTaskWatchdogService.recordAuthorizedMutation.mock.calls.at(-1) as [
+        unknown,
+        { mutations: { declared: Record<string, unknown> }[] },
+      ];
+      expect(entry.mutations[0]!.declared).toEqual({ status: "todo" });
+      expect(entry.mutations[0]!.declared).not.toHaveProperty("assigneeAgentId");
+    });
+
+    it("declares both assignee columns when the request asked for either of them", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId, assigneeUserId: null }),
+        ...patch,
+      }));
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: true,
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test", stopSnapshot },
+        ledgerBaseline,
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app)
+        .patch(`/api/issues/${issueId}`)
+        .send({ assigneeUserId: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const [, entry] = mockTaskWatchdogService.recordAuthorizedMutation.mock.calls.at(-1) as [
+        unknown,
+        { mutations: { declared: Record<string, unknown> }[] },
+      ];
+      // Handing an issue to a user clears the agent and vice versa, so the pair
+      // is written together and declared together.
+      expect(entry.mutations[0]!.declared).toEqual({
+        assigneeAgentId: ownerAgentId,
+        assigneeUserId: null,
+      });
     });
 
     it("does not record anything when the mutation was rejected", async () => {

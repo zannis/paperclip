@@ -401,6 +401,14 @@ export type TaskWatchdogAuthorizedMutation = {
   // has no baseline to diff against, so `declared` must cover every material
   // field for it to be attributable at all.
   created?: boolean;
+  // Interactions this request resolved. Declared as a *delta* rather than as an
+  // absolute `pendingInteractionIds`, deliberately: the resulting list is only
+  // knowable from a fresh read, and a fresh read is exactly how a third party's
+  // concurrently-created interaction would get folded into what this run is
+  // allowed to call its own. Removing named ids from the baseline cannot launder
+  // anything — an interaction somebody else added is still an id the run never
+  // accounted for, and still stops it dead.
+  resolvedInteractionIds?: string[];
 };
 
 // What a watchdog run has been authorized to do to the watched subtree so far,
@@ -420,18 +428,39 @@ export type TaskWatchdogLedgerBaseline = {
   baselineMaterialByIssueId: TaskWatchdogMaterialByIssueId;
 };
 
+const EMPTY_RESOLVED_INTERACTION_IDS: ReadonlySet<string> = new Set<string>();
+
+type TaskWatchdogMergedDeclaration = {
+  declared: TaskWatchdogDeclaredLeafWrite;
+  created: boolean;
+  resolvedInteractionIds: Set<string>;
+};
+
 function mergeDeclaredWrites(mutations: TaskWatchdogAuthorizedMutation[]) {
-  const merged = new Map<string, { declared: TaskWatchdogDeclaredLeafWrite; created: boolean }>();
+  const merged = new Map<string, TaskWatchdogMergedDeclaration>();
   for (const mutation of mutations) {
     if (!mutation || typeof mutation.issueId !== "string") continue;
-    const current = merged.get(mutation.issueId) ?? { declared: {}, created: false };
+    const current = merged.get(mutation.issueId)
+      ?? { declared: {}, created: false, resolvedInteractionIds: new Set<string>() };
+    for (const interactionId of mutation.resolvedInteractionIds ?? []) {
+      if (typeof interactionId === "string") current.resolvedInteractionIds.add(interactionId);
+    }
     // Later writes in the same run supersede earlier ones on the same field.
     merged.set(mutation.issueId, {
       declared: { ...current.declared, ...(mutation.declared ?? {}) },
       created: current.created || mutation.created === true,
+      resolvedInteractionIds: current.resolvedInteractionIds,
     });
   }
   return merged;
+}
+
+// A resolution takes a named interaction out of the issue's waiting paths and
+// changes nothing else about them, so the expected list is the baseline minus
+// the ids the run reported resolving. `filter` keeps the classifier's sort.
+function withoutResolvedInteractions(pendingInteractionIds: string[], resolved: ReadonlySet<string>) {
+  if (resolved.size === 0) return pendingInteractionIds;
+  return pendingInteractionIds.filter((interactionId) => !resolved.has(interactionId));
 }
 
 function declarationCoversEveryMaterialField(declared: TaskWatchdogDeclaredLeafWrite) {
@@ -469,6 +498,12 @@ export function unattributedSubtreeChanges(input: {
     const before = baselineMaterial[issueId] ?? null;
     if (before) {
       const expected = { ...before, ...(declared?.declared ?? {}), issueId };
+      if (declared?.resolvedInteractionIds.size) {
+        expected.pendingInteractionIds = withoutResolvedInteractions(
+          expected.pendingInteractionIds,
+          declared.resolvedInteractionIds,
+        );
+      }
       if (canonicalJson(expected) !== canonicalJson(leaf)) unattributed.add(issueId);
       continue;
     }
@@ -507,13 +542,17 @@ export function unattributedSubtreeChanges(input: {
   ]);
   for (const issueId of waitIssueIds) {
     if (unattributed.has(issueId)) continue;
-    const declared = declaredByIssueId.get(issueId)?.declared ?? {};
+    const declaration = declaredByIssueId.get(issueId);
+    const declared = declaration?.declared ?? {};
     const before = baselineMaterial[issueId] ?? null;
     const baselineWaits = input.ledger.baseline.waitsByIssueId[issueId] ?? null;
-    const pendingInteractionIds = declared.pendingInteractionIds
-      ?? before?.pendingInteractionIds
-      ?? baselineWaits?.pendingInteractionIds
-      ?? [];
+    const pendingInteractionIds = withoutResolvedInteractions(
+      declared.pendingInteractionIds
+        ?? before?.pendingInteractionIds
+        ?? baselineWaits?.pendingInteractionIds
+        ?? [],
+      declaration?.resolvedInteractionIds ?? EMPTY_RESOLVED_INTERACTION_IDS,
+    );
     const pendingApprovalIds = declared.pendingApprovalIds
       ?? before?.pendingApprovalIds
       ?? baselineWaits?.pendingApprovalIds
@@ -531,6 +570,26 @@ export function unattributedSubtreeChanges(input: {
   return [...unattributed].sort();
 }
 
+// Whether a declaration could itself be why a run is now live on that issue.
+//
+// Ledger membership alone is too coarse to answer this: a run that only touched
+// some field which leaves the issue idle has not started anything, so a run
+// appearing on it afterwards is somebody else's and must not be waved through
+// on the strength of the issue merely being "known".
+//
+// Of the writes the watchdog mandate grants, four can start work: creating the
+// issue (its assignment wake), transitioning its status, reassigning it, and
+// resolving one of its interactions (which wakes the assignee). Anything else a
+// route may have declared — a blocker list, a pending approval — is not a cause
+// of liveness and does not license it.
+function declarationCanStartWork(declaration: TaskWatchdogMergedDeclaration) {
+  return declaration.created
+    || declaration.resolvedInteractionIds.size > 0
+    || declaration.declared.status !== undefined
+    || declaration.declared.assigneeAgentId !== undefined
+    || declaration.declared.assigneeUserId !== undefined;
+}
+
 // Whether the reason the subtree is no longer stopped is this run's own doing.
 // A watchdog that reopens a leaf or creates a follow-up child makes the subtree
 // live or pending-first-run by design — that is the recovery working — and the
@@ -541,7 +600,12 @@ function unattributedLivenessIssueIds(
   livenessIssueIds: string[],
 ) {
   const declaredByIssueId = mergeDeclaredWrites(ledger.mutations ?? []);
-  return livenessIssueIds.filter((issueId) => !declaredByIssueId.has(issueId)).sort();
+  return livenessIssueIds
+    .filter((issueId) => {
+      const declaration = declaredByIssueId.get(issueId);
+      return !declaration || !declarationCanStartWork(declaration);
+    })
+    .sort();
 }
 
 function parseMutationLedger(value: unknown): TaskWatchdogMutationLedger | null {
@@ -1910,13 +1974,19 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     // always did rather than trusting a shape it does not recognise.
     const ledger = parseMutationLedger(scope.mutationLedger);
     if (!ledger) return { allowed: false as const, reason: staleReason, classification };
-    // `already_reviewed` and `not_applicable` are verdicts about the watchdog's
-    // own review lifecycle rather than drift, and neither carries a subtree the
-    // ledger can be checked against. They stay rejections.
+    // Every state that carries a `stopSnapshot` can be adjudicated against the
+    // ledger, and `already_reviewed` is one of them. It is reached routinely by
+    // a run's *own* first sanctioned action: closing a stale leaf makes the
+    // current snapshot a shrink of the reviewed one, which is precisely
+    // `isShrinkOfReviewedSnapshot`. Excluding it left the mandated summary
+    // comment 409ing after an ordinary recovery — the same lockout by another
+    // route. `not_applicable` genuinely carries no subtree to diff, so it stays
+    // a rejection.
     if (
       classification.state !== "stopped"
       && classification.state !== "live"
       && classification.state !== "pending_first_run"
+      && classification.state !== "already_reviewed"
     ) {
       return { allowed: false as const, reason: staleReason, classification };
     }
