@@ -356,6 +356,80 @@ function canonicalJson(value: unknown): string {
       : val);
 }
 
+export type TaskWatchdogRepinAttribution = {
+  // The issue ids the request being re-pinned for was authorized to mutate.
+  authorizedIssueIds: string[];
+  // The subtree snapshot the freshness guard admitted that request against —
+  // the state immediately *before* the run's own mutation.
+  previousStopSnapshot: TaskWatchdogStopSnapshot | null;
+};
+
+// Which watched leaves moved between the snapshot a mutation was admitted
+// against and the subtree as it stands now, minus the ones the run was
+// authorized to move. A non-empty result means somebody other than this run
+// changed the subtree in the same window, so the run must not be re-pinned onto
+// a fingerprint that includes their change.
+//
+// Structural side effects of an authorized mutation are attributable too, and
+// only those: a leaf created directly under an authorized issue (the run's
+// follow-up child), and an issue that became a leaf because an authorized
+// descendant of it went terminal. Both are consequences of the authorized
+// change on that branch; a change anywhere else is not.
+function unattributedSubtreeChanges(input: {
+  previous: TaskWatchdogStopSnapshot;
+  next: TaskWatchdogStopSnapshot;
+  authorizedIssueIds: string[];
+  parentByIssueId: Map<string, string | null>;
+}): string[] {
+  const authorized = new Set(input.authorizedIssueIds);
+  const authorizedAncestors = new Set<string>();
+  for (const issueId of authorized) {
+    let currentId = input.parentByIssueId.get(issueId) ?? null;
+    for (let depth = 0; currentId && depth < TASK_WATCHDOG_SUBTREE_MAX_DEPTH; depth += 1) {
+      if (authorizedAncestors.has(currentId)) break;
+      authorizedAncestors.add(currentId);
+      currentId = input.parentByIssueId.get(currentId) ?? null;
+    }
+  }
+
+  const previousLeaves = new Map(input.previous.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
+  const nextLeaves = new Map(input.next.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
+  const unattributed = new Set<string>();
+
+  for (const [issueId, leaf] of nextLeaves) {
+    const before = previousLeaves.get(issueId);
+    if (!before) {
+      const parentId = input.parentByIssueId.get(issueId) ?? null;
+      const attributable = authorized.has(issueId) ||
+        (parentId != null && authorized.has(parentId)) ||
+        authorizedAncestors.has(issueId);
+      if (!attributable) unattributed.add(issueId);
+      continue;
+    }
+    if (canonicalJson(before) !== canonicalJson(leaf) && !authorized.has(issueId)) {
+      unattributed.add(issueId);
+    }
+  }
+  // A leaf leaves the set when it goes terminal or gains a child — either way
+  // the run had to have been authorized to mutate it.
+  for (const issueId of previousLeaves.keys()) {
+    if (nextLeaves.has(issueId) || authorized.has(issueId)) continue;
+    unattributed.add(issueId);
+  }
+
+  const waitIssueIds = new Set([
+    ...Object.keys(input.previous.waitsByIssueId),
+    ...Object.keys(input.next.waitsByIssueId),
+  ]);
+  for (const issueId of waitIssueIds) {
+    const before = canonicalJson(input.previous.waitsByIssueId[issueId] ?? null);
+    const after = canonicalJson(input.next.waitsByIssueId[issueId] ?? null);
+    if (before !== after && !authorized.has(issueId)) unattributed.add(issueId);
+  }
+
+  return [...unattributed].sort();
+}
+
 function isShrinkOfReviewedSnapshot(
   current: TaskWatchdogStopSnapshot,
   reviewed: TaskWatchdogStopSnapshot | null | undefined,
@@ -1659,31 +1733,53 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
   // A watchdog run is pinned to the stop fingerprint its wake observed, and
   // `revalidateMutationScope` requires an exact match on every watched-subtree
-  // mutation. Four of the operations a watchdog run is explicitly allowed to
-  // perform (creating a follow-up child, transitioning a leaf, reassigning a
-  // leaf, resolving an interaction) are inputs to that very fingerprint, so the
-  // run's first sanctioned action rotated the hash and locked the run out of
-  // the subtree for everything after it — including the summary comment that
-  // explains what it just did.
+  // mutation. Several of the operations a watchdog run is explicitly allowed to
+  // perform (transitioning a leaf, reassigning a leaf, resolving an
+  // interaction, creating a follow-up child) are inputs to that very
+  // fingerprint, so the run's first sanctioned action rotated the hash and
+  // locked the run out of the subtree for everything after it — including the
+  // summary comment that explains what it just did.
   //
   // Re-pinning the run onto the state its own authorized mutation produced
-  // keeps the property the guard exists for: a *third party* moving the subtree
-  // still diverges from the re-pinned value and is still rejected.
+  // keeps the property the guard exists for. That property does *not* survive
+  // on its own: the subtree is re-read here, after the mutation committed, so
+  // anything a third party did in that window is in the read too. It is kept by
+  // diffing the re-read against `previousStopSnapshot` — the snapshot the guard
+  // admitted this mutation against — and refusing to re-pin unless every leaf
+  // that moved is attributable to `authorizedIssueIds`. A board user
+  // reassigning some other stopped leaf mid-flight therefore blocks the re-pin
+  // rather than being laundered into it, and the run stays pinned to what its
+  // wake observed.
   //
-  // Deliberately narrow: this only re-pins while the subtree is still
-  // `stopped`. A run whose action restored a live path is not re-pinned, so the
-  // guard keeps rejecting it on state — that is a different case with a
-  // different safety argument and is not addressed here.
-  async function repinMutationScope(scope: {
-    kind: "watchdog";
-    watchdogId: string;
-    companyId: string;
-    watchedIssueId: string;
-    stopFingerprint: string | null;
-    runId: string | null;
-  }) {
+  // Deliberately narrow in two ways:
+  //
+  //  - It only re-pins while the subtree is still `stopped`. A run whose action
+  //    restored a live path is not re-pinned, so the guard keeps rejecting it
+  //    on state — a different case with a different safety argument.
+  //  - Creating a follow-up child is therefore *not* covered in its immediate
+  //    aftermath. A freshly created non-terminal child is inside
+  //    `TASK_WATCHDOG_FIRST_RUN_GRACE_MS` and has not completed a run, so the
+  //    classifier returns `pending_first_run`, which carries no fingerprint to
+  //    pin to at all. That operation still leaves the run stale until the
+  //    subtree settles; see the `stopped -> non-stopped` follow-up.
+  async function repinMutationScope(
+    scope: {
+      kind: "watchdog";
+      watchdogId: string;
+      companyId: string;
+      watchedIssueId: string;
+      stopFingerprint: string | null;
+      runId: string | null;
+    },
+    attribution: TaskWatchdogRepinAttribution,
+  ) {
     if (!scope.runId) {
       return { repinned: false as const, reason: "missing_run_id" };
+    }
+    // Without the pre-mutation snapshot there is no way to tell the run's own
+    // change apart from a concurrent one, so fail closed instead of guessing.
+    if (!attribution.previousStopSnapshot) {
+      return { repinned: false as const, reason: "missing_previous_snapshot" };
     }
 
     const watchdog = await db
@@ -1700,14 +1796,27 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       return { repinned: false as const, reason: "watchdog_not_active" };
     }
 
-    const classification = classifyTaskWatchdogSubtree(
-      await collectClassifierInput(watchdog.companyId, watchdog),
-    );
+    const classifierInput = await collectClassifierInput(watchdog.companyId, watchdog);
+    const classification = classifyTaskWatchdogSubtree(classifierInput);
     if (classification.state !== "stopped") {
-      return { repinned: false as const, reason: "subtree_not_stopped" };
+      return {
+        repinned: false as const,
+        reason: "subtree_not_stopped",
+        classificationState: classification.state,
+      };
     }
     if (classification.stopFingerprint === scope.stopFingerprint) {
       return { repinned: false as const, reason: "fingerprint_unchanged" };
+    }
+
+    const unattributedIssueIds = unattributedSubtreeChanges({
+      previous: attribution.previousStopSnapshot,
+      next: classification.stopSnapshot,
+      authorizedIssueIds: attribution.authorizedIssueIds,
+      parentByIssueId: new Map(classifierInput.issues.map((issue) => [issue.id, issue.parentId ?? null])),
+    });
+    if (unattributedIssueIds.length > 0) {
+      return { repinned: false as const, reason: "unrelated_subtree_change", unattributedIssueIds };
     }
 
     const run = await db
@@ -1723,20 +1832,46 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       return { repinned: false as const, reason: "run_not_found" };
     }
 
-    const context = parseObject(run.contextSnapshot);
-    const taskWatchdog = context.taskWatchdog;
     // `taskWatchdog` may legitimately be the literal `true`, in which case the
     // scope resolver falls back to reading the fingerprint from the top level
-    // of the context. Write the new value back to whichever of the two places
-    // that resolver will actually read, and preserve the other shape as-is.
-    const nextContext = isPlainRecord(taskWatchdog)
-      ? { ...context, taskWatchdog: { ...taskWatchdog, stopFingerprint: classification.stopFingerprint } }
-      : { ...context, stopFingerprint: classification.stopFingerprint };
-
-    await db
+    // of the context. Write the new value to whichever of the two places that
+    // resolver will actually read.
+    const pinPath = isPlainRecord(parseObject(run.contextSnapshot).taskWatchdog)
+      ? sql`array['taskWatchdog', 'stopFingerprint']`
+      : sql`array['stopFingerprint']`;
+    // Write the one key with `jsonb_set` rather than a read-modify-write of the
+    // whole column: other subsystems write `contextSnapshot` on the same run
+    // (the native-question cancellation marker, for one), and a stale
+    // read-modify-write here would silently discard their updates. The `where`
+    // predicate mirrors the resolver's own read precedence, so the write also
+    // compares-and-sets against the pin this request was resolved from and
+    // stands down if anybody moved it first.
+    const currentPin = sql`coalesce(
+      ${heartbeatRuns.contextSnapshot} #>> array['taskWatchdog', 'stopFingerprint'],
+      ${heartbeatRuns.contextSnapshot} #>> array['stopFingerprint']
+    )`;
+    const updated = await db
       .update(heartbeatRuns)
-      .set({ contextSnapshot: nextContext })
-      .where(eq(heartbeatRuns.id, run.id));
+      .set({
+        contextSnapshot: sql`jsonb_set(
+          case
+            when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+              then ${heartbeatRuns.contextSnapshot}
+            else '{}'::jsonb
+          end,
+          ${pinPath},
+          to_jsonb(${classification.stopFingerprint}::text),
+          true
+        )`,
+      })
+      .where(and(
+        eq(heartbeatRuns.id, run.id),
+        sql`${currentPin} is not distinct from ${scope.stopFingerprint}::text`,
+      ))
+      .returning({ id: heartbeatRuns.id });
+    if (updated.length === 0) {
+      return { repinned: false as const, reason: "run_context_changed" };
+    }
 
     return {
       repinned: true as const,

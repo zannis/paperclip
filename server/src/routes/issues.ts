@@ -460,7 +460,10 @@ function noopTaskWatchdogService(): TaskWatchdogService {
         pendingInteractionsByIssueId: {},
       },
     }),
-    repinMutationScope: async () => ({ repinned: false as const, reason: "watchdog_service_unavailable" }),
+    repinMutationScope: async (
+      _scope: Parameters<TaskWatchdogService["repinMutationScope"]>[0],
+      _attribution: Parameters<TaskWatchdogService["repinMutationScope"]>[1],
+    ) => ({ repinned: false as const, reason: "watchdog_service_unavailable" }),
   };
 }
 
@@ -4284,30 +4287,82 @@ export function issueRoutes(
   // a child validates the parent too), and one re-pin per response is enough.
   const pendingTaskWatchdogRepins = new WeakSet<Response>();
 
+  // A re-pin is three short queries. This bound only exists so a stuck database
+  // cannot hold a response open indefinitely; hitting it degrades to exactly
+  // the behaviour of not re-pinning at all, which the guard fails closed on.
+  const TASK_WATCHDOG_REPIN_HOLD_MS = 5_000;
+
+  // The snapshot the freshness guard admitted a mutation against. Re-pinning
+  // diffs the post-mutation subtree against it, so a concurrent third-party
+  // change is not folded into the run's new pin.
+  function taskWatchdogStopSnapshotOf(
+    classification: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>["classification"],
+  ) {
+    return classification && "stopSnapshot" in classification ? classification.stopSnapshot : null;
+  }
+
   // Several of the operations a watchdog run is allowed to perform are inputs
   // to the stop fingerprint the run is pinned to, so the run's own sanctioned
   // action would otherwise lock it out of everything it does next. Re-pin the
-  // run onto the state it just produced — but only once the mutation has
-  // actually committed, which is why this hangs off the response instead of
-  // running inline.
+  // run onto the state it just produced.
+  //
+  // The re-pin has to happen after the mutation commits but *before* the
+  // response reaches the client: the run's next request re-reads its pin from
+  // the run context, so a re-pin still in flight when the response is flushed
+  // leaves that request reading the stale value and being rejected by the very
+  // guard this exists to satisfy. So the response is held until the re-pin
+  // settles rather than raced against it.
   function scheduleTaskWatchdogRepin(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
+    attribution: Parameters<TaskWatchdogService["repinMutationScope"]>[1],
   ) {
     if (scope.kind !== "watchdog" || !scope.runId) return;
     if (pendingTaskWatchdogRepins.has(res)) return;
     pendingTaskWatchdogRepins.add(res);
-    res.once("finish", () => {
+
+    let started = false;
+    const settleRepin = async () => {
+      if (started) return;
+      started = true;
+      // Only a mutation that actually landed rotated the fingerprint.
       if (res.statusCode < 200 || res.statusCode >= 300) return;
-      // Re-pinning sits on top of a guard that already fails closed: if it does
-      // not land, the run's next watched-subtree mutation is rejected exactly
-      // as it is today. The response has already been sent by this point, so a
-      // failure here must never escape as an unhandled error.
+      const context = {
+        watchedIssueId: scope.watchedIssueId,
+        watchdogId: scope.watchdogId,
+        runId: scope.runId,
+      };
       try {
-        void taskWatchdogsSvc.repinMutationScope(scope).catch(() => {});
-      } catch {
-        // no-op
+        const outcome = await Promise.race([
+          taskWatchdogsSvc.repinMutationScope(scope, attribution),
+          new Promise<{ repinned: false; reason: string }>((resolve) => {
+            const timer = setTimeout(() => resolve({ repinned: false, reason: "repin_timed_out" }), TASK_WATCHDOG_REPIN_HOLD_MS);
+            timer.unref?.();
+          }),
+        ]);
+        // A re-pin that does not land is not an error — most reasons are
+        // expected (`fingerprint_unchanged`, `subtree_not_stopped`) and the
+        // guard fails closed either way. It is still worth a record, because
+        // the run's next watched-subtree mutation will be rejected and this is
+        // the only place that says why.
+        if (!outcome?.repinned) {
+          logger.debug({ ...context, reason: outcome?.reason ?? null }, "task watchdog run was not re-pinned");
+        }
+      } catch (err) {
+        logger.warn({ err, ...context }, "task watchdog re-pin failed");
       }
+    };
+
+    const sendJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      void settleRepin().then(() => sendJson(body), () => sendJson(body));
+      return res;
+    }) as Response["json"];
+    // Backstop for any responder that does not go through `res.json`. Strictly
+    // no worse than today: the re-pin still runs, just without the ordering
+    // guarantee above.
+    res.once("finish", () => {
+      void settleRepin();
     });
   }
 
@@ -4321,7 +4376,10 @@ export function issueRoutes(
 
     const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
     if (revalidated.allowed) {
-      scheduleTaskWatchdogRepin(res, scope);
+      scheduleTaskWatchdogRepin(res, scope, {
+        authorizedIssueIds: [issue.id],
+        previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
+      });
       return true;
     }
     res.status(409).json({
@@ -4486,7 +4544,10 @@ export function issueRoutes(
           message: "This issue-thread interaction is outside the current watchdog scope",
         });
       }
-      scheduleTaskWatchdogRepin(res, watchdogScope);
+      scheduleTaskWatchdogRepin(res, watchdogScope, {
+        authorizedIssueIds: [issue.id],
+        previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
+      });
       return true;
     }
 
@@ -4644,7 +4705,12 @@ export function issueRoutes(
               message: "Suggested-task creation is outside the current watchdog scope",
             });
           }
-          scheduleTaskWatchdogRepin(res, watchdogScope);
+          // The follow-up child is created directly under `parent`, so the new
+          // leaf is attributable to the issue the run was authorized to mutate.
+          scheduleTaskWatchdogRepin(res, watchdogScope, {
+            authorizedIssueIds: [parent.id],
+            previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
+          });
         }
         await assertTaskBridgeCreateAllowed(req, issue.companyId, {
           projectId: task.projectId ?? issue.projectId,
