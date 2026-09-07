@@ -4116,7 +4116,7 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
+      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, { intent: "comment" });
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
@@ -4370,16 +4370,26 @@ export function issueRoutes(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
     issue: { id: string },
+    // A comment is the one write that cannot change the watched subtree's
+    // classification or its stop fingerprint, so it is the one write a run that
+    // restored a live path can still be trusted with. Everything else defaults
+    // to the strict check.
+    opts: { intent?: "comment" | "mutate" } = {},
   ) {
     if (scope.kind !== "watchdog") return true;
     if (scope.watchdogIssueId && issue.id === scope.watchdogIssueId) return true;
 
-    const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
+    const intent = opts.intent ?? "mutate";
+    const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope, { intent });
     if (revalidated.allowed) {
-      scheduleTaskWatchdogRepin(res, scope, {
-        authorizedIssueIds: [issue.id],
-        previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
-      });
+      // Only a state-changing write can rotate the fingerprint the run is
+      // pinned to, so only that needs the re-pin (and its response hold).
+      if (intent === "mutate") {
+        scheduleTaskWatchdogRepin(res, scope, {
+          authorizedIssueIds: [issue.id],
+          previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
+        });
+      }
       return true;
     }
     res.status(409).json({

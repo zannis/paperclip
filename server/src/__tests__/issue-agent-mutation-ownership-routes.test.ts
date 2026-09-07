@@ -2170,6 +2170,75 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
+    // A run whose own recovery action restored a live path is past the point
+    // where the stop fingerprint exists, so the freshness guard can only judge
+    // its writes by intent. The comment — the summary the mandate asks for —
+    // is the one write that cannot change the subtree, and it is the one that
+    // has to survive.
+    it("asks the freshness guard for comment intent on a comment and mutate intent on a status change", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      await request(app).post(`/api/issues/${issueId}/comments`).send({ body: "Restored the path." });
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "watchdog" }),
+        { intent: "comment" },
+      );
+      // A comment cannot rotate the pin, so it must not pay for a re-pin.
+      expect(mockTaskWatchdogService.repinMutationScope).not.toHaveBeenCalled();
+
+      await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "watchdog" }),
+        { intent: "mutate" },
+      );
+    });
+
+    it("lets a granted run comment on a live watched subtree but still refuses to change its state", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+
+      // The service grants comment-only scope: the subtree is live because
+      // this run restored it, so the comment is admitted and the state change
+      // is not.
+      mockTaskWatchdogService.revalidateMutationScope.mockImplementation(
+        async (_scope: unknown, opts?: { intent?: string }) =>
+          opts?.intent === "comment"
+            ? {
+              allowed: true,
+              classification: { state: "live", liveIssueIds: [issueId] },
+              liveCommentScope: true,
+            }
+            : {
+              allowed: false,
+              reason:
+                "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
+              classification: { state: "live", liveIssueIds: [issueId] },
+            },
+      );
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+
+      const commented = await request(app)
+        .post(`/api/issues/${issueId}/comments`)
+        .send({ body: "Reassigned the stalled leaf; a live path is running again." });
+      expect(commented.status, JSON.stringify(commented.body)).toBe(201);
+
+      const mutated = await request(app).patch(`/api/issues/${issueId}`).send({ status: "done" });
+      expect(mutated.status, JSON.stringify(mutated.body)).toBe(409);
+      expect(mutated.body.details).toMatchObject({ currentState: "live" });
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
     it.each([
       ["in_progress"],
       ["blocked"],

@@ -958,8 +958,9 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const previousStopSnapshot = await admitMutation(scope);
 
     // A recovery action that restores a live path takes the subtree out of the
-    // `stopped` state entirely. Re-pinning deliberately does not cover that
-    // case, so the run stays pinned to what its wake observed.
+    // `stopped` state entirely, so there is no stop fingerprint to re-pin to.
+    // The run stays pinned to what its wake observed; it is granted comment-only
+    // scope instead, which is asserted separately below.
     const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
     await db.insert(heartbeatRuns).values({
       companyId,
@@ -974,9 +975,158 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       previousStopSnapshot,
     });
     expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("subtree_not_stopped");
     expect(repin.classificationState).toBe("live");
     expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
+  });
+
+  // Restoring a live execution path is the recovery action the watchdog
+  // mandate cares about most, and it takes the subtree out of `stopped`
+  // entirely — so there is no fingerprint left to re-pin to. Without a grant
+  // the run that just succeeded at its job is locked out of the watched issue
+  // for the rest of the run, and its summary comment lands on the watchdog
+  // issue instead of where a human reads it.
+  //
+  // A comment is the only write this grant covers, and it is provably inert:
+  // `materialLeaf` strips `latestCommentAt`, so a comment cannot rotate the
+  // stop fingerprint and cannot change the classification.
+  async function queueWakeForIssue(companyId: string, agentId: string, issueId: string) {
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      status: "queued",
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      payload: { issueId },
+    });
+  }
+
+  it("lets a watchdog run comment on the watched subtree after its own action restored a live path", async () => {
+    const { companyId, agentId, childIds, service, pinnedFingerprint, resolveScope, admitMutation } =
+      await seedWokenWatchdogRun("WDOG-LIVE-GRANT", { establishedChildren: ["WDOG-LIVE-GRANT-LEAF"] });
+    const leafId = childIds[0]!;
+
+    const scope = await resolveScope();
+    const previousStopSnapshot = await admitMutation(scope);
+
+    // The sanctioned recovery action: hand the stopped leaf back to a live
+    // agent. The assignment enqueues that agent's wake, which is exactly what
+    // takes the subtree live.
+    await db.update(issues)
+      .set({ status: "todo", assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    await queueWakeForIssue(companyId, agentId, leafId);
+
+    // Before the grant: rejected on *state*, not on fingerprint. Re-pinning
+    // cannot help here — a live subtree has no stop fingerprint to pin to.
+    const staleComment = await service.revalidateMutationScope(scope, { intent: "comment" });
+    expect(staleComment.allowed).toBe(false);
+    expect(staleComment.classification?.state).toBe("live");
+
+    const outcome = await service.repinMutationScope(scope, {
+      authorizedIssueIds: [leafId],
+      previousStopSnapshot,
+    });
+    // The pin itself deliberately does not move: there is nothing to move it
+    // to. The run is granted comment-only scope instead.
+    expect(outcome.repinned).toBe(false);
+    expect(outcome.reason).toBe("live_comment_scope_granted");
+    expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
+
+    const rescoped = await resolveScope();
+    const allowedComment = await service.revalidateMutationScope(rescoped, { intent: "comment" });
+    expect(allowedComment.allowed).toBe(true);
+    expect(allowedComment.classification?.state).toBe("live");
+  });
+
+  it("does not grant comment scope when a different actor made the watched subtree live", async () => {
+    const { companyId, agentId, childIds, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
+      "WDOG-LIVE-FOREIGN",
+      { establishedChildren: ["WDOG-LIVE-FOREIGN-MINE", "WDOG-LIVE-FOREIGN-THEIRS"] },
+    );
+    const [mineId, theirsId] = [childIds[0]!, childIds[1]!];
+
+    const scope = await resolveScope();
+    const previousStopSnapshot = await admitMutation(scope);
+
+    // The run was authorized to move `mineId`. Somebody else started work on a
+    // different leaf in the same window — a competing actor by definition.
+    await db.update(issues)
+      .set({ status: "todo", assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, mineId));
+    await queueWakeForIssue(companyId, agentId, theirsId);
+
+    const outcome = await service.repinMutationScope(scope, {
+      authorizedIssueIds: [mineId],
+      previousStopSnapshot,
+    });
+    expect(outcome.repinned).toBe(false);
+    expect(outcome.reason).toBe("unattributed_live_path");
+    expect(outcome.unattributedIssueIds).toEqual([theirsId]);
+
+    const stillStale = await service.revalidateMutationScope(await resolveScope(), { intent: "comment" });
+    expect(stillStale.allowed).toBe(false);
+  });
+
+  it("attributes a live path on a follow-up child created under an authorized issue", async () => {
+    const { companyId, sourceId, agentId, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
+      "WDOG-LIVE-CHILD",
+    );
+    const scope = await resolveScope();
+    const previousStopSnapshot = await admitMutation(scope);
+
+    // The other sanctioned recovery action: create a follow-up task under the
+    // watched issue and let it start. Its first run is a live path on an issue
+    // that did not exist when the mutation was admitted — attributable only
+    // because its parent is the issue the run was authorized to mutate.
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-LIVE-CHILD-FOLLOWUP",
+      status: "todo",
+      parentId: sourceId,
+      createdAt: new Date(),
+    });
+    await queueWakeForIssue(companyId, agentId, childId);
+
+    const outcome = await service.repinMutationScope(scope, {
+      authorizedIssueIds: [sourceId],
+      previousStopSnapshot,
+    });
+    expect(outcome.classificationState).toBe("live");
+    expect(outcome.reason).toBe("live_comment_scope_granted");
+
+    const allowed = await service.revalidateMutationScope(await resolveScope(), { intent: "comment" });
+    expect(allowed.allowed).toBe(true);
+  });
+
+  it("does not let a granted run make a state-changing write to the live subtree", async () => {
+    const { companyId, agentId, childIds, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
+      "WDOG-LIVE-COMMENT-ONLY",
+      { establishedChildren: ["WDOG-LIVE-COMMENT-ONLY-LEAF"] },
+    );
+    const leafId = childIds[0]!;
+
+    const scope = await resolveScope();
+    const previousStopSnapshot = await admitMutation(scope);
+    await db.update(issues)
+      .set({ status: "todo", assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    await queueWakeForIssue(companyId, agentId, leafId);
+
+    const outcome = await service.repinMutationScope(scope, {
+      authorizedIssueIds: [leafId],
+      previousStopSnapshot,
+    });
+    expect(outcome.reason).toBe("live_comment_scope_granted");
+
+    // The grant restores the audit trail; it grants no new authority over
+    // state. A subtree that is live now has a live owner, and the watchdog is
+    // not it.
+    const rescoped = await resolveScope();
+    const mutate = await service.revalidateMutationScope(rescoped, { intent: "mutate" });
+    expect(mutate.allowed).toBe(false);
+    expect(mutate.reason).toContain("live");
+    // Default intent is the conservative one.
+    expect((await service.revalidateMutationScope(rescoped)).allowed).toBe(false);
   });
 
   it("surfaces pending interaction kinds and approval ids in the wake and watchdog comment", async () => {

@@ -430,6 +430,52 @@ function unattributedSubtreeChanges(input: {
   return [...unattributed].sort();
 }
 
+// Comment-only scope a run earns by restoring a live path itself. Pinned to
+// the fingerprint the run holds and to the issue it watches, so it cannot be
+// read as authority over some other watchdog, or survive a re-pin.
+export type TaskWatchdogLiveCommentScope = {
+  version: 1;
+  watchedIssueId: string;
+  stopFingerprint: string;
+};
+
+const TASK_WATCHDOG_LIVE_COMMENT_SCOPE_KEY = "liveCommentScope";
+
+function parseLiveCommentScope(value: unknown): TaskWatchdogLiveCommentScope | null {
+  if (!isPlainRecord(value)) return null;
+  if (value.version !== 1) return null;
+  const watchedIssueId = typeof value.watchedIssueId === "string" ? value.watchedIssueId : null;
+  const stopFingerprint = typeof value.stopFingerprint === "string" ? value.stopFingerprint : null;
+  if (!watchedIssueId || !stopFingerprint) return null;
+  return { version: 1, watchedIssueId, stopFingerprint };
+}
+
+// Which live paths in the watched subtree are not consequences of what this run
+// was authorized to do. A non-empty result means somebody other than this run
+// put work on the subtree, so the run has not earned any scope over it.
+//
+// Attributable: a live path on an issue the run was authorized to mutate, and
+// one on a child created directly under such an issue (the run's follow-up
+// task, whose first run is the live path). Anything else is a competing actor.
+//
+// This is only sound because of what the caller already established: the
+// mutation was admitted against a `stopped` classification, and `stopped` means
+// the subtree had *no* live path at all. So every live path observed now
+// appeared inside the run's own mutation window.
+function unattributedLivePaths(input: {
+  liveIssueIds: string[];
+  authorizedIssueIds: string[];
+  parentByIssueId: Map<string, string | null>;
+}): string[] {
+  const authorized = new Set(input.authorizedIssueIds);
+  const unattributed = input.liveIssueIds.filter((issueId) => {
+    if (authorized.has(issueId)) return false;
+    const parentId = input.parentByIssueId.get(issueId) ?? null;
+    return !(parentId != null && authorized.has(parentId));
+  });
+  return [...new Set(unattributed)].sort();
+}
+
 function isShrinkOfReviewedSnapshot(
   current: TaskWatchdogStopSnapshot,
   reviewed: TaskWatchdogStopSnapshot | null | undefined,
@@ -1685,13 +1731,35 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       ));
   }
 
-  async function revalidateMutationScope(scope: {
-    kind: "watchdog";
-    watchdogId: string;
-    companyId: string;
-    watchedIssueId: string;
-    stopFingerprint: string | null;
-  }) {
+  // The grant is stored on the run context, next to the pin, so it dies with
+  // the run rather than outliving it on the watchdog row.
+  async function readLiveCommentScope(runId: string, companyId: string) {
+    const run = await db
+      .select({ companyId: heartbeatRuns.companyId, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run || run.companyId !== companyId) return null;
+    const context = parseObject(run.contextSnapshot);
+    const taskWatchdog = isPlainRecord(context.taskWatchdog) ? context.taskWatchdog : context;
+    return parseLiveCommentScope(taskWatchdog[TASK_WATCHDOG_LIVE_COMMENT_SCOPE_KEY]);
+  }
+
+  async function revalidateMutationScope(
+    scope: {
+      kind: "watchdog";
+      watchdogId: string;
+      companyId: string;
+      watchedIssueId: string;
+      stopFingerprint: string | null;
+      runId?: string | null;
+    },
+    // What the caller is about to write. `comment` is the only intent that a
+    // live-subtree grant can satisfy, and it defaults to the conservative
+    // value so a new call site cannot acquire the relaxation by accident.
+    opts: { intent?: "comment" | "mutate" } = {},
+  ) {
+    const intent = opts.intent ?? "mutate";
     if (!scope.stopFingerprint) {
       return {
         allowed: false as const,
@@ -1720,6 +1788,33 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
       return { allowed: true as const, classification };
+    }
+
+    // A run whose own sanctioned action restored a live path succeeded at the
+    // job the watchdog mandate sets it — and the same mandate tells it to
+    // finish with a summary comment on the source issue, which is where a human
+    // reads it. Rejecting that comment on `state` loses exactly the audit trail
+    // the guard exists to protect.
+    //
+    // The grant is comment-only, and a comment is inert by construction:
+    // `materialLeaf` strips `latestCommentAt`, so it can neither rotate the
+    // stop fingerprint nor change the classification. No authority over state
+    // is granted — a live subtree has a live owner, and the watchdog is not it.
+    //
+    // Attribution is checked once, when the grant is issued (see
+    // `repinMutationScope`), against a subtree that provably had no live path a
+    // moment earlier. It is deliberately not re-checked here: the restored
+    // owner's own work spawns further live paths, and re-checking would revoke
+    // the grant precisely because the recovery worked.
+    if (intent === "comment" && classification.state === "live" && scope.runId) {
+      const granted = await readLiveCommentScope(scope.runId, scope.companyId);
+      if (
+        granted &&
+        granted.watchedIssueId === scope.watchedIssueId &&
+        granted.stopFingerprint === scope.stopFingerprint
+      ) {
+        return { allowed: true as const, classification, liveCommentScope: true as const };
+      }
     }
 
     return {
@@ -1762,6 +1857,60 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   //    classifier returns `pending_first_run`, which carries no fingerprint to
   //    pin to at all. That operation still leaves the run stale until the
   //    subtree settles; see the `stopped -> non-stopped` follow-up.
+  // Records the comment-only scope on the run context. Mirrors the re-pin
+  // write: one key via `jsonb_set` so concurrent writers to `contextSnapshot`
+  // are not clobbered, compare-and-set against the pin this request resolved
+  // from so a run whose pin moved underneath us gets no grant.
+  async function grantLiveCommentScope(scope: {
+    companyId: string;
+    watchedIssueId: string;
+    stopFingerprint: string | null;
+    runId: string | null;
+  }) {
+    if (!scope.runId || !scope.stopFingerprint) return false;
+    const run = await db
+      .select({ companyId: heartbeatRuns.companyId, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scope.runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run || run.companyId !== scope.companyId) return false;
+
+    const grant: TaskWatchdogLiveCommentScope = {
+      version: 1,
+      watchedIssueId: scope.watchedIssueId,
+      stopFingerprint: scope.stopFingerprint,
+    };
+    // Same read-precedence fallback as the pin: `taskWatchdog` may be the
+    // literal `true`, in which case the resolver reads the top level.
+    const scopePath = isPlainRecord(parseObject(run.contextSnapshot).taskWatchdog)
+      ? sql`array['taskWatchdog', ${TASK_WATCHDOG_LIVE_COMMENT_SCOPE_KEY}]`
+      : sql`array[${TASK_WATCHDOG_LIVE_COMMENT_SCOPE_KEY}]`;
+    const currentPin = sql`coalesce(
+      ${heartbeatRuns.contextSnapshot} #>> array['taskWatchdog', 'stopFingerprint'],
+      ${heartbeatRuns.contextSnapshot} #>> array['stopFingerprint']
+    )`;
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: sql`jsonb_set(
+          case
+            when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+              then ${heartbeatRuns.contextSnapshot}
+            else '{}'::jsonb
+          end,
+          ${scopePath},
+          ${JSON.stringify(grant)}::jsonb,
+          true
+        )`,
+      })
+      .where(and(
+        eq(heartbeatRuns.id, scope.runId),
+        sql`${currentPin} is not distinct from ${scope.stopFingerprint}::text`,
+      ))
+      .returning({ id: heartbeatRuns.id });
+    return updated.length > 0;
+  }
+
   async function repinMutationScope(
     scope: {
       kind: "watchdog";
@@ -1798,6 +1947,32 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
     const classifierInput = await collectClassifierInput(watchdog.companyId, watchdog);
     const classification = classifyTaskWatchdogSubtree(classifierInput);
+    // The run's action restored a live execution path — the outcome the
+    // watchdog mandate is actually asking for. There is no stop fingerprint on
+    // a live subtree, so there is nothing to re-pin to; grant the run
+    // comment-only scope instead, so it can still say what it did on the source
+    // issue. See `revalidateMutationScope` for why a comment is inert.
+    if (classification.state === "live") {
+      const unattributedIssueIds = unattributedLivePaths({
+        liveIssueIds: classification.liveIssueIds,
+        authorizedIssueIds: attribution.authorizedIssueIds,
+        parentByIssueId: new Map(classifierInput.issues.map((issue) => [issue.id, issue.parentId ?? null])),
+      });
+      if (unattributedIssueIds.length > 0) {
+        return {
+          repinned: false as const,
+          reason: "unattributed_live_path",
+          classificationState: classification.state,
+          unattributedIssueIds,
+        };
+      }
+      const granted = await grantLiveCommentScope(scope);
+      return {
+        repinned: false as const,
+        reason: granted ? "live_comment_scope_granted" : "run_context_changed",
+        classificationState: classification.state,
+      };
+    }
     if (classification.state !== "stopped") {
       return {
         repinned: false as const,
