@@ -228,6 +228,7 @@ function registerModuleMocks() {
       upsertForIssue: vi.fn(),
       disableForIssue: vi.fn(async () => null),
       revalidateMutationScope: vi.fn(async (scope: unknown) => ({ allowed: true, scope })),
+      repinMutationScope: vi.fn(async () => ({ repinned: false, reason: "fingerprint_unchanged" })),
     }),
     logActivity: mockLogActivity,
     projectService: () => ({}),

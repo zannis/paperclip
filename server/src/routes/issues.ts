@@ -460,6 +460,7 @@ function noopTaskWatchdogService(): TaskWatchdogService {
         pendingInteractionsByIssueId: {},
       },
     }),
+    repinMutationScope: async () => ({ repinned: false as const, reason: "watchdog_service_unavailable" }),
   };
 }
 
@@ -4279,6 +4280,37 @@ export function issueRoutes(
     return true;
   }
 
+  // A single request can pass more than one watchdog freshness check (creating
+  // a child validates the parent too), and one re-pin per response is enough.
+  const pendingTaskWatchdogRepins = new WeakSet<Response>();
+
+  // Several of the operations a watchdog run is allowed to perform are inputs
+  // to the stop fingerprint the run is pinned to, so the run's own sanctioned
+  // action would otherwise lock it out of everything it does next. Re-pin the
+  // run onto the state it just produced — but only once the mutation has
+  // actually committed, which is why this hangs off the response instead of
+  // running inline.
+  function scheduleTaskWatchdogRepin(
+    res: Response,
+    scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
+  ) {
+    if (scope.kind !== "watchdog" || !scope.runId) return;
+    if (pendingTaskWatchdogRepins.has(res)) return;
+    pendingTaskWatchdogRepins.add(res);
+    res.once("finish", () => {
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      // Re-pinning sits on top of a guard that already fails closed: if it does
+      // not land, the run's next watched-subtree mutation is rejected exactly
+      // as it is today. The response has already been sent by this point, so a
+      // failure here must never escape as an unhandled error.
+      try {
+        void taskWatchdogsSvc.repinMutationScope(scope).catch(() => {});
+      } catch {
+        // no-op
+      }
+    });
+  }
+
   async function assertFreshTaskWatchdogSourceMutation(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
@@ -4288,7 +4320,10 @@ export function issueRoutes(
     if (scope.watchdogIssueId && issue.id === scope.watchdogIssueId) return true;
 
     const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
-    if (revalidated.allowed) return true;
+    if (revalidated.allowed) {
+      scheduleTaskWatchdogRepin(res, scope);
+      return true;
+    }
     res.status(409).json({
       error: revalidated.reason,
       details: {
@@ -4451,6 +4486,7 @@ export function issueRoutes(
           message: "This issue-thread interaction is outside the current watchdog scope",
         });
       }
+      scheduleTaskWatchdogRepin(res, watchdogScope);
       return true;
     }
 
@@ -4608,6 +4644,7 @@ export function issueRoutes(
               message: "Suggested-task creation is outside the current watchdog scope",
             });
           }
+          scheduleTaskWatchdogRepin(res, watchdogScope);
         }
         await assertTaskBridgeCreateAllowed(req, issue.companyId, {
           projectId: task.projectId ?? issue.projectId,

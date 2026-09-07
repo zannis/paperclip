@@ -22,7 +22,7 @@ import { logActivity } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
+import { isPlainRecord, TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
@@ -1657,6 +1657,95 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     };
   }
 
+  // A watchdog run is pinned to the stop fingerprint its wake observed, and
+  // `revalidateMutationScope` requires an exact match on every watched-subtree
+  // mutation. Four of the operations a watchdog run is explicitly allowed to
+  // perform (creating a follow-up child, transitioning a leaf, reassigning a
+  // leaf, resolving an interaction) are inputs to that very fingerprint, so the
+  // run's first sanctioned action rotated the hash and locked the run out of
+  // the subtree for everything after it — including the summary comment that
+  // explains what it just did.
+  //
+  // Re-pinning the run onto the state its own authorized mutation produced
+  // keeps the property the guard exists for: a *third party* moving the subtree
+  // still diverges from the re-pinned value and is still rejected.
+  //
+  // Deliberately narrow: this only re-pins while the subtree is still
+  // `stopped`. A run whose action restored a live path is not re-pinned, so the
+  // guard keeps rejecting it on state — that is a different case with a
+  // different safety argument and is not addressed here.
+  async function repinMutationScope(scope: {
+    kind: "watchdog";
+    watchdogId: string;
+    companyId: string;
+    watchedIssueId: string;
+    stopFingerprint: string | null;
+    runId: string | null;
+  }) {
+    if (!scope.runId) {
+      return { repinned: false as const, reason: "missing_run_id" };
+    }
+
+    const watchdog = await db
+      .select()
+      .from(issueWatchdogs)
+      .where(and(
+        eq(issueWatchdogs.id, scope.watchdogId),
+        eq(issueWatchdogs.companyId, scope.companyId),
+        eq(issueWatchdogs.issueId, scope.watchedIssueId),
+        eq(issueWatchdogs.status, "active"),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!watchdog) {
+      return { repinned: false as const, reason: "watchdog_not_active" };
+    }
+
+    const classification = classifyTaskWatchdogSubtree(
+      await collectClassifierInput(watchdog.companyId, watchdog),
+    );
+    if (classification.state !== "stopped") {
+      return { repinned: false as const, reason: "subtree_not_stopped" };
+    }
+    if (classification.stopFingerprint === scope.stopFingerprint) {
+      return { repinned: false as const, reason: "fingerprint_unchanged" };
+    }
+
+    const run = await db
+      .select({
+        id: heartbeatRuns.id,
+        companyId: heartbeatRuns.companyId,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scope.runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run || run.companyId !== scope.companyId) {
+      return { repinned: false as const, reason: "run_not_found" };
+    }
+
+    const context = parseObject(run.contextSnapshot);
+    const taskWatchdog = context.taskWatchdog;
+    // `taskWatchdog` may legitimately be the literal `true`, in which case the
+    // scope resolver falls back to reading the fingerprint from the top level
+    // of the context. Write the new value back to whichever of the two places
+    // that resolver will actually read, and preserve the other shape as-is.
+    const nextContext = isPlainRecord(taskWatchdog)
+      ? { ...context, taskWatchdog: { ...taskWatchdog, stopFingerprint: classification.stopFingerprint } }
+      : { ...context, stopFingerprint: classification.stopFingerprint };
+
+    await db
+      .update(heartbeatRuns)
+      .set({ contextSnapshot: nextContext })
+      .where(eq(heartbeatRuns.id, run.id));
+
+    return {
+      repinned: true as const,
+      previousStopFingerprint: scope.stopFingerprint,
+      stopFingerprint: classification.stopFingerprint,
+      classification,
+    };
+  }
+
   return {
     getActiveForIssue: async (companyId: string, issueId: string): Promise<IssueWatchdog | null> => {
       const row = await db
@@ -1811,5 +1900,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     },
 
     revalidateMutationScope,
+    repinMutationScope,
   };
 }

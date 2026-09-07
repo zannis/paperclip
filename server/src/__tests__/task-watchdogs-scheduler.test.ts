@@ -23,6 +23,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { taskWatchdogService } from "../services/task-watchdogs.ts";
+import { resolveTaskWatchdogMutationScope } from "../services/task-watchdog-scope.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -590,6 +591,122 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       latestDocumentAt: new Date(later.getTime() + 1_000).toISOString(),
       latestWorkProductAt: new Date(later.getTime() + 2_000).toISOString(),
     });
+  });
+
+  // Seeds a watchdog that has already woken, plus a run pinned to the
+  // fingerprint that wake observed — the state a watchdog run is actually in
+  // when it starts taking recovery actions.
+  async function seedWokenWatchdogRun(identifier: string) {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier, status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service } = createService();
+
+    await service.reconcileTaskWatchdogs({ companyId });
+    const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
+    const pinnedFingerprint = watchdog!.lastObservedFingerprint!;
+    expect(pinnedFingerprint).toMatch(/^task_watchdog_stop:/);
+
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: {
+        taskWatchdog: { watchedIssueId: sourceId, stopFingerprint: pinnedFingerprint },
+      },
+    }).returning();
+
+    const actor = { type: "agent", agentId, companyId, runId: run!.id };
+    const resolveScope = async () => {
+      const scope = await resolveTaskWatchdogMutationScope(db, actor);
+      if (scope.kind !== "watchdog") throw new Error(`Expected watchdog scope, got ${scope.kind}`);
+      return scope;
+    };
+
+    return { companyId, sourceId, agentId, service, pinnedFingerprint, resolveScope };
+  }
+
+  it("lets a watchdog run keep mutating the subtree after its own sanctioned action rotated the fingerprint", async () => {
+    const { companyId, sourceId, service, pinnedFingerprint, resolveScope } = await seedWokenWatchdogRun(
+      "WDOG-REPIN",
+    );
+
+    const scope = await resolveScope();
+    expect(scope.stopFingerprint).toBe(pinnedFingerprint);
+    expect((await service.revalidateMutationScope(scope)).allowed).toBe(true);
+
+    // The run's first sanctioned recovery action: create an approved follow-up
+    // child inside the watched subtree. The new non-terminal leaf enters
+    // `materialLeaves`, so this allowed operation rotates the very fingerprint
+    // the run is pinned to.
+    await seedIssue(companyId, { identifier: "WDOG-REPIN-CHILD", status: "todo", parentId: sourceId });
+
+    const stale = await service.revalidateMutationScope(scope);
+    expect(stale.allowed).toBe(false);
+    expect(stale.reason).toContain("stop fingerprint changed");
+    // The subtree did not become live — only the hash moved. This is the
+    // self-inflicted staleness being fixed.
+    expect(stale.classification?.state).toBe("stopped");
+
+    const repin = await service.repinMutationScope(scope);
+    expect(repin.repinned).toBe(true);
+
+    // The next request in the same run re-reads its scope from the run context,
+    // so it must now see the re-pinned fingerprint and be allowed to proceed
+    // (this is the summary comment the run previously could not post).
+    const nextScope = await resolveScope();
+    expect(nextScope.stopFingerprint).not.toBe(pinnedFingerprint);
+    const after = await service.revalidateMutationScope(nextScope);
+    expect(after.allowed).toBe(true);
+  });
+
+  it("still rejects a concurrent third-party change after the run re-pinned itself", async () => {
+    const { companyId, sourceId, service, resolveScope } = await seedWokenWatchdogRun("WDOG-REPIN-CONTROL");
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-REPIN-CONTROL-CHILD",
+      status: "todo",
+      parentId: sourceId,
+    });
+    expect((await service.repinMutationScope(await resolveScope())).repinned).toBe(true);
+    const repinnedScope = await resolveScope();
+    expect((await service.revalidateMutationScope(repinnedScope)).allowed).toBe(true);
+
+    // Somebody other than this run now moves the watched subtree. This is the
+    // property the freshness guard exists for and it must survive re-pinning.
+    await db.update(issues)
+      .set({ status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, childId));
+
+    const afterExternalChange = await service.revalidateMutationScope(repinnedScope);
+    expect(afterExternalChange.allowed).toBe(false);
+    expect(afterExternalChange.reason).toContain("stop fingerprint changed");
+  });
+
+  it("does not re-pin a run whose action left the watched subtree live", async () => {
+    const { companyId, sourceId, service, pinnedFingerprint, resolveScope } = await seedWokenWatchdogRun(
+      "WDOG-REPIN-LIVE",
+    );
+    const scope = await resolveScope();
+
+    // A recovery action that restores a live path takes the subtree out of the
+    // `stopped` state entirely. Re-pinning deliberately does not cover that
+    // case, so the run stays pinned to what its wake observed.
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: sourceId },
+    });
+
+    const repin = await service.repinMutationScope(scope);
+    expect(repin.repinned).toBe(false);
+    expect(repin.reason).toBe("subtree_not_stopped");
+    expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
   });
 
   it("surfaces pending interaction kinds and approval ids in the wake and watchdog comment", async () => {

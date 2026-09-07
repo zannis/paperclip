@@ -28,9 +28,14 @@ export type TaskWatchdogMutationScope =
       watchedIssueId: string;
       watchdogIssueId: string | null;
       stopFingerprint: string | null;
+      // The run whose context pinned `stopFingerprint`. Carried so that a
+      // mutation this run was authorized to make can re-pin the run onto the
+      // state it just produced, instead of locking the run out of its own
+      // subtree for the rest of the run.
+      runId: string | null;
     };
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -118,6 +123,7 @@ export async function resolveTaskWatchdogMutationScope(
     watchedIssueId: watchdog.issueId,
     watchdogIssueId: watchdog.watchdogIssueId ?? null,
     stopFingerprint: taskWatchdog.stopFingerprint,
+    runId: run.id,
   };
 }
 
