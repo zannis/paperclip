@@ -1763,6 +1763,24 @@ function isApprovalReviewComment(body: string) {
   );
 }
 
+// Whether a comment request can only add a comment. The comment route is not a
+// read-only surface: `resume`/`reopen` move a terminal or blocked issue back to
+// `todo`, `interrupt` cancels the issue's live run, and an approval-marker body
+// drives an execution-policy decision through
+// `applyIssueExecutionPolicyTransition`. Each of those is a state change
+// wearing a comment's clothes.
+//
+// This matters to the task-watchdog freshness guard specifically: its
+// live-subtree relaxation exists only because a plain comment provably cannot
+// change the watched subtree's classification or rotate its stop fingerprint.
+// A request carrying any of these therefore takes the strict check — and the
+// re-pin that goes with it — exactly like a status PATCH.
+function issueCommentWatchdogIntent(body: unknown): "comment" | "mutate" {
+  const payload = readObject(body);
+  if (payload.resume === true || payload.reopen === true || payload.interrupt === true) return "mutate";
+  return typeof payload.body === "string" && isApprovalReviewComment(payload.body) ? "mutate" : "comment";
+}
+
 function buildExecutionStageWakeContext(input: {
   state: ParsedExecutionState;
   wakeRole: ExecutionStageWakeContext["wakeRole"];
@@ -4116,7 +4134,9 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, { intent: "comment" });
+      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
+        intent: issueCommentWatchdogIntent(req.body),
+      });
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
@@ -4370,10 +4390,12 @@ export function issueRoutes(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
     issue: { id: string },
-    // A comment is the one write that cannot change the watched subtree's
-    // classification or its stop fingerprint, so it is the one write a run that
-    // restored a live path can still be trusted with. Everything else defaults
-    // to the strict check.
+    // A comment that only adds a comment is the one write that cannot change
+    // the watched subtree's classification or its stop fingerprint, so it is
+    // the one write a run that restored a live path can still be trusted with.
+    // The caller decides that per request (`issueCommentWatchdogIntent`), not
+    // per route, because the comment route also carries state changes.
+    // Everything else defaults to the strict check.
     opts: { intent?: "comment" | "mutate" } = {},
   ) {
     if (scope.kind !== "watchdog") return true;

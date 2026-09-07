@@ -1129,6 +1129,60 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect((await service.revalidateMutationScope(rescoped)).allowed).toBe(false);
   });
 
+  // The grant lives on the run's context row, and that row outlives the run.
+  // Only the run's own status makes the grant die with it — without that check
+  // a finished run's context keeps admitting writes to a subtree that has had
+  // a live owner ever since.
+  it("stops honouring the comment grant once the run itself is terminal", async () => {
+    const { companyId, agentId, childIds, runId, service, resolveScope, admitMutation } =
+      await seedWokenWatchdogRun("WDOG-LIVE-RUN-ENDED", { establishedChildren: ["WDOG-LIVE-RUN-ENDED-LEAF"] });
+    const leafId = childIds[0]!;
+
+    const scope = await resolveScope();
+    const previousStopSnapshot = await admitMutation(scope);
+    await db.update(issues)
+      .set({ status: "todo", assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    await queueWakeForIssue(companyId, agentId, leafId);
+
+    const outcome = await service.repinMutationScope(scope, {
+      authorizedIssueIds: [leafId],
+      previousStopSnapshot,
+    });
+    expect(outcome.reason).toBe("live_comment_scope_granted");
+
+    const granted = await resolveScope();
+    expect((await service.revalidateMutationScope(granted, { intent: "comment" })).allowed).toBe(true);
+
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runId));
+
+    const afterRunEnded = await service.revalidateMutationScope(granted, { intent: "comment" });
+    expect(afterRunEnded.allowed).toBe(false);
+    expect(afterRunEnded.classification?.state).toBe("live");
+  });
+
+  it("does not issue a comment grant to a run that has already finished", async () => {
+    const { companyId, agentId, childIds, runId, service, resolveScope, admitMutation } =
+      await seedWokenWatchdogRun("WDOG-LIVE-RUN-GONE", { establishedChildren: ["WDOG-LIVE-RUN-GONE-LEAF"] });
+    const leafId = childIds[0]!;
+
+    const scope = await resolveScope();
+    const previousStopSnapshot = await admitMutation(scope);
+    await db.update(issues)
+      .set({ status: "todo", assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    await queueWakeForIssue(companyId, agentId, leafId);
+    await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId));
+
+    const outcome = await service.repinMutationScope(scope, {
+      authorizedIssueIds: [leafId],
+      previousStopSnapshot,
+    });
+    expect(outcome.repinned).toBe(false);
+    expect(outcome.reason).toBe("run_not_live");
+    expect((await service.revalidateMutationScope(scope, { intent: "comment" })).allowed).toBe(false);
+  });
+
   it("surfaces pending interaction kinds and approval ids in the wake and watchdog comment", async () => {
     const companyId = await seedCompany();
     const sourceId = await seedIssue(companyId, { identifier: "WDOG-WAITS", status: "in_review" });

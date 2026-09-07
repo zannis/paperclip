@@ -2239,6 +2239,111 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
+    // `intent: "comment"` is a claim about what the request can *do*, not about
+    // which route it arrived on. The comment route is not a read-only surface:
+    // `resume`/`reopen` move a terminal or blocked issue back to `todo`,
+    // `interrupt` cancels the live run, and an approval-marker body drives an
+    // execution-policy decision. Those are state changes wearing a comment's
+    // clothes, so they take the strict check the same way a status PATCH does.
+    it.each([
+      ["resume", { body: "Picking this back up.", resume: true }],
+      ["reopen", { body: "Picking this back up.", reopen: true }],
+      ["an approval marker", { body: "## Review: APPROVED\n\nShip it." }],
+    ])("takes the strict mutate check for a comment carrying %s", async (_label, payload) => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      mockTaskWatchdogService.revalidateMutationScope.mockClear();
+      await request(app).post(`/api/issues/${issueId}/comments`).send(payload);
+
+      // The comment gate is the first thing the route consults, and it is the
+      // one whose verdict this request rides in on.
+      expect(mockTaskWatchdogService.revalidateMutationScope.mock.calls[0]?.[1]).toEqual({ intent: "mutate" });
+    });
+
+    // The regression this guards: the live-subtree grant is issued on the
+    // premise that a comment cannot change the watched subtree. A `resume` on
+    // the comment route breaks that premise, so it must not ride in on the
+    // grant — it has to fail the strict check like any other state change.
+    it("does not let a live-subtree comment grant carry a resume through the comment route", async () => {
+      // A default-open company: `issue:mutate` resolves to the visible-write
+      // decision, which is what lets `assertExplicitResumeIntentAllowed` admit
+      // a follow-up on another agent's issue. That is the shape in which the
+      // comment route's `resume` actually reaches `svc.update`.
+      mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+        allowed: true,
+        action: input.action,
+        reason: input.action === "issue:mutate" ? "allow_visible_issue_write" : "allow_explicit_grant",
+        explanation: "Default-open write boundary.",
+      }));
+      // `blocked` with no unresolved blockers is the state a comment-route
+      // `resume` moves back to `todo` without ever consulting the mutation
+      // gate — only the comment gate stands between the request and the write.
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+      mockTaskWatchdogService.revalidateMutationScope.mockImplementation(
+        async (_scope: unknown, opts?: { intent?: string }) =>
+          opts?.intent === "comment"
+            ? {
+              allowed: true,
+              classification: { state: "live", liveIssueIds: [issueId] },
+              liveCommentScope: true,
+            }
+            : {
+              allowed: false,
+              reason:
+                "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
+              classification: { state: "live", liveIssueIds: [issueId] },
+            },
+      );
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app)
+        .post(`/api/issues/${issueId}/comments`)
+        .send({ body: "Reassigned the stalled leaf.", resume: true });
+
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+
+    // The other half of treating a state-changing comment as a mutation: it
+    // rotates the fingerprint the run is pinned to, so it has to re-pin, or the
+    // run is locked out of everything it does afterwards.
+    it("re-pins the run after a comment that moves the watched issue", async () => {
+      mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+        allowed: true,
+        action: input.action,
+        reason: input.action === "issue:mutate" ? "allow_visible_issue_write" : "allow_explicit_grant",
+        explanation: "Default-open write boundary.",
+      }));
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app)
+        .post(`/api/issues/${issueId}/comments`)
+        .send({ body: "Handing this back.", resume: true });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "todo" }));
+      expect(mockTaskWatchdogService.repinMutationScope).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "watchdog" }),
+        expect.objectContaining({ authorizedIssueIds: [issueId] }),
+      );
+    });
+
     it.each([
       ["in_progress"],
       ["blocked"],

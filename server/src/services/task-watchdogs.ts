@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, asc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agentWakeupRequests,
@@ -30,6 +30,12 @@ const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"]
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
 const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
+
+function isTerminalWatchdogRunStatus(status: string | null | undefined) {
+  return TASK_WATCHDOG_TERMINAL_RUN_STATUSES.includes(
+    status as (typeof TASK_WATCHDOG_TERMINAL_RUN_STATUSES)[number],
+  );
+}
 // Grace window after an issue is created/assigned during which its first
 // assignment run/wake may have been enqueued but is not yet visible to a
 // watchdog evaluation (the eval can race the issue's own assignment run).
@@ -1731,15 +1737,24 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       ));
   }
 
-  // The grant is stored on the run context, next to the pin, so it dies with
-  // the run rather than outliving it on the watchdog row.
+  // The grant is stored on the run context, next to the pin — but the run's
+  // context row outlives the run, so storing it there is not on its own what
+  // makes it die with the run. The run's status is: a grant is only honoured
+  // while the run that earned it is still going. Once the run reaches a
+  // terminal status it has no business writing to a subtree that has had a
+  // live owner ever since.
   async function readLiveCommentScope(runId: string, companyId: string) {
     const run = await db
-      .select({ companyId: heartbeatRuns.companyId, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .select({
+        companyId: heartbeatRuns.companyId,
+        status: heartbeatRuns.status,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
     if (!run || run.companyId !== companyId) return null;
+    if (isTerminalWatchdogRunStatus(run.status)) return null;
     const context = parseObject(run.contextSnapshot);
     const taskWatchdog = isPlainRecord(context.taskWatchdog) ? context.taskWatchdog : context;
     return parseLiveCommentScope(taskWatchdog[TASK_WATCHDOG_LIVE_COMMENT_SCOPE_KEY]);
@@ -1796,16 +1811,22 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     // reads it. Rejecting that comment on `state` loses exactly the audit trail
     // the guard exists to protect.
     //
-    // The grant is comment-only, and a comment is inert by construction:
-    // `materialLeaf` strips `latestCommentAt`, so it can neither rotate the
-    // stop fingerprint nor change the classification. No authority over state
-    // is granted — a live subtree has a live owner, and the watchdog is not it.
+    // The grant is comment-only, and a comment that only adds a comment is
+    // inert: `materialLeaf` strips `latestCommentAt`, so it can neither rotate
+    // the stop fingerprint nor change the classification. No authority over
+    // state is granted — a live subtree has a live owner, and the watchdog is
+    // not it. That inertness is a property of the *request*, not of the route,
+    // so the caller passes `comment` only for a request that carries no
+    // `resume`/`reopen`/`interrupt` and no approval marker; see
+    // `issueCommentWatchdogIntent` in the issue routes.
     //
     // Attribution is checked once, when the grant is issued (see
     // `repinMutationScope`), against a subtree that provably had no live path a
     // moment earlier. It is deliberately not re-checked here: the restored
     // owner's own work spawns further live paths, and re-checking would revoke
-    // the grant precisely because the recovery worked.
+    // the grant precisely because the recovery worked. The run itself *is*
+    // re-checked on every use — `readLiveCommentScope` refuses a grant whose
+    // run has since reached a terminal status.
     if (intent === "comment" && classification.state === "live" && scope.runId) {
       const granted = await readLiveCommentScope(scope.runId, scope.companyId);
       if (
@@ -1867,13 +1888,21 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     stopFingerprint: string | null;
     runId: string | null;
   }) {
-    if (!scope.runId || !scope.stopFingerprint) return false;
+    if (!scope.runId || !scope.stopFingerprint) return "run_context_changed" as const;
     const run = await db
-      .select({ companyId: heartbeatRuns.companyId, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .select({
+        companyId: heartbeatRuns.companyId,
+        status: heartbeatRuns.status,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, scope.runId))
       .then((rows) => rows[0] ?? null);
-    if (!run || run.companyId !== scope.companyId) return false;
+    if (!run || run.companyId !== scope.companyId) return "run_context_changed" as const;
+    // A run that has already finished earns nothing. The status is re-asserted
+    // in the update below so a run that reaches a terminal status between this
+    // read and the write cannot be granted either.
+    if (isTerminalWatchdogRunStatus(run.status)) return "run_not_live" as const;
 
     const grant: TaskWatchdogLiveCommentScope = {
       version: 1,
@@ -1905,10 +1934,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       })
       .where(and(
         eq(heartbeatRuns.id, scope.runId),
+        notInArray(heartbeatRuns.status, [...TASK_WATCHDOG_TERMINAL_RUN_STATUSES]),
         sql`${currentPin} is not distinct from ${scope.stopFingerprint}::text`,
       ))
       .returning({ id: heartbeatRuns.id });
-    return updated.length > 0;
+    return updated.length > 0 ? ("granted" as const) : ("run_context_changed" as const);
   }
 
   async function repinMutationScope(
@@ -1969,7 +1999,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       const granted = await grantLiveCommentScope(scope);
       return {
         repinned: false as const,
-        reason: granted ? "live_comment_scope_granted" : "run_context_changed",
+        reason: granted === "granted" ? "live_comment_scope_granted" : granted,
         classificationState: classification.state,
       };
     }
