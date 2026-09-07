@@ -143,6 +143,14 @@ export type TaskWatchdogStopSnapshot = {
   waitsByIssueId: TaskWatchdogWaitsByIssueId;
 };
 
+// Every included issue in the watched subtree, terminal ones too, reduced to
+// the same fields the stop fingerprint is built from. `materialLeaves` only
+// carries the issues that were leaves at the time; this carries the rest, so a
+// later diff can still tell what an issue looked like *before* it became a
+// fingerprint input — by being reopened, or by its last live child going
+// terminal. Without it such an issue would have to be admitted unchecked.
+export type TaskWatchdogMaterialByIssueId = Record<string, TaskWatchdogMaterialLeaf>;
+
 type TaskWatchdogPendingInteractionsByIssueId = Record<string, Array<{
   id: string;
   kind: string | null;
@@ -159,12 +167,20 @@ export type TaskWatchdogClassifierResult =
     reason: string;
     includedIssueIds: string[];
     liveIssueIds: string[];
+    // Present on non-stopped states too, so a mutation guard can still diff the
+    // fingerprint inputs. On these states it describes the subtree, not a
+    // verdict: the subtree is *not* stopped and `fingerprint` inside it must
+    // never be treated as one the watchdog may pin to or review.
+    stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
   }
   | {
     state: "pending_first_run";
     reason: string;
     includedIssueIds: string[];
     pendingIssueIds: string[];
+    stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
   }
   | {
     state: "already_reviewed";
@@ -173,6 +189,7 @@ export type TaskWatchdogClassifierResult =
     stopFingerprint: string;
     stoppedLeaves: TaskWatchdogStoppedLeaf[];
     stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
     pendingInteractionsByIssueId: TaskWatchdogPendingInteractionsByIssueId;
   }
   | {
@@ -182,6 +199,7 @@ export type TaskWatchdogClassifierResult =
     stopFingerprint: string;
     stoppedLeaves: TaskWatchdogStoppedLeaf[];
     stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
     pendingInteractionsByIssueId: TaskWatchdogPendingInteractionsByIssueId;
   };
 
@@ -356,78 +374,190 @@ function canonicalJson(value: unknown): string {
       : val);
 }
 
-export type TaskWatchdogRepinAttribution = {
-  // The issue ids the request being re-pinned for was authorized to mutate.
-  authorizedIssueIds: string[];
-  // The subtree snapshot the freshness guard admitted that request against —
-  // the state immediately *before* the run's own mutation.
-  previousStopSnapshot: TaskWatchdogStopSnapshot | null;
+export const TASK_WATCHDOG_MATERIAL_LEAF_FIELDS = [
+  "status",
+  "assigneeAgentId",
+  "assigneeUserId",
+  "blockerIssueIds",
+  "pendingInteractionIds",
+  "pendingApprovalIds",
+] as const;
+
+// The leaf fields one authorized request wrote, and the value it wrote them to.
+// These come from the row the request's *own* statement returned, never from a
+// later re-read of the issue: a re-read cannot distinguish the value this run
+// wrote from a value a third party wrote over it a millisecond afterwards, and
+// folding that second value in is precisely the laundering this guards against.
+// A field the request did not write is absent, which asserts it did not change.
+export type TaskWatchdogDeclaredLeafWrite = Partial<Pick<
+  TaskWatchdogMaterialLeaf,
+  (typeof TASK_WATCHDOG_MATERIAL_LEAF_FIELDS)[number]
+>>;
+
+export type TaskWatchdogAuthorizedMutation = {
+  issueId: string;
+  declared: TaskWatchdogDeclaredLeafWrite;
+  // Set when the run created this issue during the mutation. A created issue
+  // has no baseline to diff against, so `declared` must cover every material
+  // field for it to be attributable at all.
+  created?: boolean;
 };
 
-// Which watched leaves moved between the snapshot a mutation was admitted
-// against and the subtree as it stands now, minus the ones the run was
-// authorized to move. A non-empty result means somebody other than this run
-// changed the subtree in the same window, so the run must not be re-pinned onto
-// a fingerprint that includes their change.
+// What a watchdog run has been authorized to do to the watched subtree so far,
+// carried in the run's own context. `baseline` is the subtree as it stood when
+// the run was last validated against the fingerprint it is pinned to, and
+// `mutations` is every leaf write admitted since. Together they say exactly
+// what the subtree should look like now if nobody but this run has touched it.
+export type TaskWatchdogMutationLedger = {
+  version: 1;
+  baseline: TaskWatchdogStopSnapshot;
+  baselineMaterialByIssueId: TaskWatchdogMaterialByIssueId;
+  mutations: TaskWatchdogAuthorizedMutation[];
+};
+
+export type TaskWatchdogLedgerBaseline = {
+  baseline: TaskWatchdogStopSnapshot;
+  baselineMaterialByIssueId: TaskWatchdogMaterialByIssueId;
+};
+
+function mergeDeclaredWrites(mutations: TaskWatchdogAuthorizedMutation[]) {
+  const merged = new Map<string, { declared: TaskWatchdogDeclaredLeafWrite; created: boolean }>();
+  for (const mutation of mutations) {
+    if (!mutation || typeof mutation.issueId !== "string") continue;
+    const current = merged.get(mutation.issueId) ?? { declared: {}, created: false };
+    // Later writes in the same run supersede earlier ones on the same field.
+    merged.set(mutation.issueId, {
+      declared: { ...current.declared, ...(mutation.declared ?? {}) },
+      created: current.created || mutation.created === true,
+    });
+  }
+  return merged;
+}
+
+function declarationCoversEveryMaterialField(declared: TaskWatchdogDeclaredLeafWrite) {
+  return TASK_WATCHDOG_MATERIAL_LEAF_FIELDS.every((field) => declared[field] !== undefined);
+}
+
+// Which fingerprint inputs moved in a way this run cannot account for.
 //
-// Structural side effects of an authorized mutation are attributable too, and
-// only those: a leaf created directly under an authorized issue (the run's
-// follow-up child), and an issue that became a leaf because an authorized
-// descendant of it went terminal. Both are consequences of the authorized
-// change on that branch; a change anywhere else is not.
-function unattributedSubtreeChanges(input: {
-  previous: TaskWatchdogStopSnapshot;
+// The subtree as it stands now is compared against `baseline + declared`: every
+// leaf must hold exactly the value it had at baseline, overwritten only by the
+// fields an authorized request of this run reported writing. Anything else —
+// a field nobody declared, a declared field that ended up at a different value,
+// a leaf that appeared or vanished without a declaration explaining it — is
+// somebody else's change, and the run must not be allowed to keep mutating a
+// subtree that moved underneath it.
+//
+// The comparison is deliberately scoped to the fingerprint's own inputs (the
+// material leaves and the waiting paths). A change to a watched issue that the
+// fingerprint does not cover never blocked a watchdog run before and must not
+// start to.
+export function unattributedSubtreeChanges(input: {
+  ledger: TaskWatchdogMutationLedger;
   next: TaskWatchdogStopSnapshot;
-  authorizedIssueIds: string[];
   parentByIssueId: Map<string, string | null>;
 }): string[] {
-  const authorized = new Set(input.authorizedIssueIds);
-  const authorizedAncestors = new Set<string>();
-  for (const issueId of authorized) {
-    let currentId = input.parentByIssueId.get(issueId) ?? null;
-    for (let depth = 0; currentId && depth < TASK_WATCHDOG_SUBTREE_MAX_DEPTH; depth += 1) {
-      if (authorizedAncestors.has(currentId)) break;
-      authorizedAncestors.add(currentId);
-      currentId = input.parentByIssueId.get(currentId) ?? null;
-    }
-  }
-
-  const previousLeaves = new Map(input.previous.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
+  const declaredByIssueId = mergeDeclaredWrites(input.ledger.mutations ?? []);
+  const baselineMaterial = input.ledger.baselineMaterialByIssueId ?? {};
+  const baselineLeafIds = new Set(input.ledger.baseline.materialLeaves.map((leaf) => leaf.issueId));
   const nextLeaves = new Map(input.next.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
   const unattributed = new Set<string>();
+  const attributableNewLeafParentIds = new Set<string>();
 
   for (const [issueId, leaf] of nextLeaves) {
-    const before = previousLeaves.get(issueId);
-    if (!before) {
-      const parentId = input.parentByIssueId.get(issueId) ?? null;
-      const attributable = authorized.has(issueId) ||
-        (parentId != null && authorized.has(parentId)) ||
-        authorizedAncestors.has(issueId);
-      if (!attributable) unattributed.add(issueId);
+    const declared = declaredByIssueId.get(issueId);
+    const before = baselineMaterial[issueId] ?? null;
+    if (before) {
+      const expected = { ...before, ...(declared?.declared ?? {}), issueId };
+      if (canonicalJson(expected) !== canonicalJson(leaf)) unattributed.add(issueId);
       continue;
     }
-    if (canonicalJson(before) !== canonicalJson(leaf) && !authorized.has(issueId)) {
+    // The issue did not exist in the watched subtree at baseline, so there is
+    // nothing to diff it against. Only a request that reported creating it, and
+    // reported every field it created it with, can account for it.
+    if (!declared?.created || !declarationCoversEveryMaterialField(declared.declared)) {
       unattributed.add(issueId);
+      continue;
     }
+    if (canonicalJson({ ...declared.declared, issueId }) !== canonicalJson(leaf)) {
+      unattributed.add(issueId);
+      continue;
+    }
+    const parentId = input.parentByIssueId.get(issueId) ?? null;
+    if (parentId != null) attributableNewLeafParentIds.add(parentId);
   }
-  // A leaf leaves the set when it goes terminal or gains a child — either way
-  // the run had to have been authorized to mutate it.
-  for (const issueId of previousLeaves.keys()) {
-    if (nextLeaves.has(issueId) || authorized.has(issueId)) continue;
+
+  // A leaf leaves the fingerprint when it goes terminal or gains a child. Both
+  // have to be explained: the run declared a terminal status for it, or the run
+  // created the child that displaced it.
+  for (const issueId of baselineLeafIds) {
+    if (nextLeaves.has(issueId)) continue;
+    const declaredStatus = declaredByIssueId.get(issueId)?.declared.status;
+    const wentTerminalOnPurpose = declaredStatus != null && isTerminalIssueStatus(declaredStatus);
+    if (wentTerminalOnPurpose || attributableNewLeafParentIds.has(issueId)) continue;
     unattributed.add(issueId);
   }
 
+  // Waiting paths are a fingerprint input in their own right and are tracked
+  // for non-terminal issues whether or not they are leaves, so they get the
+  // same baseline-plus-declared treatment.
   const waitIssueIds = new Set([
-    ...Object.keys(input.previous.waitsByIssueId),
+    ...Object.keys(input.ledger.baseline.waitsByIssueId),
     ...Object.keys(input.next.waitsByIssueId),
   ]);
   for (const issueId of waitIssueIds) {
-    const before = canonicalJson(input.previous.waitsByIssueId[issueId] ?? null);
-    const after = canonicalJson(input.next.waitsByIssueId[issueId] ?? null);
-    if (before !== after && !authorized.has(issueId)) unattributed.add(issueId);
+    if (unattributed.has(issueId)) continue;
+    const declared = declaredByIssueId.get(issueId)?.declared ?? {};
+    const before = baselineMaterial[issueId] ?? null;
+    const baselineWaits = input.ledger.baseline.waitsByIssueId[issueId] ?? null;
+    const pendingInteractionIds = declared.pendingInteractionIds
+      ?? before?.pendingInteractionIds
+      ?? baselineWaits?.pendingInteractionIds
+      ?? [];
+    const pendingApprovalIds = declared.pendingApprovalIds
+      ?? before?.pendingApprovalIds
+      ?? baselineWaits?.pendingApprovalIds
+      ?? [];
+    const status = declared.status ?? before?.status ?? null;
+    const expected = (status != null && isTerminalIssueStatus(status))
+        || (pendingInteractionIds.length === 0 && pendingApprovalIds.length === 0)
+      ? null
+      : { pendingInteractionIds, pendingApprovalIds };
+    if (canonicalJson(expected) !== canonicalJson(input.next.waitsByIssueId[issueId] ?? null)) {
+      unattributed.add(issueId);
+    }
   }
 
   return [...unattributed].sort();
+}
+
+// Whether the reason the subtree is no longer stopped is this run's own doing.
+// A watchdog that reopens a leaf or creates a follow-up child makes the subtree
+// live or pending-first-run by design — that is the recovery working — and the
+// mandate then asks it to record what it did. Liveness nobody in this run's
+// ledger accounts for is a third party and still stops the run dead.
+function unattributedLivenessIssueIds(
+  ledger: TaskWatchdogMutationLedger,
+  livenessIssueIds: string[],
+) {
+  const declaredByIssueId = mergeDeclaredWrites(ledger.mutations ?? []);
+  return livenessIssueIds.filter((issueId) => !declaredByIssueId.has(issueId)).sort();
+}
+
+function parseMutationLedger(value: unknown): TaskWatchdogMutationLedger | null {
+  if (!isPlainRecord(value)) return null;
+  const candidate = value as Partial<TaskWatchdogMutationLedger>;
+  if (candidate.version !== 1) return null;
+  const baseline = parseStopSnapshot(candidate.baseline);
+  if (!baseline) return null;
+  if (!isPlainRecord(candidate.baselineMaterialByIssueId)) return null;
+  if (!Array.isArray(candidate.mutations)) return null;
+  return {
+    version: 1,
+    baseline,
+    baselineMaterialByIssueId: candidate.baselineMaterialByIssueId as TaskWatchdogMaterialByIssueId,
+    mutations: candidate.mutations as TaskWatchdogAuthorizedMutation[],
+  };
 }
 
 function isShrinkOfReviewedSnapshot(
@@ -482,49 +612,6 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
 
   const includedIds = included.map((issue) => issue.id);
   const includedIdSet = new Set(includedIds);
-  const liveIssueIds = [
-    ...pathIssueIds(input.activeRuns, input.watchdog.companyId),
-    ...pathIssueIds(input.queuedWakeRequests, input.watchdog.companyId),
-  ].filter((issueId) => includedIdSet.has(issueId));
-  const uniqueLiveIssueIds = [...new Set(liveIssueIds)].sort();
-  if (uniqueLiveIssueIds.length > 0) {
-    return {
-      state: "live",
-      reason: "At least one issue in the watched subtree has a live run, queued wake, or scheduled retry.",
-      includedIssueIds: includedIds,
-      liveIssueIds: uniqueLiveIssueIds,
-    };
-  }
-
-  // Pending-first-run guard: a watchdog evaluation triggered as part of issue
-  // (or watchdog) creation can read its snapshot before the issue's own
-  // assignment run/wake is committed/visible, making an actively-starting
-  // subtree look idle. Suppress the stopped verdict for non-terminal issues
-  // created within the first-run grace window that have never completed a run.
-  const evaluatedAtMs = toEpochMs(input.evaluatedAt);
-  const graceMs = input.firstRunGraceMs ?? 0;
-  if (evaluatedAtMs != null && graceMs > 0) {
-    const completedRunIssueIds = new Set(input.completedRunIssueIds ?? []);
-    const pendingIssueIds = included
-      .filter((issue) => {
-        if (isTerminalIssueStatus(issue.status)) return false;
-        if (completedRunIssueIds.has(issue.id)) return false;
-        const createdAtMs = toEpochMs(issue.createdAt);
-        if (createdAtMs == null) return false;
-        return evaluatedAtMs - createdAtMs < graceMs;
-      })
-      .map((issue) => issue.id)
-      .sort();
-    if (pendingIssueIds.length > 0) {
-      return {
-        state: "pending_first_run",
-        reason:
-          "A watched issue was created within the first-run grace window and has not yet completed a run; deferring evaluation until its first assignment run/wake is observable.",
-        includedIssueIds: includedIds,
-        pendingIssueIds,
-      };
-    }
-  }
 
   const includedChildrenByParentId = new Map<string, string[]>();
   for (const issue of included) {
@@ -590,6 +677,69 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
     materialLeaves,
     waitsByIssueId,
   };
+  const materialByIssueId: TaskWatchdogMaterialByIssueId = Object.fromEntries(included
+    .map((issue) => [issue.id, {
+      issueId: issue.id,
+      status: issue.status,
+      assigneeAgentId: issue.assigneeAgentId,
+      assigneeUserId: issue.assigneeUserId,
+      blockerIssueIds: [...new Set(blockersByIssueId.get(issue.id) ?? [])].sort(),
+      pendingInteractionIds: waitingPathIds(input.pendingInteractions, input.watchdog.companyId, issue.id),
+      pendingApprovalIds: waitingPathIds(input.pendingApprovals, input.watchdog.companyId, issue.id),
+    }] as const));
+
+  // The live and pending-first-run verdicts are decided *after* the fingerprint
+  // inputs are built, not before, so that both carry `stopSnapshot` /
+  // `materialByIssueId`. A watchdog run that has already taken a sanctioned
+  // action needs to diff those inputs even when its own action left the subtree
+  // non-stopped; nothing about the verdicts themselves changed.
+  const liveIssueIds = [
+    ...pathIssueIds(input.activeRuns, input.watchdog.companyId),
+    ...pathIssueIds(input.queuedWakeRequests, input.watchdog.companyId),
+  ].filter((issueId) => includedIdSet.has(issueId));
+  const uniqueLiveIssueIds = [...new Set(liveIssueIds)].sort();
+  if (uniqueLiveIssueIds.length > 0) {
+    return {
+      state: "live",
+      reason: "At least one issue in the watched subtree has a live run, queued wake, or scheduled retry.",
+      includedIssueIds: includedIds,
+      liveIssueIds: uniqueLiveIssueIds,
+      stopSnapshot: currentStopSnapshot,
+      materialByIssueId,
+    };
+  }
+
+  // Pending-first-run guard: a watchdog evaluation triggered as part of issue
+  // (or watchdog) creation can read its snapshot before the issue's own
+  // assignment run/wake is committed/visible, making an actively-starting
+  // subtree look idle. Suppress the stopped verdict for non-terminal issues
+  // created within the first-run grace window that have never completed a run.
+  const evaluatedAtMs = toEpochMs(input.evaluatedAt);
+  const graceMs = input.firstRunGraceMs ?? 0;
+  if (evaluatedAtMs != null && graceMs > 0) {
+    const completedRunIssueIds = new Set(input.completedRunIssueIds ?? []);
+    const pendingIssueIds = included
+      .filter((issue) => {
+        if (isTerminalIssueStatus(issue.status)) return false;
+        if (completedRunIssueIds.has(issue.id)) return false;
+        const createdAtMs = toEpochMs(issue.createdAt);
+        if (createdAtMs == null) return false;
+        return evaluatedAtMs - createdAtMs < graceMs;
+      })
+      .map((issue) => issue.id)
+      .sort();
+    if (pendingIssueIds.length > 0) {
+      return {
+        state: "pending_first_run",
+        reason:
+          "A watched issue was created within the first-run grace window and has not yet completed a run; deferring evaluation until its first assignment run/wake is observable.",
+        includedIssueIds: includedIds,
+        pendingIssueIds,
+        stopSnapshot: currentStopSnapshot,
+        materialByIssueId,
+      };
+    }
+  }
 
   if (
     input.watchdog.lastReviewedFingerprint === stopFingerprint ||
@@ -602,6 +752,7 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
       stopFingerprint,
       stoppedLeaves: leaves,
       stopSnapshot: currentStopSnapshot,
+      materialByIssueId,
       pendingInteractionsByIssueId,
     };
   }
@@ -613,6 +764,7 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
     stopFingerprint,
     stoppedLeaves: leaves,
     stopSnapshot: currentStopSnapshot,
+    materialByIssueId,
     pendingInteractionsByIssueId,
   };
 }
@@ -1685,12 +1837,32 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       ));
   }
 
+  // The freshness guard every watched-subtree mutation passes through, and the
+  // only place drift is adjudicated. It runs *before* the route mutates
+  // anything, so a subtree that moved underneath this run is rejected while
+  // rejecting it still means something: nothing has been written yet.
+  //
+  // Three ways in:
+  //
+  //  1. The subtree still hashes to the fingerprint the run's wake pinned. The
+  //     original fast path, unchanged.
+  //  2. The fingerprint moved, but the run holds a mutation ledger and every
+  //     fingerprint input that moved is `baseline + what this run declared it
+  //     wrote`. That is the run's own sanctioned action catching up with it —
+  //     the lockout this issue is about — and it is admitted.
+  //  3. Anything else, including a subtree that is no longer stopped for
+  //     reasons this run's ledger does not account for. Rejected, as before.
+  //
+  // Note what is *not* here any more: nothing re-reads the subtree after a
+  // mutation to work out what the run did. The run says what it wrote, from its
+  // own `RETURNING` row, and that claim is checked here before the next write.
   async function revalidateMutationScope(scope: {
     kind: "watchdog";
     watchdogId: string;
     companyId: string;
     watchedIssueId: string;
     stopFingerprint: string | null;
+    mutationLedger?: unknown;
   }) {
     if (!scope.stopFingerprint) {
       return {
@@ -1719,50 +1891,82 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     const input = await collectClassifierInput(watchdog.companyId, watchdog);
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
-      return { allowed: true as const, classification };
+      return {
+        allowed: true as const,
+        classification,
+        ledgerBaseline: {
+          baseline: classification.stopSnapshot,
+          baselineMaterialByIssueId: classification.materialByIssueId,
+        } satisfies TaskWatchdogLedgerBaseline,
+      };
     }
 
+    const staleReason = classification.state === "stopped"
+      ? "Task-watchdog review is stale because the watched subtree stop fingerprint changed; refresh the source state before mutating it."
+      : "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.";
+
+    // A malformed or absent ledger is simply no ledger: the run has nothing on
+    // record that could account for the drift, so the guard rejects as it
+    // always did rather than trusting a shape it does not recognise.
+    const ledger = parseMutationLedger(scope.mutationLedger);
+    if (!ledger) return { allowed: false as const, reason: staleReason, classification };
+    // `already_reviewed` and `not_applicable` are verdicts about the watchdog's
+    // own review lifecycle rather than drift, and neither carries a subtree the
+    // ledger can be checked against. They stay rejections.
+    if (
+      classification.state !== "stopped"
+      && classification.state !== "live"
+      && classification.state !== "pending_first_run"
+    ) {
+      return { allowed: false as const, reason: staleReason, classification };
+    }
+
+    const unattributedIssueIds = unattributedSubtreeChanges({
+      ledger,
+      next: classification.stopSnapshot,
+      parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
+    });
+    const unattributedLiveness = classification.state === "live"
+      ? unattributedLivenessIssueIds(ledger, classification.liveIssueIds)
+      : classification.state === "pending_first_run"
+      ? unattributedLivenessIssueIds(ledger, classification.pendingIssueIds)
+      : [];
+    if (unattributedIssueIds.length > 0 || unattributedLiveness.length > 0) {
+      return {
+        allowed: false as const,
+        reason: staleReason,
+        classification,
+        unattributedIssueIds,
+        unattributedLivenessIssueIds: unattributedLiveness,
+      };
+    }
+
+    // The baseline stays put. Drift is always measured from the state the run
+    // was last genuinely validated against, so a run cannot walk the subtree
+    // away from its wake one attributable step at a time.
     return {
-      allowed: false as const,
-      reason: classification.state === "stopped"
-        ? "Task-watchdog review is stale because the watched subtree stop fingerprint changed; refresh the source state before mutating it."
-        : "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
+      allowed: true as const,
       classification,
+      ledgerBaseline: {
+        baseline: ledger.baseline,
+        baselineMaterialByIssueId: ledger.baselineMaterialByIssueId,
+      } satisfies TaskWatchdogLedgerBaseline,
     };
   }
 
-  // A watchdog run is pinned to the stop fingerprint its wake observed, and
-  // `revalidateMutationScope` requires an exact match on every watched-subtree
-  // mutation. Several of the operations a watchdog run is explicitly allowed to
-  // perform (transitioning a leaf, reassigning a leaf, resolving an
-  // interaction, creating a follow-up child) are inputs to that very
-  // fingerprint, so the run's first sanctioned action rotated the hash and
-  // locked the run out of the subtree for everything after it — including the
-  // summary comment that explains what it just did.
+  // Records what a watchdog run was authorized to write, in the run's own
+  // context, so the guard above can tell the run's own drift from anybody
+  // else's on the next request.
   //
-  // Re-pinning the run onto the state its own authorized mutation produced
-  // keeps the property the guard exists for. That property does *not* survive
-  // on its own: the subtree is re-read here, after the mutation committed, so
-  // anything a third party did in that window is in the read too. It is kept by
-  // diffing the re-read against `previousStopSnapshot` — the snapshot the guard
-  // admitted this mutation against — and refusing to re-pin unless every leaf
-  // that moved is attributable to `authorizedIssueIds`. A board user
-  // reassigning some other stopped leaf mid-flight therefore blocks the re-pin
-  // rather than being laundered into it, and the run stays pinned to what its
-  // wake observed.
+  // This reads no subtree state at all. Everything it persists — the baseline
+  // the guard admitted this request against, and the fields the request
+  // reported writing — was already known before the mutation ran, which is what
+  // makes it immune to a third party landing a change in the same window.
   //
-  // Deliberately narrow in two ways:
-  //
-  //  - It only re-pins while the subtree is still `stopped`. A run whose action
-  //    restored a live path is not re-pinned, so the guard keeps rejecting it
-  //    on state — a different case with a different safety argument.
-  //  - Creating a follow-up child is therefore *not* covered in its immediate
-  //    aftermath. A freshly created non-terminal child is inside
-  //    `TASK_WATCHDOG_FIRST_RUN_GRACE_MS` and has not completed a run, so the
-  //    classifier returns `pending_first_run`, which carries no fingerprint to
-  //    pin to at all. That operation still leaves the run stale until the
-  //    subtree settles; see the `stopped -> non-stopped` follow-up.
-  async function repinMutationScope(
+  // Failing to record is fail-closed: the run's next watched-subtree mutation
+  // sees a fingerprint it cannot account for and is rejected, exactly as it
+  // would have been before any of this existed.
+  async function recordAuthorizedMutation(
     scope: {
       kind: "watchdog";
       watchdogId: string;
@@ -1771,53 +1975,15 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       stopFingerprint: string | null;
       runId: string | null;
     },
-    attribution: TaskWatchdogRepinAttribution,
+    entry: {
+      ledgerBaseline: TaskWatchdogLedgerBaseline | null;
+      mutations: TaskWatchdogAuthorizedMutation[];
+    },
   ) {
-    if (!scope.runId) {
-      return { repinned: false as const, reason: "missing_run_id" };
-    }
-    // Without the pre-mutation snapshot there is no way to tell the run's own
-    // change apart from a concurrent one, so fail closed instead of guessing.
-    if (!attribution.previousStopSnapshot) {
-      return { repinned: false as const, reason: "missing_previous_snapshot" };
-    }
-
-    const watchdog = await db
-      .select()
-      .from(issueWatchdogs)
-      .where(and(
-        eq(issueWatchdogs.id, scope.watchdogId),
-        eq(issueWatchdogs.companyId, scope.companyId),
-        eq(issueWatchdogs.issueId, scope.watchedIssueId),
-        eq(issueWatchdogs.status, "active"),
-      ))
-      .then((rows) => rows[0] ?? null);
-    if (!watchdog) {
-      return { repinned: false as const, reason: "watchdog_not_active" };
-    }
-
-    const classifierInput = await collectClassifierInput(watchdog.companyId, watchdog);
-    const classification = classifyTaskWatchdogSubtree(classifierInput);
-    if (classification.state !== "stopped") {
-      return {
-        repinned: false as const,
-        reason: "subtree_not_stopped",
-        classificationState: classification.state,
-      };
-    }
-    if (classification.stopFingerprint === scope.stopFingerprint) {
-      return { repinned: false as const, reason: "fingerprint_unchanged" };
-    }
-
-    const unattributedIssueIds = unattributedSubtreeChanges({
-      previous: attribution.previousStopSnapshot,
-      next: classification.stopSnapshot,
-      authorizedIssueIds: attribution.authorizedIssueIds,
-      parentByIssueId: new Map(classifierInput.issues.map((issue) => [issue.id, issue.parentId ?? null])),
-    });
-    if (unattributedIssueIds.length > 0) {
-      return { repinned: false as const, reason: "unrelated_subtree_change", unattributedIssueIds };
-    }
+    if (!scope.runId) return { recorded: false as const, reason: "missing_run_id" };
+    if (!scope.stopFingerprint) return { recorded: false as const, reason: "missing_stop_fingerprint" };
+    if (!entry.ledgerBaseline) return { recorded: false as const, reason: "missing_ledger_baseline" };
+    if (entry.mutations.length === 0) return { recorded: false as const, reason: "no_mutations" };
 
     const run = await db
       .select({
@@ -1829,23 +1995,35 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       .where(eq(heartbeatRuns.id, scope.runId))
       .then((rows) => rows[0] ?? null);
     if (!run || run.companyId !== scope.companyId) {
-      return { repinned: false as const, reason: "run_not_found" };
+      return { recorded: false as const, reason: "run_not_found" };
     }
 
     // `taskWatchdog` may legitimately be the literal `true`, in which case the
-    // scope resolver falls back to reading the fingerprint from the top level
-    // of the context. Write the new value to whichever of the two places that
-    // resolver will actually read.
-    const pinPath = isPlainRecord(parseObject(run.contextSnapshot).taskWatchdog)
-      ? sql`array['taskWatchdog', 'stopFingerprint']`
-      : sql`array['stopFingerprint']`;
-    // Write the one key with `jsonb_set` rather than a read-modify-write of the
-    // whole column: other subsystems write `contextSnapshot` on the same run
-    // (the native-question cancellation marker, for one), and a stale
-    // read-modify-write here would silently discard their updates. The `where`
-    // predicate mirrors the resolver's own read precedence, so the write also
-    // compares-and-sets against the pin this request was resolved from and
-    // stands down if anybody moved it first.
+    // scope resolver falls back to reading the top level of the context. Write
+    // the ledger to whichever of the two places that resolver will read.
+    const nested = isPlainRecord(parseObject(run.contextSnapshot).taskWatchdog);
+    const ledgerPath = nested
+      ? sql`array['taskWatchdog', 'mutationLedger']`
+      : sql`array['mutationLedger']`;
+    const existingLedger = nested
+      ? sql`${heartbeatRuns.contextSnapshot} #> array['taskWatchdog', 'mutationLedger']`
+      : sql`${heartbeatRuns.contextSnapshot} #> array['mutationLedger']`;
+    const freshLedger: TaskWatchdogMutationLedger = {
+      version: 1,
+      baseline: entry.ledgerBaseline.baseline,
+      baselineMaterialByIssueId: entry.ledgerBaseline.baselineMaterialByIssueId,
+      mutations: entry.mutations,
+    };
+
+    // One statement, so two concurrent requests of the same run both land:
+    // appending to the array Postgres reads inside the same update cannot lose
+    // the other's entry the way a read-modify-write would. An existing ledger
+    // keeps its baseline — drift is always measured from the state the run was
+    // last genuinely validated against, never from a later one.
+    //
+    // The `where` clause mirrors the resolver's read precedence and pins the
+    // write to the run context this request was resolved from, so a ledger is
+    // never grafted onto a run whose pin somebody moved in the meantime.
     const currentPin = sql`coalesce(
       ${heartbeatRuns.contextSnapshot} #>> array['taskWatchdog', 'stopFingerprint'],
       ${heartbeatRuns.contextSnapshot} #>> array['stopFingerprint']
@@ -1859,8 +2037,17 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
               then ${heartbeatRuns.contextSnapshot}
             else '{}'::jsonb
           end,
-          ${pinPath},
-          to_jsonb(${classification.stopFingerprint}::text),
+          ${ledgerPath},
+          case
+            when ${existingLedger} -> 'version' = '1'::jsonb
+              then jsonb_set(
+                ${existingLedger},
+                array['mutations'],
+                coalesce(${existingLedger} -> 'mutations', '[]'::jsonb)
+                  || ${JSON.stringify(entry.mutations)}::jsonb
+              )
+            else ${JSON.stringify(freshLedger)}::jsonb
+          end,
           true
         )`,
       })
@@ -1870,15 +2057,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       ))
       .returning({ id: heartbeatRuns.id });
     if (updated.length === 0) {
-      return { repinned: false as const, reason: "run_context_changed" };
+      return { recorded: false as const, reason: "run_context_changed" };
     }
 
-    return {
-      repinned: true as const,
-      previousStopFingerprint: scope.stopFingerprint,
-      stopFingerprint: classification.stopFingerprint,
-      classification,
-    };
+    return { recorded: true as const, mutations: entry.mutations };
   }
 
   return {
@@ -2035,6 +2217,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     },
 
     revalidateMutationScope,
-    repinMutationScope,
+    recordAuthorizedMutation,
   };
 }

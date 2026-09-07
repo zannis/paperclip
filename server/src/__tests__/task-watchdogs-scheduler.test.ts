@@ -639,19 +639,27 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       return scope;
     };
 
-    // The snapshot the freshness guard admitted the run's mutation against —
-    // the state of the subtree immediately *before* the run changes anything.
-    // Re-pinning diffs against exactly this to tell the run's own change apart
-    // from anybody else's.
+    // Passing the freshness guard is what authorizes a mutation, and what hands
+    // back the baseline the run's ledger stays anchored to.
     const admitMutation = async (scope: Awaited<ReturnType<typeof resolveScope>>) => {
       const revalidated = await service.revalidateMutationScope(scope);
       expect(revalidated.allowed).toBe(true);
-      const classification = revalidated.classification;
-      if (!classification || !("stopSnapshot" in classification)) {
-        throw new Error("Expected an admitted mutation to carry a stop snapshot");
+      if (!("ledgerBaseline" in revalidated) || !revalidated.ledgerBaseline) {
+        throw new Error("Expected an admitted mutation to carry a ledger baseline");
       }
-      return classification.stopSnapshot;
+      return revalidated;
     };
+
+    // Stands in for the route declaring, after its own write, what it wrote.
+    const recordMutations = async (
+      scope: Awaited<ReturnType<typeof resolveScope>>,
+      admitted: Awaited<ReturnType<typeof admitMutation>>,
+      mutations: Parameters<typeof service.recordAuthorizedMutation>[1]["mutations"],
+    ) =>
+      service.recordAuthorizedMutation(scope, {
+        ledgerBaseline: "ledgerBaseline" in admitted ? admitted.ledgerBaseline ?? null : null,
+        mutations,
+      });
 
     return {
       companyId,
@@ -663,17 +671,37 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       pinnedFingerprint,
       resolveScope,
       admitMutation,
+      recordMutations,
     };
   }
 
+  // The leaf values a request would have reported writing, in the shape the
+  // route declares them from its own `RETURNING` row.
+  const declaredLeaf = (overrides: Record<string, unknown> = {}) => ({
+    status: "todo",
+    assigneeAgentId: null,
+    assigneeUserId: null,
+    ...overrides,
+  });
+
+  const declaredCreatedLeaf = (overrides: Record<string, unknown> = {}) => ({
+    status: "todo",
+    assigneeAgentId: null,
+    assigneeUserId: null,
+    blockerIssueIds: [],
+    pendingInteractionIds: [],
+    pendingApprovalIds: [],
+    ...overrides,
+  });
+
   it("lets a watchdog run keep mutating the subtree after its own sanctioned action rotated the fingerprint", async () => {
-    const { agentId, childIds, service, pinnedFingerprint, resolveScope, admitMutation } =
+    const { agentId, childIds, service, pinnedFingerprint, resolveScope, admitMutation, recordMutations } =
       await seedWokenWatchdogRun("WDOG-REPIN", { establishedChildren: ["WDOG-REPIN-LEAF"] });
     const leafId = childIds[0]!;
 
     const scope = await resolveScope();
     expect(scope.stopFingerprint).toBe(pinnedFingerprint);
-    const previousStopSnapshot = await admitMutation(scope);
+    const admitted = await admitMutation(scope);
 
     // The run's first sanctioned recovery action: reassign a stopped leaf. The
     // assignee is an input to `materialLeaf`, so this allowed operation rotates
@@ -682,211 +710,355 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     await db.update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
 
-    const stale = await service.revalidateMutationScope(scope);
-    expect(stale.allowed).toBe(false);
-    expect(stale.reason).toContain("stop fingerprint changed");
-    // The subtree did not become live — only the hash moved. This is the
-    // self-inflicted staleness being fixed.
-    expect(stale.classification?.state).toBe("stopped");
-
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [leafId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(true);
-
-    // The next request in the same run re-reads its scope from the run context,
-    // so it must now see the re-pinned fingerprint and be allowed to proceed
-    // (this is the summary comment the run previously could not post).
+    // The next request in the same run re-reads its ledger from the run
+    // context. The pin has *not* moved — the fingerprint no longer matches it —
+    // but every leaf that moved is the run's own declared write, so the guard
+    // admits it (this is the summary comment the run previously could not post).
     const nextScope = await resolveScope();
-    expect(nextScope.stopFingerprint).not.toBe(pinnedFingerprint);
+    expect(nextScope.stopFingerprint).toBe(pinnedFingerprint);
     const after = await service.revalidateMutationScope(nextScope);
     expect(after.allowed).toBe(true);
+    expect(after.classification?.state).toBe("stopped");
+    expect(
+      after.classification && "stopFingerprint" in after.classification
+        ? after.classification.stopFingerprint
+        : null,
+    ).not.toBe(pinnedFingerprint);
   });
 
-  it("still rejects a concurrent third-party change after the run re-pinned itself", async () => {
-    const { agentId, childIds, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
-      "WDOG-REPIN-CONTROL",
-      { establishedChildren: ["WDOG-REPIN-CONTROL-A", "WDOG-REPIN-CONTROL-B"] },
-    );
+  it("still rejects a concurrent third-party change to another leaf once the run holds a ledger", async () => {
+    const { agentId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-REPIN-CONTROL", {
+        establishedChildren: ["WDOG-REPIN-CONTROL-A", "WDOG-REPIN-CONTROL-B"],
+      });
     const [ownLeafId, otherLeafId] = childIds as [string, string];
 
     const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
+    const admitted = await admitMutation(scope);
     await db.update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, ownLeafId));
-    expect((await service.repinMutationScope(scope, {
-      authorizedIssueIds: [ownLeafId],
-      previousStopSnapshot,
-    })).repinned).toBe(true);
-
-    const repinnedScope = await resolveScope();
-    expect((await service.revalidateMutationScope(repinnedScope)).allowed).toBe(true);
+    expect((await recordMutations(scope, admitted, [
+      { issueId: ownLeafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
 
     // Somebody other than this run now moves the watched subtree. This is the
-    // property the freshness guard exists for and it must survive re-pinning.
+    // property the freshness guard exists for and it must survive the ledger.
     await db.update(issues)
       .set({ status: "in_progress", updatedAt: new Date() })
       .where(eq(issues.id, otherLeafId));
 
-    const afterExternalChange = await service.revalidateMutationScope(repinnedScope);
+    const afterExternalChange = await service.revalidateMutationScope(await resolveScope());
     expect(afterExternalChange.allowed).toBe(false);
     expect(afterExternalChange.reason).toContain("stop fingerprint changed");
+    expect(
+      "unattributedIssueIds" in afterExternalChange ? afterExternalChange.unattributedIssueIds : null,
+    ).toEqual([otherLeafId]);
   });
 
-  it("refuses to re-pin when an unrelated change landed in the same window as the run's own mutation", async () => {
-    const { agentId, childIds, service, pinnedFingerprint, resolveScope, admitMutation } =
-      await seedWokenWatchdogRun("WDOG-REPIN-RACE", {
-        establishedChildren: ["WDOG-REPIN-RACE-A", "WDOG-REPIN-RACE-B"],
-      });
-    const [ownLeafId, otherLeafId] = childIds as [string, string];
-
-    const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
-
-    // The run's own authorized mutation, and — in the window before the re-pin
-    // re-reads the subtree — a board user moving a *different* stopped leaf.
-    // Re-pinning must not launder that second change into the run's pin.
-    await db.update(issues)
-      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
-      .where(eq(issues.id, ownLeafId));
-    await db.update(issues)
-      .set({ status: "in_progress", updatedAt: new Date() })
-      .where(eq(issues.id, otherLeafId));
-
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [ownLeafId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("unrelated_subtree_change");
-    expect(repin.unattributedIssueIds).toEqual([otherLeafId]);
-
-    // The run stays pinned to what its wake observed, so the guard keeps
-    // rejecting — the same fail-closed behaviour as before re-pinning existed.
-    const unchangedScope = await resolveScope();
-    expect(unchangedScope.stopFingerprint).toBe(pinnedFingerprint);
-    expect((await service.revalidateMutationScope(unchangedScope)).allowed).toBe(false);
-  });
-
-  it("attributes a leaf the run created under an issue it was authorized to mutate", async () => {
-    const { companyId, sourceId, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
-      "WDOG-REPIN-CREATE",
-    );
-    const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
-
-    // A follow-up child under the watched root. `seedIssue` backdates
-    // `createdAt`, which stands in for a child that has aged past the first-run
-    // grace window — the immediate-aftermath case is asserted separately below.
-    const childId = await seedIssue(companyId, {
-      identifier: "WDOG-REPIN-CREATE-CHILD",
-      status: "todo",
-      parentId: sourceId,
-    });
-
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [sourceId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(true);
-    expect((await resolveScope()).stopFingerprint).toBe(repin.stopFingerprint);
-    expect(childId).toBeTruthy();
-  });
-
-  it("refuses a leaf created under an issue the run was not authorized to mutate", async () => {
-    const { companyId, sourceId, childIds, service, pinnedFingerprint, resolveScope, admitMutation } =
-      await seedWokenWatchdogRun("WDOG-REPIN-CREATE-FOREIGN", {
-        establishedChildren: ["WDOG-REPIN-CREATE-FOREIGN-A"],
-      });
-    const otherLeafId = childIds[0]!;
-    const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
-
-    // A third party creates a child somewhere else in the watched subtree.
-    const foreignChildId = await seedIssue(companyId, {
-      identifier: "WDOG-REPIN-CREATE-FOREIGN-CHILD",
-      status: "todo",
-      parentId: otherLeafId,
-    });
-
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [sourceId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("unrelated_subtree_change");
-    expect(repin.unattributedIssueIds).toContain(foreignChildId);
-    expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
-  });
-
-  it("does not re-pin without the snapshot the mutation was admitted against", async () => {
-    const { agentId, childIds, service, pinnedFingerprint, resolveScope, admitMutation } =
-      await seedWokenWatchdogRun("WDOG-REPIN-NO-SNAPSHOT", {
-        establishedChildren: ["WDOG-REPIN-NO-SNAPSHOT-LEAF"],
-      });
+  // WDOG-001. The run and a board user write the *same* leaf in the same
+  // window. Exempting a leaf from the diff just because the run was authorized
+  // to touch it folds the board user's edit into what the run is allowed to
+  // treat as its own; comparing against the value the run reported writing does
+  // not.
+  it("rejects a concurrent third-party change to the very issue the run mutated", async () => {
+    const { agentId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-SAME-LEAF", { establishedChildren: ["WDOG-SAME-LEAF-A"] });
     const leafId = childIds[0]!;
+
     const scope = await resolveScope();
-    await admitMutation(scope);
+    const admitted = await admitMutation(scope);
+
+    // The run's own write, and what it reported writing.
     await db.update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
 
-    // With nothing to diff against there is no way to tell the run's own change
-    // from anybody else's, so re-pinning must fail closed rather than guess.
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [leafId],
-      previousStopSnapshot: null,
-    });
-    expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("missing_previous_snapshot");
-    expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
+    // A board user moves the same leaf on a field the run never wrote.
+    await db.update(issues)
+      .set({ status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([leafId]);
   });
 
-  it("does not re-pin a follow-up child created inside the first-run grace window", async () => {
-    const { companyId, sourceId, service, pinnedFingerprint, resolveScope, admitMutation } =
-      await seedWokenWatchdogRun("WDOG-REPIN-GRACE");
+  it("admits the run when the same leaf ends up at exactly the value the run wrote", async () => {
+    const { agentId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-SAME-LEAF-OK", { establishedChildren: ["WDOG-SAME-LEAF-OK-A"] });
+    const leafId = childIds[0]!;
     const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
+    const admitted = await admitMutation(scope);
 
-    // A follow-up child created *now* is inside TASK_WATCHDOG_FIRST_RUN_GRACE_MS
-    // and has not completed a run, so the classifier reports
-    // `pending_first_run` — a state that carries no stop fingerprint at all.
-    // Re-pinning therefore cannot cover child creation in its immediate
-    // aftermath; the run stays pinned and the guard keeps failing closed.
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId, status: "in_progress" }) },
+    ])).recorded).toBe(true);
+
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
+  });
+
+  // WDOG-002. Creating a follow-up child is one of the granted recovery
+  // operations and is the exact trace this issue was reported from: the child
+  // is non-terminal, inside the first-run grace window and has never completed
+  // a run, so the classifier answers `pending_first_run` — a state that carries
+  // no fingerprint to pin to. The run must still be able to say what it did.
+  it("lets the run keep working after its own follow-up child left the subtree pending-first-run", async () => {
+    const { companyId, sourceId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-FOLLOWUP");
+
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
     const childId = await seedIssue(companyId, {
-      identifier: "WDOG-REPIN-GRACE-CHILD",
+      identifier: "WDOG-FOLLOWUP-CHILD",
+      status: "todo",
+      parentId: sourceId,
+      createdAt: new Date(),
+    });
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+    ])).recorded).toBe(true);
+
+    const duringGrace = await service.revalidateMutationScope(await resolveScope());
+    expect(duringGrace.classification?.state).toBe("pending_first_run");
+    expect(duringGrace.allowed).toBe(true);
+  });
+
+  it("rejects a follow-up child this run did not create", async () => {
+    const { companyId, sourceId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-FOLLOWUP-FOREIGN", {
+        establishedChildren: ["WDOG-FOLLOWUP-FOREIGN-A"],
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
+
+    // Somebody else files a child under the watched issue. The run's ledger
+    // says nothing about it, so it is not the run's own drift.
+    const foreignChildId = await seedIssue(companyId, {
+      identifier: "WDOG-FOLLOWUP-FOREIGN-CHILD",
       status: "todo",
       parentId: sourceId,
       createdAt: new Date(),
     });
 
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [sourceId, childId],
-      previousStopSnapshot,
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    const unattributed = "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds ?? [] : [];
+    const unattributedLiveness = "unattributedLivenessIssueIds" in revalidated
+      ? revalidated.unattributedLivenessIssueIds ?? []
+      : [];
+    expect([...unattributed, ...unattributedLiveness]).toContain(foreignChildId);
+  });
+
+  it("rejects a follow-up child that no longer holds the values the run created it with", async () => {
+    const { companyId, sourceId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-FOLLOWUP-EDITED");
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-FOLLOWUP-EDITED-CHILD",
+      status: "todo",
+      parentId: sourceId,
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
     });
-    expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("subtree_not_stopped");
-    expect(repin.classificationState).toBe("pending_first_run");
-    expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+    ])).recorded).toBe(true);
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
+
+    // A board user edits the run's freshly created child. The run declared what
+    // it created the child with, so the edit is visible rather than inherited.
+    await db.update(issues)
+      .set({ status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, childId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([childId]);
+  });
+
+  it("lets the run keep working when its own action left the watched subtree live", async () => {
+    const { companyId, sourceId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-REPIN-LIVE", { establishedChildren: ["WDOG-REPIN-LIVE-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
+
+    // The reassignment starts a run on the leaf, which is the recovery working.
+    // The mandate then asks the watchdog to record what it did, so a liveness
+    // this run's own ledger accounts for must not lock it out.
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.classification?.state).toBe("live");
+    expect(revalidated.allowed).toBe(true);
+    expect(sourceId).toBeTruthy();
+  });
+
+  it("rejects a live path this run's ledger does not account for", async () => {
+    const { companyId, sourceId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-FOREIGN", {
+        establishedChildren: ["WDOG-LIVE-FOREIGN-A", "WDOG-LIVE-FOREIGN-B"],
+      });
+    const [ownLeafId] = childIds as [string, string];
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, ownLeafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: ownLeafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
+
+    // A run starts on the watched issue itself, which nothing in the ledger
+    // explains.
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: sourceId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([sourceId]);
+  });
+
+  // The ledger's baseline is the state the run was last genuinely validated
+  // against, and it stays there. Otherwise a run could walk the subtree away
+  // from what its wake observed one attributable step at a time, and a change
+  // that landed during an earlier step would stop being visible.
+  it("keeps measuring drift from the state the run woke to, not from its last mutation", async () => {
+    const { agentId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-BASELINE", {
+        establishedChildren: ["WDOG-BASELINE-A", "WDOG-BASELINE-B"],
+      });
+    const [ownLeafId, otherLeafId] = childIds as [string, string];
+
+    const first = await resolveScope();
+    const firstAdmitted = await admitMutation(first);
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, ownLeafId));
+    // A board user moves a different leaf, and the run does not notice yet.
+    await db.update(issues)
+      .set({ status: "in_progress", updatedAt: new Date() })
+      .where(eq(issues.id, otherLeafId));
+    expect((await recordMutations(first, firstAdmitted, [
+      { issueId: ownLeafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([otherLeafId]);
+  });
+
+  it("appends later authorized mutations to the ledger the run already holds", async () => {
+    const { agentId, childIds, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LEDGER-APPEND", {
+        establishedChildren: ["WDOG-LEDGER-APPEND-A", "WDOG-LEDGER-APPEND-B"],
+      });
+    const [firstLeafId, secondLeafId] = childIds as [string, string];
+
+    const first = await resolveScope();
+    const firstAdmitted = await admitMutation(first);
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, firstLeafId));
+    await recordMutations(first, firstAdmitted, [
+      { issueId: firstLeafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ]);
+
+    const second = await resolveScope();
+    const secondAdmitted = await admitMutation(second);
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, secondLeafId));
+    expect((await recordMutations(second, secondAdmitted, [
+      { issueId: secondLeafId, declared: declaredLeaf({ status: "done" }) },
+    ])).recorded).toBe(true);
+
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const ledger = (run!.contextSnapshot as {
+      taskWatchdog: { mutationLedger: { baseline: { fingerprint: string }; mutations: Array<{ issueId: string }> } };
+    }).taskWatchdog.mutationLedger;
+    expect(ledger.mutations.map((entry) => entry.issueId)).toEqual([firstLeafId, secondLeafId]);
+    // The second record kept the first record's baseline rather than rebasing
+    // onto the state the first mutation produced.
+    expect(ledger.baseline.fingerprint).toBe(
+      firstAdmitted.ledgerBaseline!.baseline.fingerprint,
+    );
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
+  });
+
+  it("does not record a mutation without the baseline the guard admitted it against", async () => {
+    const { childIds, agentId, service, resolveScope } = await seedWokenWatchdogRun("WDOG-NO-BASELINE", {
+      establishedChildren: ["WDOG-NO-BASELINE-A"],
+    });
+    const scope = await resolveScope();
+    const outcome = await service.recordAuthorizedMutation(scope, {
+      ledgerBaseline: null,
+      mutations: [{ issueId: childIds[0]!, declared: declaredLeaf({ assigneeAgentId: agentId }) }],
+    });
+    expect(outcome.recorded).toBe(false);
+    expect(outcome.reason).toBe("missing_ledger_baseline");
   });
 
   it("does not clobber a run context that another writer changed after the scope was read", async () => {
-    const { agentId, childIds, runId, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
-      "WDOG-REPIN-CAS",
-      { establishedChildren: ["WDOG-REPIN-CAS-LEAF"] },
-    );
+    const { agentId, childIds, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LEDGER-CAS", { establishedChildren: ["WDOG-LEDGER-CAS-LEAF"] });
     const leafId = childIds[0]!;
     const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
+    const admitted = await admitMutation(scope);
     await db.update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, leafId));
 
-    // Another writer has already moved this run's pin. A read-modify-write off
-    // the value this request read would silently discard that update.
     await db.update(heartbeatRuns)
       .set({
         contextSnapshot: sql`jsonb_set(
@@ -898,32 +1070,34 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       })
       .where(eq(heartbeatRuns.id, runId));
 
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [leafId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("run_context_changed");
+    const outcome = await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ]);
+    expect(outcome.recorded).toBe(false);
+    expect(outcome.reason).toBe("run_context_changed");
 
     const [after] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
-    const afterContext = after!.contextSnapshot as { taskWatchdog: { stopFingerprint: string } };
+    const afterContext = after!.contextSnapshot as {
+      taskWatchdog: { stopFingerprint: string; mutationLedger?: unknown };
+    };
     expect(afterContext.taskWatchdog.stopFingerprint).toBe("task_watchdog_stop:sibling");
+    expect(afterContext.taskWatchdog.mutationLedger).toBeUndefined();
   });
 
-  it("writes only the pinned fingerprint, leaving the rest of the run context intact", async () => {
-    const { agentId, childIds, runId, service, resolveScope, admitMutation } = await seedWokenWatchdogRun(
-      "WDOG-REPIN-MERGE",
-      { establishedChildren: ["WDOG-REPIN-MERGE-LEAF"] },
-    );
+  it("writes only the ledger, leaving the rest of the run context intact", async () => {
+    const { agentId, childIds, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LEDGER-MERGE", {
+        establishedChildren: ["WDOG-LEDGER-MERGE-LEAF"],
+      });
     const leafId = childIds[0]!;
     const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
+    const admitted = await admitMutation(scope);
     await db.update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, leafId));
 
     // A key another subsystem writes on the same column (the native-question
-    // cancellation marker is a real example) must survive the re-pin.
+    // cancellation marker is a real example) must survive the record.
     await db.update(heartbeatRuns)
       .set({
         contextSnapshot: sql`jsonb_set(
@@ -935,48 +1109,21 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       })
       .where(eq(heartbeatRuns.id, runId));
 
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [leafId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(true);
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+    ])).recorded).toBe(true);
 
     const [after] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const afterContext = after!.contextSnapshot as {
-      taskWatchdog: { watchedIssueId: string; stopFingerprint: string };
+      taskWatchdog: { watchedIssueId: string; stopFingerprint: string; mutationLedger: { version: number } };
       nativeQuestionCancellation?: { version: number };
     };
     expect(afterContext.nativeQuestionCancellation).toEqual({ version: 1 });
-    expect(afterContext.taskWatchdog.stopFingerprint).toBe(repin.stopFingerprint);
+    expect(afterContext.taskWatchdog.mutationLedger.version).toBe(1);
     expect(afterContext.taskWatchdog.watchedIssueId).toBeTruthy();
-  });
-
-  it("does not re-pin a run whose action left the watched subtree live", async () => {
-    const { companyId, sourceId, service, pinnedFingerprint, resolveScope, admitMutation } =
-      await seedWokenWatchdogRun("WDOG-REPIN-LIVE");
-    const scope = await resolveScope();
-    const previousStopSnapshot = await admitMutation(scope);
-
-    // A recovery action that restores a live path takes the subtree out of the
-    // `stopped` state entirely. Re-pinning deliberately does not cover that
-    // case, so the run stays pinned to what its wake observed.
-    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
-    await db.insert(heartbeatRuns).values({
-      companyId,
-      agentId: agent!.id,
-      status: "running",
-      invocationSource: "assignment",
-      contextSnapshot: { issueId: sourceId },
-    });
-
-    const repin = await service.repinMutationScope(scope, {
-      authorizedIssueIds: [sourceId],
-      previousStopSnapshot,
-    });
-    expect(repin.repinned).toBe(false);
-    expect(repin.reason).toBe("subtree_not_stopped");
-    expect(repin.classificationState).toBe("live");
-    expect((await resolveScope()).stopFingerprint).toBe(pinnedFingerprint);
+    // The pin itself is untouched: drift is explained, not papered over.
+    expect((await resolveScope()).stopFingerprint).toBe(scope.stopFingerprint);
+    expect(service).toBeTruthy();
   });
 
   it("surfaces pending interaction kinds and approval ids in the wake and watchdog comment", async () => {

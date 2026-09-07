@@ -102,7 +102,7 @@ const mockTaskWatchdogService = vi.hoisted(() => ({
     allowed: true,
     classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test" },
   })),
-  repinMutationScope: vi.fn(async () => ({ repinned: false, reason: "fingerprint_unchanged" })),
+  recordAuthorizedMutation: vi.fn(async () => ({ recorded: true })),
   reconcileForIssueAndAncestors: vi.fn(async () => ({
     checked: 0,
     triggered: 0,
@@ -2211,7 +2211,15 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
-    it("re-pins the run before the mutation response reaches the client", async () => {
+    const stopSnapshot = {
+      version: 2,
+      fingerprint: "task_watchdog_stop:test",
+      materialLeaves: [],
+      waitsByIssueId: {},
+    };
+    const ledgerBaseline = { baseline: stopSnapshot, baselineMaterialByIssueId: {} };
+
+    it("records the authorized mutation before the response reaches the client", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
@@ -2219,15 +2227,15 @@ describe("agent issue mutation checkout ownership", () => {
         ...patch,
       }));
 
-      // The run's very next request reads its pin from the run context. If the
-      // response is flushed while the re-pin is still in flight, that request
-      // sees the stale fingerprint and is rejected by the guard the re-pin
-      // exists to satisfy — so the response must wait for the re-pin.
+      // The run's very next request reads its ledger from the run context. If
+      // the response is flushed while the record is still in flight, that
+      // request cannot account for its own change and is rejected by the guard
+      // the record exists to satisfy — so the response must wait for it.
       const order: string[] = [];
-      mockTaskWatchdogService.repinMutationScope.mockImplementationOnce(async () => {
+      mockTaskWatchdogService.recordAuthorizedMutation.mockImplementationOnce(async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
-        order.push("repin");
-        return { repinned: true, reason: "repinned" };
+        order.push("record");
+        return { recorded: true };
       });
 
       const app = await createApp(watchdogActor(), createWatchdogDb());
@@ -2235,38 +2243,39 @@ describe("agent issue mutation checkout ownership", () => {
       order.push("response");
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(order).toEqual(["repin", "response"]);
+      expect(order).toEqual(["record", "response"]);
     });
 
-    it("carries the mutated issue and its pre-mutation snapshot into the re-pin", async () => {
+    it("declares the values its own update returned, not a re-read of the issue", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
         ...makeIssue({ assigneeAgentId: ownerAgentId }),
         ...patch,
       }));
-      const stopSnapshot = {
-        version: 2,
-        fingerprint: "task_watchdog_stop:test",
-        materialLeaves: [],
-        waitsByIssueId: {},
-      };
       mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
         allowed: true,
         classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test", stopSnapshot },
+        ledgerBaseline,
       });
 
       const app = await createApp(watchdogActor(), createWatchdogDb());
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockTaskWatchdogService.repinMutationScope).toHaveBeenCalledWith(
+      expect(mockTaskWatchdogService.recordAuthorizedMutation).toHaveBeenCalledWith(
         expect.objectContaining({ kind: "watchdog" }),
-        { authorizedIssueIds: [issueId], previousStopSnapshot: stopSnapshot },
+        {
+          ledgerBaseline,
+          mutations: [{
+            issueId,
+            declared: { status: "todo", assigneeAgentId: ownerAgentId, assigneeUserId: null },
+          }],
+        },
       );
     });
 
-    it("does not re-pin the run when the mutation was rejected", async () => {
+    it("does not record anything when the mutation was rejected", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
@@ -2279,7 +2288,33 @@ describe("agent issue mutation checkout ownership", () => {
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
 
       expect(res.status, JSON.stringify(res.body)).toBe(409);
-      expect(mockTaskWatchdogService.repinMutationScope).not.toHaveBeenCalled();
+      expect(mockTaskWatchdogService.recordAuthorizedMutation).not.toHaveBeenCalled();
+    });
+
+    // Concurrent drift has to stop the mutation, not be noticed after it has
+    // already been written. The guard runs before the route touches anything,
+    // so a subtree that moved underneath this run means the update never
+    // happens and the client is told which issues could not be accounted for.
+    it("rejects the mutation outright when a third party moved the watched subtree", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: false,
+        reason: "Task-watchdog review is stale because the watched subtree stop fingerprint changed.",
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:moved" },
+        unattributedIssueIds: ["other-leaf-id"],
+        unattributedLivenessIssueIds: [],
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      // The mutation that raced is never applied, so there is nothing committed
+      // for the stale pin to be a consolation prize for.
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(res.body.details.unattributedIssueIds).toEqual(["other-leaf-id"]);
+      expect(mockTaskWatchdogService.recordAuthorizedMutation).not.toHaveBeenCalled();
     });
 
     it("rejects stale watchdog source mutations when revalidation finds a live path", async () => {

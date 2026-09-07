@@ -29,10 +29,16 @@ export type TaskWatchdogMutationScope =
       watchdogIssueId: string | null;
       stopFingerprint: string | null;
       // The run whose context pinned `stopFingerprint`. Carried so that a
-      // mutation this run was authorized to make can re-pin the run onto the
-      // state it just produced, instead of locking the run out of its own
-      // subtree for the rest of the run.
+      // mutation this run was authorized to make can be recorded against the
+      // run, instead of locking the run out of its own subtree for the rest of
+      // the run.
       runId: string | null;
+      // What this run has already been authorized to write to the watched
+      // subtree, as recorded by its earlier requests. The freshness guard uses
+      // it to tell the run's own drift from a third party's. Left opaque here:
+      // this module only reads it out of the run context, `task-watchdogs.ts`
+      // is what validates and interprets it.
+      mutationLedger: unknown;
     };
 
 export function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -50,6 +56,7 @@ function readTaskWatchdogContext(contextSnapshot: unknown) {
   return {
     watchedIssueId: readString(taskWatchdog?.watchedIssueId) ?? readString(context?.watchedIssueId),
     stopFingerprint: readString(taskWatchdog?.stopFingerprint) ?? readString(context?.stopFingerprint),
+    mutationLedger: taskWatchdog?.mutationLedger ?? context?.mutationLedger ?? null,
   };
 }
 
@@ -124,6 +131,7 @@ export async function resolveTaskWatchdogMutationScope(
     watchdogIssueId: watchdog.watchdogIssueId ?? null,
     stopFingerprint: taskWatchdog.stopFingerprint,
     runId: run.id,
+    mutationLedger: taskWatchdog.mutationLedger,
   };
 }
 

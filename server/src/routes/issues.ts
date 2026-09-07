@@ -161,7 +161,12 @@ import {
   resolveTaskWatchdogMutationScope,
   taskWatchdogScopeAllowsIssueMutation,
 } from "../services/task-watchdog-scope.js";
-import type { TaskWatchdogServiceDeps, taskWatchdogService } from "../services/task-watchdogs.js";
+import type {
+  TaskWatchdogAuthorizedMutation,
+  TaskWatchdogLedgerBaseline,
+  TaskWatchdogServiceDeps,
+  taskWatchdogService,
+} from "../services/task-watchdogs.js";
 import { logger } from "../middleware/logger.js";
 import { badRequest, conflict, forbidden, HttpError, notFound, unauthorized, unprocessable } from "../errors.js";
 import { privateJsonEtag } from "../middleware/private-json-etag.js";
@@ -457,13 +462,23 @@ function noopTaskWatchdogService(): TaskWatchdogService {
           materialLeaves: [],
           waitsByIssueId: {},
         },
+        materialByIssueId: {},
         pendingInteractionsByIssueId: {},
       },
+      ledgerBaseline: {
+        baseline: {
+          version: 2 as const,
+          fingerprint: "task_watchdog_stop:unavailable",
+          materialLeaves: [],
+          waitsByIssueId: {},
+        },
+        baselineMaterialByIssueId: {},
+      },
     }),
-    repinMutationScope: async (
-      _scope: Parameters<TaskWatchdogService["repinMutationScope"]>[0],
-      _attribution: Parameters<TaskWatchdogService["repinMutationScope"]>[1],
-    ) => ({ repinned: false as const, reason: "watchdog_service_unavailable" }),
+    recordAuthorizedMutation: async (
+      _scope: Parameters<TaskWatchdogService["recordAuthorizedMutation"]>[0],
+      _entry: Parameters<TaskWatchdogService["recordAuthorizedMutation"]>[1],
+    ) => ({ recorded: false as const, reason: "watchdog_service_unavailable" }),
   };
 }
 
@@ -4283,50 +4298,113 @@ export function issueRoutes(
     return true;
   }
 
-  // A single request can pass more than one watchdog freshness check (creating
-  // a child validates the parent too), and one re-pin per response is enough.
-  const pendingTaskWatchdogRepins = new WeakSet<Response>();
+  // What a single request has been authorized to write to the watched subtree.
+  // One request can pass more than one freshness check (creating a child
+  // validates the parent too) and can write more than one issue, so the record
+  // accumulates and is persisted once, when the response is about to go out.
+  type PendingTaskWatchdogRecord = {
+    scope: Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>;
+    ledgerBaseline: TaskWatchdogLedgerBaseline | null;
+    mutations: TaskWatchdogAuthorizedMutation[];
+  };
+  const pendingTaskWatchdogRecords = new WeakMap<Response, PendingTaskWatchdogRecord>();
 
-  // A re-pin is three short queries. This bound only exists so a stuck database
-  // cannot hold a response open indefinitely; hitting it degrades to exactly
-  // the behaviour of not re-pinning at all, which the guard fails closed on.
-  const TASK_WATCHDOG_REPIN_HOLD_MS = 5_000;
+  // Recording the ledger is two short queries. This bound only exists so a
+  // stuck database cannot hold a response open indefinitely; hitting it
+  // degrades to exactly the behaviour of not recording at all, which the guard
+  // fails closed on.
+  const TASK_WATCHDOG_RECORD_HOLD_MS = 5_000;
 
-  // The snapshot the freshness guard admitted a mutation against. Re-pinning
-  // diffs the post-mutation subtree against it, so a concurrent third-party
-  // change is not folded into the run's new pin.
-  function taskWatchdogStopSnapshotOf(
-    classification: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>["classification"],
+  // Declares what an authorized request actually wrote to a watched leaf, so
+  // the freshness guard can recognise the resulting drift as this run's own on
+  // the next request.
+  //
+  // The values passed here must come from the row the route's *own* statement
+  // returned, never from a re-read: a re-read can only report the latest value,
+  // which may be a third party's, and recording that as ours is what lets a
+  // concurrent change be laundered into the run's authorization.
+  //
+  // A route that writes a leaf field and does not declare it is not unsafe,
+  // only conservative — the undeclared change reads as somebody else's and the
+  // run's next mutation is rejected, which is what happened before any of this
+  // existed.
+  function noteTaskWatchdogAuthorizedWrite(
+    res: Response,
+    mutation: TaskWatchdogAuthorizedMutation,
   ) {
-    return classification && "stopSnapshot" in classification ? classification.stopSnapshot : null;
+    const record = pendingTaskWatchdogRecords.get(res);
+    if (!record) return;
+    record.mutations.push(mutation);
   }
 
-  // Several of the operations a watchdog run is allowed to perform are inputs
-  // to the stop fingerprint the run is pinned to, so the run's own sanctioned
-  // action would otherwise lock it out of everything it does next. Re-pin the
-  // run onto the state it just produced.
+  function requestedBlockerIssueIds(req: Request) {
+    return Array.isArray(req.body?.blockedByIssueIds)
+      ? [...new Set(req.body.blockedByIssueIds as string[])].sort()
+      : [];
+  }
+
+  // A created issue has no baseline in the watched subtree to be diffed
+  // against, so every material field has to be declared for it to be
+  // attributable at all — an issue this run created but only half-described
+  // could still be carrying somebody else's edit.
+  function noteTaskWatchdogCreatedIssue(
+    req: Request,
+    res: Response,
+    issue: { id: string; status: string; assigneeAgentId: string | null; assigneeUserId: string | null },
+  ) {
+    noteTaskWatchdogAuthorizedWrite(res, {
+      issueId: issue.id,
+      created: true,
+      declared: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId ?? null,
+        assigneeUserId: issue.assigneeUserId ?? null,
+        blockerIssueIds: requestedBlockerIssueIds(req),
+        // A just-created issue has no waiting paths of its own; anything the
+        // classifier reports on it came from somewhere else.
+        pendingInteractionIds: [],
+        pendingApprovalIds: [],
+      },
+    });
+  }
+
+  function taskWatchdogLedgerBaselineOf(
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ) {
+    return "ledgerBaseline" in revalidated ? revalidated.ledgerBaseline ?? null : null;
+  }
+
+  // The mutation itself is adjudicated in `revalidateMutationScope`, before the
+  // route writes anything. All that is left to do around the response is
+  // persist what the run was authorized to write.
   //
-  // The re-pin has to happen after the mutation commits but *before* the
-  // response reaches the client: the run's next request re-reads its pin from
-  // the run context, so a re-pin still in flight when the response is flushed
-  // leaves that request reading the stale value and being rejected by the very
-  // guard this exists to satisfy. So the response is held until the re-pin
+  // It has to land after the mutation commits but *before* the response reaches
+  // the client: the run's next request re-reads its ledger from the run
+  // context, so a write still in flight when the response is flushed leaves
+  // that request unable to account for its own change and being rejected by the
+  // very guard this exists to satisfy. So the response is held until the record
   // settles rather than raced against it.
-  function scheduleTaskWatchdogRepin(
+  function scheduleTaskWatchdogRecord(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
-    attribution: Parameters<TaskWatchdogService["repinMutationScope"]>[1],
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
   ) {
     if (scope.kind !== "watchdog" || !scope.runId) return;
-    if (pendingTaskWatchdogRepins.has(res)) return;
-    pendingTaskWatchdogRepins.add(res);
+    if (pendingTaskWatchdogRecords.has(res)) return;
+    const record: PendingTaskWatchdogRecord = {
+      scope,
+      ledgerBaseline: taskWatchdogLedgerBaselineOf(revalidated),
+      mutations: [],
+    };
+    pendingTaskWatchdogRecords.set(res, record);
 
     let started = false;
-    const settleRepin = async () => {
+    const settleRecord = async () => {
       if (started) return;
       started = true;
-      // Only a mutation that actually landed rotated the fingerprint.
+      // Only a mutation that actually landed moved the subtree.
       if (res.statusCode < 200 || res.statusCode >= 300) return;
+      if (record.mutations.length === 0) return;
       const context = {
         watchedIssueId: scope.watchedIssueId,
         watchdogId: scope.watchdogId,
@@ -4334,36 +4412,69 @@ export function issueRoutes(
       };
       try {
         const outcome = await Promise.race([
-          taskWatchdogsSvc.repinMutationScope(scope, attribution),
-          new Promise<{ repinned: false; reason: string }>((resolve) => {
-            const timer = setTimeout(() => resolve({ repinned: false, reason: "repin_timed_out" }), TASK_WATCHDOG_REPIN_HOLD_MS);
+          taskWatchdogsSvc.recordAuthorizedMutation(scope, {
+            ledgerBaseline: record.ledgerBaseline,
+            mutations: record.mutations,
+          }),
+          new Promise<{ recorded: false; reason: string }>((resolve) => {
+            const timer = setTimeout(
+              () => resolve({ recorded: false, reason: "record_timed_out" }),
+              TASK_WATCHDOG_RECORD_HOLD_MS,
+            );
             timer.unref?.();
           }),
         ]);
-        // A re-pin that does not land is not an error — most reasons are
-        // expected (`fingerprint_unchanged`, `subtree_not_stopped`) and the
-        // guard fails closed either way. It is still worth a record, because
-        // the run's next watched-subtree mutation will be rejected and this is
-        // the only place that says why.
-        if (!outcome?.repinned) {
-          logger.debug({ ...context, reason: outcome?.reason ?? null }, "task watchdog run was not re-pinned");
+        // Not recording is fail-closed rather than an error, but it is still
+        // worth a record: the run's next watched-subtree mutation will be
+        // rejected and this is the only place that says why.
+        if (!outcome?.recorded) {
+          logger.debug(
+            { ...context, reason: outcome?.reason ?? null },
+            "task watchdog authorized mutation was not recorded",
+          );
         }
       } catch (err) {
-        logger.warn({ err, ...context }, "task watchdog re-pin failed");
+        logger.warn({ err, ...context }, "task watchdog authorized mutation record failed");
       }
     };
 
     const sendJson = res.json.bind(res);
     res.json = ((body: unknown) => {
-      void settleRepin().then(() => sendJson(body), () => sendJson(body));
+      void settleRecord().then(() => sendJson(body), () => sendJson(body));
       return res;
     }) as Response["json"];
     // Backstop for any responder that does not go through `res.json`. Strictly
-    // no worse than today: the re-pin still runs, just without the ordering
+    // no worse than today: the record still lands, just without the ordering
     // guarantee above.
     res.once("finish", () => {
-      void settleRepin();
+      void settleRecord();
     });
+  }
+
+  function taskWatchdogStaleDetails(
+    scope: Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>,
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ) {
+    const classification = revalidated.classification;
+    const unattributedIssueIds = "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : undefined;
+    const unattributedLivenessIssueIds = "unattributedLivenessIssueIds" in revalidated
+      ? revalidated.unattributedLivenessIssueIds
+      : undefined;
+    return {
+      watchedIssueId: scope.watchedIssueId,
+      watchdogId: scope.watchdogId,
+      runStopFingerprint: scope.stopFingerprint,
+      currentState: classification?.state ?? null,
+      currentStopFingerprint: classification && "stopFingerprint" in classification
+        ? classification.stopFingerprint
+        : null,
+      // Which issues the run could not account for. This is the difference
+      // between "you were locked out by your own action" and "somebody else
+      // moved the subtree", and without it the two are indistinguishable from
+      // the outside.
+      ...(unattributedIssueIds?.length ? { unattributedIssueIds } : {}),
+      ...(unattributedLivenessIssueIds?.length ? { unattributedLivenessIssueIds } : {}),
+    };
   }
 
   async function assertFreshTaskWatchdogSourceMutation(
@@ -4376,23 +4487,12 @@ export function issueRoutes(
 
     const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
     if (revalidated.allowed) {
-      scheduleTaskWatchdogRepin(res, scope, {
-        authorizedIssueIds: [issue.id],
-        previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
-      });
+      scheduleTaskWatchdogRecord(res, scope, revalidated);
       return true;
     }
     res.status(409).json({
       error: revalidated.reason,
-      details: {
-        watchedIssueId: scope.watchedIssueId,
-        watchdogId: scope.watchdogId,
-        runStopFingerprint: scope.stopFingerprint,
-        currentState: revalidated.classification?.state ?? null,
-        currentStopFingerprint: revalidated.classification && "stopFingerprint" in revalidated.classification
-          ? revalidated.classification.stopFingerprint
-          : null,
-      },
+      details: taskWatchdogStaleDetails(scope, revalidated),
     });
     return false;
   }
@@ -4544,10 +4644,7 @@ export function issueRoutes(
           message: "This issue-thread interaction is outside the current watchdog scope",
         });
       }
-      scheduleTaskWatchdogRepin(res, watchdogScope, {
-        authorizedIssueIds: [issue.id],
-        previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
-      });
+      scheduleTaskWatchdogRecord(res, watchdogScope, revalidated);
       return true;
     }
 
@@ -4705,12 +4802,10 @@ export function issueRoutes(
               message: "Suggested-task creation is outside the current watchdog scope",
             });
           }
-          // The follow-up child is created directly under `parent`, so the new
-          // leaf is attributable to the issue the run was authorized to mutate.
-          scheduleTaskWatchdogRepin(res, watchdogScope, {
-            authorizedIssueIds: [parent.id],
-            previousStopSnapshot: taskWatchdogStopSnapshotOf(revalidated.classification),
-          });
+          // The follow-up child is created directly under `parent`; the created
+          // rows themselves are declared once they exist, by whoever creates
+          // them, so their values are the ones this request wrote.
+          scheduleTaskWatchdogRecord(res, watchdogScope, revalidated);
         }
         await assertTaskBridgeCreateAllowed(req, issue.companyId, {
           projectId: task.projectId ?? issue.projectId,
@@ -9495,6 +9590,7 @@ export function issueRoutes(
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
     });
+    noteTaskWatchdogCreatedIssue(req, res, issue);
     await queueTaskWatchdogEvaluation(issue, actor.runId);
 
     res.status(201).json({
@@ -9672,6 +9768,7 @@ export function issueRoutes(
       watchdogParentIssueId: serializationContext?.watchdogParentIssueId,
       currentChildIssueId: currentSerializedChild?.id ?? issue.id,
     });
+    noteTaskWatchdogCreatedIssue(req, res, issue);
     await queueTaskWatchdogEvaluation(issue, actor.runId);
 
     res.status(201).json(issue);
@@ -11628,6 +11725,22 @@ export function issueRoutes(
       }
     })();
 
+    // `issue` is the row this request's own `UPDATE ... RETURNING` produced, so
+    // these are the values this run wrote — not a re-read that a concurrent
+    // writer could already have overwritten. Status and assignee are the two
+    // watchdog-granted transitions; blockers are only claimed when this request
+    // asked for them, since otherwise it did not write them.
+    noteTaskWatchdogAuthorizedWrite(res, {
+      issueId: issue.id,
+      declared: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId ?? null,
+        assigneeUserId: issue.assigneeUserId ?? null,
+        ...(Array.isArray(req.body?.blockedByIssueIds)
+          ? { blockerIssueIds: requestedBlockerIssueIds(req) }
+          : {}),
+      },
+    });
     await queueTaskWatchdogEvaluation(issue, actor.runId);
     const changes = issueResponse.changes ?? {};
     if (prefersMinimalIssueUpdateResponse(req)) {
