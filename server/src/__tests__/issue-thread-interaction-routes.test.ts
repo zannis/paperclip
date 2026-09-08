@@ -2181,14 +2181,78 @@ describe.sequential("issue thread interaction routes", () => {
     expect(mockRecordAuthorizedMutation).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "watchdog" }),
       expect.objectContaining({
+        mutations: [
+          {
+            issueId: issue.id,
+            declared: {
+              status: "todo",
+              assigneeAgentId: ASSIGNEE_AGENT_ID,
+              assigneeUserId: null,
+            },
+            resolvedInteractionIds: ["interaction-watchdog-decline"],
+          },
+          // The continuation wake really fired for this one — the interaction
+          // carries `wake_assignee` — so the request also reports that it
+          // started work here, which is what lets the guard tell the run this
+          // request began from a run it merely found.
+          { issueId: issue.id, declared: {}, startsWork: true },
+        ],
+      }),
+    );
+  });
+
+  // WDOG-001B-POTENTIAL-CAUSE. The same decline under a continuation policy
+  // that wakes nobody. The waiting-path shrink is still declared — it happened
+  // — but nothing started, and the request must not say otherwise: a run that
+  // turns up on this issue afterwards is a third party's, and licensing it off
+  // "an interaction left the waiting paths" is the guard failing open.
+  it("does not report starting work for a resolution that woke nobody", async () => {
+    const issue = createIssue({ status: "todo" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockResolveTaskWatchdogMutationScope.mockResolvedValue({
+      kind: "watchdog",
+      watchdogId: "watchdog-1",
+      companyId: "company-1",
+      watchedIssueId: issue.id,
+      watchdogIssueId: null,
+      stopFingerprint: "stop-1",
+      runId: RUN_WATCHDOG,
+    });
+    mockInteractionService.rejectInteraction.mockResolvedValueOnce({
+      id: "interaction-watchdog-inert",
+      companyId: "company-1",
+      issueId: issue.id,
+      kind: "request_confirmation",
+      status: "rejected",
+      continuationPolicy: "none",
+      idempotencyKey: null,
+      sourceCommentId: null,
+      sourceRunId: RUN_3,
+      payload: { version: 1, prompt: "Approve completion?" },
+      result: { version: 1, outcome: "rejected", reason: "Not yet." },
+      createdAt: "2026-04-20T12:00:00.000Z",
+      updatedAt: "2026-04-20T12:05:00.000Z",
+      resolvedAt: "2026-04-20T12:05:00.000Z",
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      runId: RUN_WATCHDOG,
+    });
+    const res = await request(app)
+      .post(`/api/issues/${issue.id}/interactions/interaction-watchdog-inert/reject`)
+      .send({ reason: "Not yet." });
+
+    expect(res.status).toBe(200);
+    expect(mockRecordAuthorizedMutation).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "watchdog" }),
+      expect.objectContaining({
         mutations: [{
           issueId: issue.id,
-          declared: {
-            status: "todo",
-            assigneeAgentId: ASSIGNEE_AGENT_ID,
-            assigneeUserId: null,
-          },
-          resolvedInteractionIds: ["interaction-watchdog-decline"],
+          declared: {},
+          resolvedInteractionIds: ["interaction-watchdog-inert"],
         }],
       }),
     );
