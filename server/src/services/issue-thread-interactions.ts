@@ -78,6 +78,7 @@ import {
   isIssueReviewVerdictInteraction,
 } from "./issue-review-policy.js";
 import {
+  type IssueUpdatePrecondition,
   issueService,
   readAcceptedPlanConfirmationTarget,
   runWorkspaceIsFinalized,
@@ -149,6 +150,14 @@ type InteractionResolutionMutationOptions = {
   // that has to account for its own writes can declare them. Fired once, from
   // inside the resolution's transaction, only when the write actually happened.
   onSourceIssueWrite?: (write: ResolvedInteractionSourceIssueWrite) => void;
+  // Applied to whatever this resolution writes to the source issue, as a
+  // compare-and-swap on the state the caller made its decision against. The
+  // reopen and hand-back branches patch status and both assignee columns from
+  // `issueContext`, which was read before the interaction row was locked, so
+  // without this a third party reassigning the issue in that window has their
+  // change overwritten by a stale value and no one is any the wiser. A mismatch
+  // rolls the resolution back and the caller is told it is stale.
+  expectedCurrentLeaf?: IssueUpdatePrecondition | null;
 };
 
 const GITHUB_PULL_REQUEST_URL_PATTERN = /https:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)/gi;
@@ -1703,6 +1712,12 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
     });
     if (expired) throw interactionTerminalError({ status: expired.status, result: expired.result });
 
+    // Applied to every source-issue write below. Empty when the caller named no
+    // expectation, leaving those writes exactly as unconditional as before.
+    const sourceIssuePrecondition = args.mutationOptions?.expectedCurrentLeaf
+      ? { expectedCurrentLeaf: args.mutationOptions.expectedCurrentLeaf }
+      : {};
+
     const now = new Date();
     const postCommitActivityPublications: ActivityPublication[] = [];
     const result = await db.transaction(async (tx) => {
@@ -1813,6 +1828,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
           status: "done",
           actorAgentId: args.actor.agentId ?? null,
           actorUserId: args.actor.userId ?? null,
+          ...sourceIssuePrecondition,
         }, tx, postCommitActivityPublications);
         if (completedIssue) {
           continuationIssue = {
@@ -1832,6 +1848,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
         const returnStatus = issueContext.status === "blocked" ? "blocked" : "todo";
         const returnedIssue = await issueService(db).update(args.issue.id, {
           status: returnStatus,
+          ...sourceIssuePrecondition,
           ...(acceptedPlanStartsExecution ? { workMode: "standard" } : {}),
           assigneeAgentId: lockedCurrent.createdByAgentId,
           assigneeUserId: null,
@@ -1858,6 +1875,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
       } else if (acceptedPlanStartsExecution) {
         const executionIssue = await issueService(db).update(args.issue.id, {
           workMode: "standard",
+          ...sourceIssuePrecondition,
           actorAgentId: args.actor.agentId ?? null,
           actorUserId: args.actor.userId ?? null,
         }, tx, postCommitActivityPublications);
@@ -1924,6 +1942,12 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
     if (interaction.payload.rejectRequiresReason === true && reason.length === 0) {
       throw unprocessable("A decline reason is required for this confirmation");
     }
+
+    // Applied to every source-issue write below. Empty when the caller named no
+    // expectation, leaving those writes exactly as unconditional as before.
+    const sourceIssuePrecondition = args.mutationOptions?.expectedCurrentLeaf
+      ? { expectedCurrentLeaf: args.mutationOptions.expectedCurrentLeaf }
+      : {};
 
     const now = new Date();
     const updated = await db.transaction(async (tx) => {
@@ -2042,6 +2066,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             assigneeUserId: null,
             actorAgentId: args.actor.agentId ?? null,
             actorUserId: args.actor.userId ?? null,
+            ...sourceIssuePrecondition,
           },
           tx,
         );

@@ -18,6 +18,15 @@ export interface IssueAssignmentWakeupDeps {
   ) => Promise<unknown>;
 }
 
+// Whether `queueIssueAssignmentWakeup` will actually wake anybody for this
+// issue. A caller that has to record the *fact* of the wake rather than fire it
+// — the task-watchdog ledger, which tells a run the request itself started from
+// one it merely found running — needs the same answer, and must not restate the
+// condition to get it.
+export function issueAssignmentWakeupFires(issue: { assigneeAgentId: string | null; status: string }) {
+  return Boolean(issue.assigneeAgentId) && issue.status !== "backlog";
+}
+
 export function queueIssueAssignmentWakeup(input: {
   heartbeat: IssueAssignmentWakeupDeps;
   issue: { id: string; assigneeAgentId: string | null; status: string };
@@ -29,10 +38,11 @@ export function queueIssueAssignmentWakeup(input: {
   taskKey?: string | null;
   rethrowOnError?: boolean;
 }) {
-  if (!input.issue.assigneeAgentId || input.issue.status === "backlog") return;
+  const assigneeAgentId = input.issue.assigneeAgentId;
+  if (!assigneeAgentId || !issueAssignmentWakeupFires(input.issue)) return;
 
   return input.heartbeat
-    .wakeup(input.issue.assigneeAgentId, {
+    .wakeup(assigneeAgentId, {
       source: "assignment",
       triggerDetail: "system",
       reason: input.reason,

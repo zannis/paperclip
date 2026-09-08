@@ -188,7 +188,10 @@ import {
   normalizeUploadAttachmentContentType,
   SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
-import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import {
+  issueAssignmentWakeupFires,
+  queueIssueAssignmentWakeup,
+} from "../services/issue-assignment-wakeup.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
 import {
@@ -2176,7 +2179,7 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   newlyResolvedItemIds?: string[];
   idempotencyKey?: string | null;
 }) {
-  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return;
+  if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return false;
 
   const reviewPathLost = input.issue.status === "in_review"
     && (await issueService(input.db)
@@ -2207,8 +2210,8 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   // even when an adapter/model selected the accept-only continuation policy.
   // Keep this as a resolution-time invariant so existing pending interactions
   // and future providers receive the same behavior.
-  if (!continuationPolicyAllowsWake && !rejectedPlanNeedsRevision && !reviewPathLost) return;
-  if (input.interaction.status === "expired" && !reviewPathLost) return;
+  if (!continuationPolicyAllowsWake && !rejectedPlanNeedsRevision && !reviewPathLost) return false;
+  if (input.interaction.status === "expired" && !reviewPathLost) return false;
   // A normal interaction continuation is itself the durable recovery path.
   // Do not contaminate that wake with the fallback "review path lost"
   // instruction merely because the just-consumed interaction now appears
@@ -2332,6 +2335,11 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         "failed to wake assignee on issue interaction resolution",
       ),
     );
+  // Whether the resolution actually woke the assignee. Only this function knows
+  // — it is the one holding the continuation policy, the resolution outcome and
+  // the review-path state — and a watchdog run resolving an interaction needs
+  // the answer to tell a run its own resolution started from one it did not.
+  return true;
 }
 
 function readCheckboxSelectionForWake(input: {
@@ -4343,6 +4351,17 @@ export function issueRoutes(
     record.mutations.push(mutation);
   }
 
+  // Declares that this request enqueued a wake for the issue, which is what
+  // lets the guard tell a run the watchdog started from one it merely found.
+  // Called next to the enqueue itself rather than derived from the values
+  // written: whether a write wakes anybody is this route's decision, taken from
+  // the transition, the actor and the interaction's continuation policy, and
+  // none of that is recoverable from the leaf fields the ledger carries.
+  function noteTaskWatchdogStartedWork(res: Response, issueId: string) {
+    if (!issueId) return;
+    noteTaskWatchdogAuthorizedWrite(res, { issueId, declared: {}, startsWork: true });
+  }
+
   function requestedBlockerIssueIds(req: Request) {
     return Array.isArray(req.body?.blockedByIssueIds)
       ? [...new Set(req.body.blockedByIssueIds as string[])].sort()
@@ -4377,6 +4396,11 @@ export function issueRoutes(
       issueId: issue.id,
       created: true,
       parentId: issue.parentId ?? null,
+      // Creating an assigned, non-backlog issue queues its assignment wake, and
+      // that wake is the run this creation is about to be held responsible for.
+      // Read from the same predicate the wake itself is gated on, so the two
+      // cannot drift apart.
+      ...(issueAssignmentWakeupFires(issue) ? { startsWork: true } : {}),
       declared: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId ?? null,
@@ -4446,6 +4470,7 @@ export function issueRoutes(
         issueId: created.id,
         created: true,
         parentId: created.parentId ?? null,
+        ...(issueAssignmentWakeupFires(created) ? { startsWork: true } : {}),
         declared: {
           status: created.status,
           assigneeAgentId: created.assigneeAgentId ?? null,
@@ -4486,11 +4511,21 @@ export function issueRoutes(
   // the UPDATE matches no row, and the run is told it is stale instead of
   // silently clobbering somebody.
   //
-  // Only the material columns are compared — the ones the fingerprint is built
-  // from and the only ones whose loss the guard exists to prevent. An issue the
-  // guard never observed (outside the watched subtree, or no watchdog scope at
-  // all) yields no precondition and the write is unconditional, exactly as
-  // before.
+  // Every material field this route can write is compared — status, both
+  // assignee columns and the blocker list. The blockers matter most and were
+  // the ones missing: a `blockedByIssueIds` patch replaces the whole list
+  // rather than one column, so a blocker a third party added between the
+  // guard's read and this write is not merely overwritten but deleted, and it
+  // was also the one write that could reach the issue carrying no precondition
+  // at all, since the route accepts a blockers-only patch.
+  //
+  // The two waiting-path fields are deliberately not here: this route cannot
+  // write them, so it cannot clobber them, and rejecting on an interaction
+  // somebody opened in the window would fail a write that takes nothing away
+  // from them. Drift there is still caught — by the ledger, on the run's next
+  // request. An issue the guard never observed (outside the watched subtree, or
+  // no watchdog scope at all) yields no precondition and the write is
+  // unconditional, exactly as before.
   function taskWatchdogWritePrecondition(res: Response, issueId: string) {
     const observed = pendingTaskWatchdogRecords.get(res)?.observedMaterialByIssueId?.[issueId];
     if (!observed) return null;
@@ -4498,6 +4533,7 @@ export function issueRoutes(
       status: observed.status,
       assigneeAgentId: observed.assigneeAgentId ?? null,
       assigneeUserId: observed.assigneeUserId ?? null,
+      blockerIssueIds: observed.blockerIssueIds ?? [],
     };
   }
 
@@ -11498,6 +11534,11 @@ export function issueRoutes(
             ? wakeup.payload.issueId
             : issue.id;
         wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+        // Every wake this route fires funnels through here — assignment, status
+        // transition, comment, execution stage, dependency resolved — so the
+        // watchdog ledger learns which issues this request actually started
+        // work on without each of those sites having to remember to say so.
+        noteTaskWatchdogStartedWork(res, wakeIssueId);
       };
       const addDependencyResolvedWakeup = async (input: {
         agentId: string;
@@ -12722,7 +12763,13 @@ export function issueRoutes(
         userId: actor.actorType === "user" ? actor.actorId : null,
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
         suggestedTaskEffectsAuthorized,
-      }, { onSourceIssueWrite: (write) => { sourceIssueWrite = write; } });
+      }, {
+        onSourceIssueWrite: (write) => { sourceIssueWrite = write; },
+        // The resolution's own writes to this issue are conditioned on the
+        // state the freshness guard admitted the request against, exactly as
+        // the update route's are.
+        expectedCurrentLeaf: taskWatchdogWritePrecondition(res, issue.id),
+      });
       noteTaskWatchdogResolvedInteraction(res, issue, interaction, createdIssues, sourceIssueWrite);
       const toolAction = interaction.payload && typeof interaction.payload === "object"
         ? (interaction.payload as { toolAction?: { actionRequestId?: unknown } }).toolAction
@@ -12925,7 +12972,10 @@ export function issueRoutes(
         interaction.status === "accepted" &&
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
-      await queueResolvedInteractionContinuationWakeup({
+      // Only a resolution that actually woke the assignee started work here.
+      // The policy, the verdict and the review-path state that decide it live
+      // inside the helper, so its answer is taken rather than guessed at.
+      if (await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
         issue: { ...continuationWakeIssue, companyId: issue.companyId },
@@ -12934,7 +12984,7 @@ export function issueRoutes(
         source: "issue.interaction.accept",
         forceFreshSession: acceptedPlanConfirmation,
         workspaceRefreshReason: acceptedPlanConfirmation ? "accepted_plan_confirmation" : null,
-      });
+      })) noteTaskWatchdogStartedWork(res, issue.id);
 
       res.json(continuationInteraction);
     },
@@ -12969,7 +13019,13 @@ export function issueRoutes(
         runId: actor.runId,
         userId: actor.actorType === "user" ? actor.actorId : null,
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
-      }, { onSourceIssueWrite: (write) => { sourceIssueWrite = write; } });
+      }, {
+        onSourceIssueWrite: (write) => { sourceIssueWrite = write; },
+        // The resolution's own writes to this issue are conditioned on the
+        // state the freshness guard admitted the request against, exactly as
+        // the update route's are.
+        expectedCurrentLeaf: taskWatchdogWritePrecondition(res, issue.id),
+      });
       noteTaskWatchdogResolvedInteraction(res, issue, interaction, [], sourceIssueWrite);
 
       await logActivity(db, {
@@ -13003,14 +13059,14 @@ export function issueRoutes(
         },
       });
 
-      await queueResolvedInteractionContinuationWakeup({
+      if (await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
         issue,
         interaction,
         actor,
         source: "issue.interaction.reject",
-      });
+      })) noteTaskWatchdogStartedWork(res, issue.id);
 
       res.json(interaction);
     },
@@ -13149,7 +13205,7 @@ export function issueRoutes(
       });
 
       if (newlyResolvedItemIds.length > 0) {
-        await queueResolvedInteractionContinuationWakeup({
+        if (await queueResolvedInteractionContinuationWakeup({
           db,
           heartbeat,
           issue,
@@ -13161,7 +13217,7 @@ export function issueRoutes(
             issueId: issue.id,
             interactionId: interaction.id,
           }),
-        });
+        })) noteTaskWatchdogStartedWork(res, issue.id);
       }
 
       res.json(interaction);
@@ -13238,14 +13294,14 @@ export function issueRoutes(
       });
 
       if (actor.agentId !== issue.assigneeAgentId) {
-        await queueResolvedInteractionContinuationWakeup({
+        if (await queueResolvedInteractionContinuationWakeup({
           db,
           heartbeat,
           issue,
           interaction,
           actor,
           source: "issue.interaction.withdraw",
-        });
+        })) noteTaskWatchdogStartedWork(res, issue.id);
       }
       res.json(interaction);
     },
@@ -13371,14 +13427,14 @@ export function issueRoutes(
         }
       }
 
-      await queueResolvedInteractionContinuationWakeup({
+      if (await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
         issue,
         interaction,
         actor,
         source: "issue.interaction.cancel",
-      });
+      })) noteTaskWatchdogStartedWork(res, issue.id);
 
       res.json(interaction);
     },
@@ -14141,6 +14197,9 @@ export function issueRoutes(
         const key = `${agentId}:${wakeIssueId}`;
         if (wakeups.has(key)) return;
         wakeups.set(key, { agentId, wakeup });
+        // Same funnel as the update route: the wake this comment fires is the
+        // fact the watchdog guard needs, and it is only knowable here.
+        noteTaskWatchdogStartedWork(res, wakeIssueId);
       };
       const addDependencyResolvedWakeup = async (input: {
         agentId: string;

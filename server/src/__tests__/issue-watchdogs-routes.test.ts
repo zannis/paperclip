@@ -809,6 +809,113 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(afterRace?.assigneeAgentId).toBe(otherAgentId);
   });
 
+  // WDOG-005-PARTIAL-CAS. Blockers are a material leaf field, and the one this
+  // route does not merely overwrite but replaces wholesale — a
+  // `blockedByIssueIds` patch deletes every relation not named in it. They also
+  // live in `issue_relations` rather than on the issue row, so they cannot ride
+  // in the update's `WHERE` clause with the columns; leaving them out left the
+  // most destructive write on the leaf as the only one with nothing to compare
+  // against, including the blockers-only patch, which names no column the
+  // precondition covered at all.
+  it("rejects a watched-leaf blocker write whose blockers changed underneath it", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Blocker Racing Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, { title: "Watched child", parentId: watchedRootId });
+    const raceBlockerId = await seedIssue(companyId, { title: "Blocker the board added" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    // A board user blocks the leaf in the window the guard just finished
+    // reading. The watchdog's patch names the blocker list it saw — empty — so
+    // without the read being carried into the write it lands and the blocker is
+    // deleted, with a final state that matches the ledger exactly.
+    raceAfterRevalidate.current = async () => {
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: raceBlockerId,
+        relatedIssueId: watchedChildId,
+        type: "blocks",
+      });
+    };
+
+    const raced = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ blockedByIssueIds: [] });
+    expect(raced.status, JSON.stringify(raced.body)).toBe(409);
+
+    const survivingBlockers = await db
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.relatedIssueId, watchedChildId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    expect(survivingBlockers.map((row) => row.blockerIssueId)).toEqual([raceBlockerId]);
+  });
+
+  // The control: the same blockers write with nobody racing is the run's own
+  // sanctioned recovery and must land.
+  it("lets a watched-leaf blocker write land when the blockers did not move", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Unraced Blocker Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, { title: "Watched child", parentId: watchedRootId });
+    const blockerId = await seedIssue(companyId, { title: "Blocker the watchdog adds" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const patched = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ blockedByIssueIds: [blockerId] });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+
+    const blockers = await db
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.relatedIssueId, watchedChildId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    expect(blockers.map((row) => row.blockerIssueId)).toEqual([blockerId]);
+  });
+
   // The control for the above: with nobody racing, the very same write is the
   // run's own sanctioned recovery and must land. A precondition that rejected
   // this would lock the watchdog out of the subtree it is there to restore.

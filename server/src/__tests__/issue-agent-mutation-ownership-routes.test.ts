@@ -2301,8 +2301,13 @@ describe("agent issue mutation checkout ownership", () => {
         unknown,
         { mutations: { declared: Record<string, unknown> }[] },
       ];
-      expect(entry.mutations[0]!.declared).toEqual({ status: "todo" });
-      expect(entry.mutations[0]!.declared).not.toHaveProperty("assigneeAgentId");
+      // Merged across every mutation the request recorded rather than read off
+      // the first: a request records the wake it fired as well as the write it
+      // made, and the claim under test is that nothing anywhere in it names a
+      // field the body did not.
+      const declared = Object.assign({}, ...entry.mutations.map((mutation) => mutation.declared));
+      expect(declared).toEqual({ status: "todo" });
+      expect(declared).not.toHaveProperty("assigneeAgentId");
     });
 
     // WDOG-001A. The update writes the assignee columns the body named and
@@ -2332,8 +2337,9 @@ describe("agent issue mutation checkout ownership", () => {
         unknown,
         { mutations: { declared: Record<string, unknown> }[] },
       ];
-      expect(entry.mutations[0]!.declared).toEqual({ assigneeUserId: null });
-      expect(entry.mutations[0]!.declared).not.toHaveProperty("assigneeAgentId");
+      const declared = Object.assign({}, ...entry.mutations.map((mutation) => mutation.declared));
+      expect(declared).toEqual({ assigneeUserId: null });
+      expect(declared).not.toHaveProperty("assigneeAgentId");
     });
 
     it("does not record anything when the mutation was rejected", async () => {

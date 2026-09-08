@@ -856,8 +856,16 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       parentId: sourceId,
       createdAt: new Date(),
     });
+    // Creating an assigned, non-backlog issue queues its assignment wake, and
+    // the create route reports that alongside the creation.
     expect((await recordMutations(scope, admitted, [
-      { issueId: childId, created: true, parentId: sourceId, declared: declaredCreatedLeaf() },
+      {
+        issueId: childId,
+        created: true,
+        parentId: sourceId,
+        declared: declaredCreatedLeaf(),
+        startsWork: true,
+      },
     ])).recorded).toBe(true);
 
     const duringGrace = await service.revalidateMutationScope(await resolveScope());
@@ -939,8 +947,10 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     await db.update(issues)
       .set({ assigneeAgentId: agentId, updatedAt: new Date() })
       .where(eq(issues.id, leafId));
+    // The reassignment is a real change of assignee on a non-backlog issue, so
+    // the update route enqueued an assignment wake and reported it.
     expect((await recordMutations(scope, admitted, [
-      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }) },
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
     ])).recorded).toBe(true);
 
     // The reassignment starts a run on the leaf, which is the recovery working.
@@ -1029,12 +1039,12 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([leafId]);
   });
 
-  // WDOG-001B. Potential causation is not causation. Of the four writes that
-  // can start work, two only do so depending on the value — and "depends on the
-  // value" means depends on it *changing*. Writing a leaf's status back to the
-  // status it already held fires no wake, so a run appearing on that leaf
-  // afterwards is a third party's, and the declaration must not launder it just
-  // because the value it names happens to be non-terminal.
+  // WDOG-001B. Potential causation is not causation. Which writes start work is
+  // the route's decision, not a property of the values written, so the ledger
+  // asks the route: a request that woke somebody says so. A declaration that
+  // does not — here, writing a leaf's status back to the status it already
+  // held, which fires no wake — accounts for the write and for nothing else,
+  // and a run appearing on that leaf afterwards is still a third party's.
   it("rejects a live path on a leaf whose declared status never moved", async () => {
     const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
       await seedWokenWatchdogRun("WDOG-LIVE-NOOP", { establishedChildren: ["WDOG-LIVE-NOOP-A"] });
@@ -1103,11 +1113,117 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([leafId]);
   });
 
-  // The positive control for the two above, through a value that *did* move:
-  // a leaf this run drove to `in_progress` and then handed back to `todo` woke
-  // its assignee on the way through, so the net declaration matching the
-  // baseline must not read as a no-op.
-  it("lets the run keep working on a leaf it moved and then put back", async () => {
+  // The same gap through the write whose wake is the least value-shaped of all.
+  // Whether resolving an interaction wakes the issue's assignee depends on the
+  // interaction's continuation policy and on the verdict it was resolved with —
+  // `wake_assignee`, or `wake_assignee_on_accept` and only then on an accepted
+  // or answered outcome — none of which is knowable from the leaf fields the
+  // ledger carries. A resolution under a policy that wakes nobody accounts for
+  // the waiting-path shrink it caused and licenses no liveness at all.
+  it("rejects a live path licensed only by a resolution that woke nobody", async () => {
+    const interactionId = randomUUID();
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-INERT-INTERACTION", {
+        establishedChildren: ["WDOG-LIVE-INERT-INTERACTION-A"],
+        beforePin: async ({ companyId: seededCompanyId, agentId, childIds: seeded }) => {
+          await db.insert(issueThreadInteractions).values({
+            id: interactionId,
+            companyId: seededCompanyId,
+            issueId: seeded[0]!,
+            kind: "request_confirmation",
+            status: "pending",
+            continuationPolicy: "none",
+            payload: { version: 1, prompt: "Confirm the recovery." },
+            createdByAgentId: agentId,
+          });
+        },
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issueThreadInteractions)
+      .set({ status: "accepted" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+    // Declared, so the shrink in the waiting paths is accounted for — and no
+    // more than that, because the route queued no continuation wake.
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: {}, resolvedInteractionIds: [interactionId] },
+    ])).recorded).toBe(true);
+
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
+  // And its control: the same resolution under a policy that does wake, which
+  // the route reports. The run's own continuation must not lock it out.
+  it("lets the run keep working after a resolution it reported waking", async () => {
+    const interactionId = randomUUID();
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-WAKING-INTERACTION", {
+        establishedChildren: ["WDOG-LIVE-WAKING-INTERACTION-A"],
+        beforePin: async ({ companyId: seededCompanyId, agentId, childIds: seeded }) => {
+          await db.insert(issueThreadInteractions).values({
+            id: interactionId,
+            companyId: seededCompanyId,
+            issueId: seeded[0]!,
+            kind: "request_confirmation",
+            status: "pending",
+            continuationPolicy: "wake_assignee",
+            payload: { version: 1, prompt: "Confirm the recovery." },
+            createdByAgentId: agentId,
+          });
+        },
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issueThreadInteractions)
+      .set({ status: "accepted" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: {}, resolvedInteractionIds: [interactionId] },
+      { issueId: leafId, declared: {}, startsWork: true },
+    ])).recorded).toBe(true);
+
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.classification?.state).toBe("live");
+    expect(
+      revalidated.allowed,
+      "unattributedLivenessIssueIds" in revalidated
+        ? JSON.stringify(revalidated.unattributedLivenessIssueIds)
+        : "",
+    ).toBe(true);
+  });
+
+  // The positive control for the two above. The same leaf, the same net
+  // declaration — and this time the route reported that one of those writes
+  // actually enqueued a wake. That report, not the values, is what licenses the
+  // liveness: a run that really did wake its assignee on the way through must
+  // not then be locked out of the rest of its own recovery.
+  it("lets the run keep working on a leaf whose write it reported waking", async () => {
     const { companyId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
       await seedWokenWatchdogRun("WDOG-LIVE-ROUNDTRIP", {
         establishedChildren: ["WDOG-LIVE-ROUNDTRIP-A"],
@@ -1117,7 +1233,11 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const admitted = await admitMutation(scope);
 
     expect((await recordMutations(scope, admitted, [
-      { issueId: leafId, declared: declaredLeaf({ status: "in_progress", assigneeAgentId: agentId }) },
+      {
+        issueId: leafId,
+        declared: declaredLeaf({ status: "in_progress", assigneeAgentId: agentId }),
+        startsWork: true,
+      },
       { issueId: leafId, declared: declaredLeaf({ status: "todo" }) },
     ])).recorded).toBe(true);
 
@@ -1356,6 +1476,78 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(
       "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
     ).toEqual([leafId]);
+  });
+
+  // WDOG-CREATED-TERMINAL-DRIFT. A child the run created and somebody else then
+  // closed slips through every comparison the guard makes: it has no baseline
+  // entry to be diffed against, and going terminal takes it out of the material
+  // leaves and out of the waiting paths at once. Its parent's leaf-loss stays
+  // honestly explained by the creation, so nothing else flags it either — while
+  // the identical closure of a child that *existed* at baseline is rejected by
+  // the leaf-loss check. The creation is not a licence for whatever happens to
+  // the created issue afterwards.
+  it("rejects a follow-up child a third party closed under the run", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-CREATED-CLOSED", {
+        establishedChildren: ["WDOG-CREATED-CLOSED-A"],
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-CREATED-CLOSED-FOLLOWUP",
+      status: "todo",
+      parentId: leafId,
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, parentId: leafId, declared: declaredCreatedLeaf() },
+    ])).recorded).toBe(true);
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
+
+    // A board user closes the follow-up itself. It stays a child of the leaf,
+    // so the leaf's displacement is still the run's own — but this transition
+    // is not.
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, childId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    // The child alone: the parent's leaf-loss is not the third party's doing
+    // and must not be reported as though it were.
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([childId]);
+  });
+
+  // The control: the run closing its own follow-up is a declared write like any
+  // other, and the same shape must still land.
+  it("lets the run keep working after closing the follow-up child it created", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-CREATED-SELF-CLOSED", {
+        establishedChildren: ["WDOG-CREATED-SELF-CLOSED-A"],
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-CREATED-SELF-CLOSED-FOLLOWUP",
+      status: "todo",
+      parentId: leafId,
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, childId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, parentId: leafId, declared: declaredCreatedLeaf() },
+      { issueId: childId, declared: { status: "done" } },
+    ])).recorded).toBe(true);
+
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
   });
 
   // WDOG-001B. A declaration licenses the liveness it could have caused, and

@@ -241,6 +241,15 @@ export type IssueUpdatePrecondition = {
   status?: string;
   assigneeAgentId?: string | null;
   assigneeUserId?: string | null;
+  // The blockers the caller read, deduplicated and sorted. Not a column on
+  // `issues` — blockers are rows in `issue_relations` and this update replaces
+  // them wholesale — so this one cannot ride in the `WHERE` clause with the
+  // rest. It is compared inside the same transaction instead, under the row
+  // lock the write already holds, which is what makes it a compare-and-swap and
+  // not a second read: `syncBlockedByIssueIds` takes that same lock before
+  // touching a relation and is the only path that writes them, so no blocker
+  // write can land between this comparison and the replacement below.
+  blockerIssueIds?: string[];
 };
 
 // Rendered as extra `WHERE` terms on the update rather than a re-read: a read
@@ -7980,6 +7989,32 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        // The blocker half of the precondition, checked here because the row
+        // lock is held from the statement above until this transaction commits.
+        // It is checked whether or not this request writes blockers: the caller
+        // decided to make this write against the blocker list it read, and a
+        // blocker somebody else added since is the same stale-decision case the
+        // column comparisons catch — a request that goes on to replace the list
+        // would erase it outright.
+        if (expectedCurrentLeaf?.blockerIssueIds !== undefined) {
+          const currentBlockerIssueIds = await tx
+            .select({ blockerIssueId: issueRelations.issueId })
+            .from(issueRelations)
+            .where(and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.relatedIssueId, id),
+              eq(issueRelations.type, "blocks"),
+            ))
+            .then((rows: Array<{ blockerIssueId: string }>) =>
+              [...new Set(rows.map((row) => row.blockerIssueId))].sort());
+          const expectedBlockerIssueIds = [...new Set(expectedCurrentLeaf.blockerIssueIds)].sort();
+          if (currentBlockerIssueIds.join(" ") !== expectedBlockerIssueIds.join(" ")) {
+            throw conflict(
+              "Issue changed since it was read; the update was not applied.",
+              { issueId: id, expected: expectedCurrentLeaf },
+            );
+          }
+        }
         const [previousLabelsByIssueId, previousRelationSummaries] = await Promise.all([
           nextLabelIds !== undefined
             ? labelMapForIssues(tx, [id])

@@ -416,6 +416,19 @@ export type TaskWatchdogAuthorizedMutation = {
   // anything — an interaction somebody else added is still an id the run never
   // accounted for, and still stops it dead.
   resolvedInteractionIds?: string[];
+  // Set by a route that actually enqueued a wake for this issue as part of the
+  // request — the assignment/status/comment wakeups the update and comment
+  // routes queue, the continuation wakeup an interaction resolution queues, the
+  // assignment wakeup a creation queues.
+  //
+  // It is a *fact about this request*, not a property of the values it wrote,
+  // and that distinction is the whole point: which writes wake anybody is the
+  // route's decision, taken from state the guard cannot see (the interaction's
+  // continuation policy and resolution outcome, the actor type, the execution
+  // stage), and re-deriving it here from the declared values can only ever
+  // produce a guess. A guess that says "yes" attributes a third party's run to
+  // this one, which is the guard failing open.
+  startsWork?: boolean;
 };
 
 // What a watchdog run has been authorized to do to the watched subtree so far,
@@ -580,6 +593,22 @@ export function unattributedSubtreeChanges(input: {
     // Same bar as a created leaf: a half-described creation could be carrying
     // somebody else's edit, and cannot speak for anything.
     if (!declarationCoversEveryMaterialField(declared.declared)) continue;
+    // Leaving the leaf set does not take the issue out of the subtree, and it
+    // is the only way a subtree issue escapes every comparison in this
+    // function: a created child has no baseline entry to be diffed against
+    // above, and `waitsByIssueId` carries non-terminal issues only, so a third
+    // party closing the run's own follow-up child would otherwise go entirely
+    // unnoticed — while the same closure on a child that existed at baseline is
+    // caught by the leaf-loss loop below. Held to the same bar as a created
+    // leaf: the state it is in now must be the state the run created it in.
+    const current = input.nextMaterialByIssueId[issueId];
+    if (!current || canonicalJson({ ...declared.declared, issueId }) !== canonicalJson(current)) {
+      unattributed.add(issueId);
+    }
+    // The drift above is the child's own and is reported as the child's. It
+    // does not take the parent's explanation away: the creation is still why
+    // the parent stopped being a leaf, whoever changed the child afterwards.
+    //
     // An issue the run created and that is no longer under the parent the run
     // created it under cannot be why a leaf there is missing — the agreement
     // check inside the helper covers both that and its leaving the subtree
@@ -638,73 +667,36 @@ export function unattributedSubtreeChanges(input: {
   return [...unattributed].sort();
 }
 
-// Whether a declaration could itself be why a run is now live on that issue.
+// Whether this run is why a run is now live on that issue.
 //
 // Ledger membership alone is too coarse to answer this: a run that only touched
 // some field which leaves the issue idle has not started anything, so a run
 // appearing on it afterwards is somebody else's and must not be waved through
 // on the strength of the issue merely being "known".
 //
-// Of the writes the watchdog mandate grants, four can start work: creating the
-// issue (its assignment wake), transitioning its status, reassigning it, and
-// resolving one of its interactions (which wakes the assignee). Anything else a
-// route may have declared — a blocker list, a pending approval — is not a cause
-// of liveness and does not license it.
+// Neither is the declared *value* enough, and that is the sharper trap, because
+// reasoning about values gets close enough to look right. Which writes actually
+// start work is not a function of the leaf fields at all — it is a decision the
+// routes take, from state that never reaches this ledger: an interaction's
+// continuation policy and its resolution outcome (`wake_assignee`,
+// `wake_assignee_on_accept` only on an accepted or answered verdict, a rejected
+// plan confirmation, a lost review path), the actor type, the execution stage,
+// and, for status, a specific enumerated set of transitions rather than "the
+// value moved" (`statusChangedFromBacklog`, `statusChangedFromBlockedToTodo`,
+// `statusChangedFromClosedToTodo`, `userResumedFromReviewToTodo`). A `todo ->
+// in_progress` PATCH is a real change to a non-terminal status and wakes
+// nobody; an interaction resolved under a policy that does not wake wakes
+// nobody either. Re-deriving any of that from the declaration produces a guess,
+// and a guess that says "yes" hands a third party's run to this run's ledger as
+// its own — the guard failing open in exactly the place it is supposed to hold.
 //
-// Two of those four only start work depending on the value written, and the
-// value is in the declaration: closing an issue takes it out of the running
-// rather than putting it there, and clearing an assignee leaves nobody to wake.
-// A run appearing on a leaf the run only closed or only un-assigned is
-// therefore somebody else's, and saying so costs the watchdog nothing — it
-// never had a reason to expect work there.
-//
-// The value alone is still not enough: the routes that fire these wakes all
-// compare against the row they are overwriting (`assigneeChanged`,
-// `statusChangedFromBacklog`, `statusChangedFromClosedToTodo` in the issue
-// PATCH route), so a write that lands the field on the value it already held
-// wakes nobody. Licensing liveness off a no-op — a `status: "todo"` PATCH of an
-// issue already `todo`, a reassignment to the agent already assigned — accepts
-// what the run *could* have caused as proof of what it did cause, and a third
-// party's run on that leaf walks straight through.
-//
-// So each declared step is judged against the value the field held going into
-// it, starting from the baseline the ledger is anchored to. The steps are
-// walked rather than the merged final value because a field can move and move
-// back inside one run: `todo -> in_progress -> todo` wakes the assignee on the
-// first step, and collapsing it to `todo` would hide a liveness the run really
-// did cause and lock the run out of the rest of its own recovery.
-function declaredStepsCanStartWork(
-  mutations: TaskWatchdogAuthorizedMutation[],
-  before: TaskWatchdogMaterialLeaf | null,
-) {
-  let status = before?.status ?? null;
-  let assigneeAgentId = before?.assigneeAgentId ?? null;
-  let assigneeUserId = before?.assigneeUserId ?? null;
-  let canStartWork = false;
-  for (const mutation of mutations) {
-    // Resolving an interaction wakes the issue's assignee whatever the leaf
-    // fields end up at, and a creation is a new issue reaching its assignee for
-    // the first time — neither is a no-op that can be argued away by value.
-    if ((mutation.resolvedInteractionIds ?? []).length > 0) canStartWork = true;
-    const declared = mutation.declared ?? {};
-    if (declared.status !== undefined) {
-      if (declared.status !== status && !isTerminalIssueStatus(declared.status)) canStartWork = true;
-      status = declared.status;
-    }
-    if (declared.assigneeAgentId !== undefined) {
-      if (declared.assigneeAgentId != null && declared.assigneeAgentId !== assigneeAgentId) {
-        canStartWork = true;
-      }
-      assigneeAgentId = declared.assigneeAgentId;
-    }
-    if (declared.assigneeUserId !== undefined) {
-      if (declared.assigneeUserId != null && declared.assigneeUserId !== assigneeUserId) {
-        canStartWork = true;
-      }
-      assigneeUserId = declared.assigneeUserId;
-    }
-  }
-  return canStartWork;
+// So the routes say it instead. `startsWork` is set by the request that
+// actually enqueued the wake, next to the enqueue itself, and this asks nothing
+// else. A route that wakes somebody and does not declare it is conservative,
+// not unsafe: the liveness reads as a third party's and the run's next mutation
+// is rejected, which is the behaviour that predates any of this.
+function declaredStepsCanStartWork(mutations: TaskWatchdogAuthorizedMutation[]) {
+  return mutations.some((mutation) => mutation?.startsWork === true);
 }
 
 // Whether the reason the subtree is no longer stopped is this run's own doing.
@@ -712,16 +704,27 @@ function declaredStepsCanStartWork(
 // live or pending-first-run by design — that is the recovery working — and the
 // mandate then asks it to record what it did. Liveness nobody in this run's
 // ledger accounts for is a third party and still stops the run dead.
+//
+// `creationExplains` separates the two verdicts this runs for. A `live` issue
+// has an actual run or a queued wake on it, and only a wake this run enqueued
+// accounts for that. A `pending_first_run` issue has neither: the classifier
+// defers on it because it is newly created and has never completed a run, so
+// what has to be accounted for is the *creation*, which the ledger records as a
+// fact and `unattributedSubtreeChanges` has already checked field by field. A
+// follow-up this run created and left unassigned wakes nobody and is still
+// exactly why the subtree reads pending.
 function unattributedLivenessIssueIds(
   ledger: TaskWatchdogMutationLedger,
   livenessIssueIds: string[],
+  creationExplains: boolean,
 ) {
   const mutationsByIssueId = declaredMutationsByIssueId(ledger.mutations ?? []);
-  const baselineMaterial = ledger.baselineMaterialByIssueId ?? {};
   return livenessIssueIds
     .filter((issueId) => {
       const mutations = mutationsByIssueId.get(issueId);
-      return !mutations || !declaredStepsCanStartWork(mutations, baselineMaterial[issueId] ?? null);
+      if (!mutations) return true;
+      if (creationExplains && mutations.some((mutation) => mutation?.created === true)) return false;
+      return !declaredStepsCanStartWork(mutations);
     })
     .sort();
 }
@@ -2116,9 +2119,9 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
     });
     const unattributedLiveness = classification.state === "live"
-      ? unattributedLivenessIssueIds(ledger, classification.liveIssueIds)
+      ? unattributedLivenessIssueIds(ledger, classification.liveIssueIds, false)
       : classification.state === "pending_first_run"
-      ? unattributedLivenessIssueIds(ledger, classification.pendingIssueIds)
+      ? unattributedLivenessIssueIds(ledger, classification.pendingIssueIds, true)
       : [];
     if (unattributedIssueIds.length > 0 || unattributedLiveness.length > 0) {
       return {
