@@ -163,6 +163,7 @@ import {
 } from "../services/task-watchdog-scope.js";
 import type {
   TaskWatchdogAuthorizedMutation,
+  TaskWatchdogDeclaredLeafWrite,
   TaskWatchdogLedgerBaseline,
   TaskWatchdogServiceDeps,
   taskWatchdogService,
@@ -264,6 +265,7 @@ import {
   type IssueThreadInteractionResolverRestriction,
 } from "../services/issue-thread-interaction-resolution.js";
 import { resolveSelectedSuggestedTasks } from "../services/issue-thread-interactions.js";
+import type { ResolvedInteractionSourceIssueWrite } from "../services/issue-thread-interactions.js";
 import {
   crossIssueInfluenceLimitError,
   crossIssueInfluenceRunContextError,
@@ -4381,6 +4383,14 @@ export function issueRoutes(
   // Issues the resolution created are declared the same way the create routes
   // declare theirs. The interaction service creates them with no blockers and no
   // waiting paths of their own, so those fields are known without a re-read.
+  //
+  // A resolution can also move the source issue itself — accepting a completion
+  // review closes it, declining one reopens it and hands it back to its
+  // assignee — and those writes are leaf fields like any other. The service
+  // reports them from its own `RETURNING` row as `sourceIssueWrite`, naming
+  // only the columns it patched; leaving them undeclared would read as somebody
+  // else's change and lock the run out of the rest of its own recovery, which
+  // is this issue's defect reached through the resolution routes.
   function noteTaskWatchdogResolvedInteraction(
     res: Response,
     issue: { id: string },
@@ -4391,12 +4401,23 @@ export function issueRoutes(
       assigneeAgentId: string | null;
       assigneeUserId?: string | null;
     }[] = [],
+    sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null,
   ) {
-    if (interaction.status !== "pending") {
+    const declaredSourceWrite: TaskWatchdogDeclaredLeafWrite = {
+      ...(sourceIssueWrite?.status !== undefined ? { status: sourceIssueWrite.status } : {}),
+      ...(sourceIssueWrite?.assigneeAgentId !== undefined
+        ? { assigneeAgentId: sourceIssueWrite.assigneeAgentId ?? null }
+        : {}),
+      ...(sourceIssueWrite?.assigneeUserId !== undefined
+        ? { assigneeUserId: sourceIssueWrite.assigneeUserId ?? null }
+        : {}),
+    };
+    const resolved = interaction.status !== "pending";
+    if (resolved || Object.keys(declaredSourceWrite).length > 0) {
       noteTaskWatchdogAuthorizedWrite(res, {
         issueId: issue.id,
-        declared: {},
-        resolvedInteractionIds: [interaction.id],
+        declared: declaredSourceWrite,
+        ...(resolved ? { resolvedInteractionIds: [interaction.id] } : {}),
       });
     }
     for (const created of createdIssues) {
@@ -11791,14 +11812,18 @@ export function issueRoutes(
       issueId: issue.id,
       declared: {
         ...(req.body?.status !== undefined ? { status: issue.status } : {}),
-        // The two assignee columns are written as a pair — handing an issue to a
-        // user clears the agent and vice versa — so asking for either declares
-        // both. Asking for neither declares neither.
-        ...(req.body?.assigneeAgentId !== undefined || req.body?.assigneeUserId !== undefined
-          ? {
-            assigneeAgentId: issue.assigneeAgentId ?? null,
-            assigneeUserId: issue.assigneeUserId ?? null,
-          }
+        // Column by column, because that is how the update writes them:
+        // `issueService.update` patches exactly the assignee columns the body
+        // named and leaves the other one where it was (it rejects the request
+        // outright rather than clearing a conflicting one). So a body that
+        // asked only to clear the user assignee can come back with an agent
+        // assignee a board user set in the meantime, and declaring the pair
+        // would hand that write to the ledger as this run's own.
+        ...(req.body?.assigneeAgentId !== undefined
+          ? { assigneeAgentId: issue.assigneeAgentId ?? null }
+          : {}),
+        ...(req.body?.assigneeUserId !== undefined
+          ? { assigneeUserId: issue.assigneeUserId ?? null }
           : {}),
         ...(Array.isArray(req.body?.blockedByIssueIds)
           ? { blockerIssueIds: requestedBlockerIssueIds(req) }
@@ -12613,14 +12638,19 @@ export function issueRoutes(
       if (!suggestedTaskEffectsAuthorized) return;
 
       const actor = getActorInfo(req);
+      // A resolution can move the source issue itself, and a watchdog run has
+      // to declare that write like any other. The service reports it from its
+      // own `RETURNING` row rather than the route re-reading the issue, which
+      // could only report where the issue is *now*.
+      let sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null;
       const { interaction, createdIssues, continuationIssue } = await interactionSvc.acceptInteraction(issue, interactionId, req.body, {
         agentId: actor.agentId,
         runId: actor.runId,
         userId: actor.actorType === "user" ? actor.actorId : null,
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
         suggestedTaskEffectsAuthorized,
-      });
-      noteTaskWatchdogResolvedInteraction(res, issue, interaction, createdIssues);
+      }, { onSourceIssueWrite: (write) => { sourceIssueWrite = write; } });
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction, createdIssues, sourceIssueWrite);
       const toolAction = interaction.payload && typeof interaction.payload === "object"
         ? (interaction.payload as { toolAction?: { actionRequestId?: unknown } }).toolAction
         : null;
@@ -12858,13 +12888,16 @@ export function issueRoutes(
       }
 
       const actor = getActorInfo(req);
+      // See the accept route: declining a confirmation reopens the reviewed
+      // issue and hands it back to its assignee, which is a leaf write.
+      let sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null;
       const interaction = await interactionSvc.rejectInteraction(issue, interactionId, req.body, {
         agentId: actor.agentId,
         runId: actor.runId,
         userId: actor.actorType === "user" ? actor.actorId : null,
         resolverPolicyRestriction: resolutionAuthorization.resolverPolicyRestriction,
-      });
-      noteTaskWatchdogResolvedInteraction(res, issue, interaction);
+      }, { onSourceIssueWrite: (write) => { sourceIssueWrite = write; } });
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction, [], sourceIssueWrite);
 
       await logActivity(db, {
         companyId: issue.companyId,

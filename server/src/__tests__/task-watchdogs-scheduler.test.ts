@@ -1108,6 +1108,143 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([leafId]);
   });
 
+  // WDOG-008. A leaf leaves the fingerprint the moment it gains a child, and
+  // the child that displaced it can itself stop being a leaf — by gaining a
+  // child of its own, or by being closed. Attributing displacement only from
+  // the issues that are *currently* leaves left the run rejected for a leaf its
+  // own creation removed, which is this issue's lockout one edge further out.
+  it("explains a displaced leaf through a follow-up child that has a child of its own", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-NESTED", { establishedChildren: ["WDOG-NESTED-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    // Aged past the first-run grace window so the subtree classifies `stopped`
+    // and this test is about attribution rather than the pending-first-run path.
+    const aged = new Date(Date.now() - 60 * 60 * 1000);
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-NESTED-CHILD",
+      status: "todo",
+      parentId: leafId,
+      createdAt: aged,
+    });
+    const grandchildId = await seedIssue(companyId, {
+      identifier: "WDOG-NESTED-GRANDCHILD",
+      status: "todo",
+      parentId: childId,
+      createdAt: aged,
+    });
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+      { issueId: grandchildId, created: true, declared: declaredCreatedLeaf() },
+    ])).recorded).toBe(true);
+
+    // Only the grandchild is a material leaf now: the child gained one, and the
+    // established leaf gained the child. Both displacements are this run's.
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(
+      revalidated.allowed,
+      "unattributedIssueIds" in revalidated ? JSON.stringify(revalidated.unattributedIssueIds) : "",
+    ).toBe(true);
+  });
+
+  it("explains a displaced leaf through a follow-up child the run then closed", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-CLOSED-CHILD", { establishedChildren: ["WDOG-CLOSED-CHILD-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-CLOSED-CHILD-FOLLOWUP",
+      status: "done",
+      parentId: leafId,
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    // A terminal child never appears in `materialLeaves` at all, so nothing in
+    // the current leaf set can speak for the leaf it displaced.
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, declared: declaredCreatedLeaf({ status: "done" }) },
+    ])).recorded).toBe(true);
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(
+      revalidated.allowed,
+      "unattributedIssueIds" in revalidated ? JSON.stringify(revalidated.unattributedIssueIds) : "",
+    ).toBe(true);
+  });
+
+  // The negative control for the two above. A leaf can stop being a leaf for
+  // two different reasons, and the run's created child only speaks for one of
+  // them: if the leaf went terminal under this run without the run declaring
+  // it, that is somebody else closing work the watchdog is standing on.
+  it("still rejects a displaced leaf that a third party closed under the run", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-CLOSED-PARENT", { establishedChildren: ["WDOG-CLOSED-PARENT-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-CLOSED-PARENT-FOLLOWUP",
+      status: "todo",
+      parentId: leafId,
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+    ])).recorded).toBe(true);
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
+
+    // A board user closes the leaf the run's follow-up hangs off.
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
+  // WDOG-001B. A declaration licenses the liveness it could have caused, and
+  // closing an issue causes none: nothing wakes work on an issue this run just
+  // took out of the running. A run appearing there afterwards is a third
+  // party's, whatever else the ledger says about that leaf.
+  it("rejects a live path on a leaf this run closed", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-CLOSED", {
+        establishedChildren: ["WDOG-LIVE-CLOSED-A", "WDOG-LIVE-CLOSED-B"],
+      });
+    const [closedLeafId] = childIds as [string, string];
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(eq(issues.id, closedLeafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: closedLeafId, declared: declaredLeaf({ status: "done" }) },
+    ])).recorded).toBe(true);
+
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: closedLeafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([closedLeafId]);
+  });
+
   // WDOG-002. Closing a stale leaf makes the current snapshot a shrink of the
   // reviewed one, so an ordinary recovery lands the subtree in
   // `already_reviewed` on the run's *first* sanctioned action. Skipping ledger

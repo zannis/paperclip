@@ -484,6 +484,7 @@ function declarationCoversEveryMaterialField(declared: TaskWatchdogDeclaredLeafW
 export function unattributedSubtreeChanges(input: {
   ledger: TaskWatchdogMutationLedger;
   next: TaskWatchdogStopSnapshot;
+  nextMaterialByIssueId: TaskWatchdogMaterialByIssueId;
   parentByIssueId: Map<string, string | null>;
 }): string[] {
   const declaredByIssueId = mergeDeclaredWrites(input.ledger.mutations ?? []);
@@ -492,6 +493,10 @@ export function unattributedSubtreeChanges(input: {
   const nextLeaves = new Map(input.next.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
   const unattributed = new Set<string>();
   const attributableNewLeafParentIds = new Set<string>();
+  const attributeCreatedChildToItsParent = (issueId: string) => {
+    const parentId = input.parentByIssueId.get(issueId) ?? null;
+    if (parentId != null) attributableNewLeafParentIds.add(parentId);
+  };
 
   for (const [issueId, leaf] of nextLeaves) {
     const declared = declaredByIssueId.get(issueId);
@@ -518,18 +523,36 @@ export function unattributedSubtreeChanges(input: {
       unattributed.add(issueId);
       continue;
     }
-    const parentId = input.parentByIssueId.get(issueId) ?? null;
-    if (parentId != null) attributableNewLeafParentIds.add(parentId);
+    attributeCreatedChildToItsParent(issueId);
+  }
+
+  // A created issue displaces the leaf it hangs off whether or not it is still
+  // a material leaf itself: it may have gained a child of its own, or the run
+  // may have closed it, and either takes it out of `materialLeaves` while
+  // leaving the displacement it caused just as real. Attributing only from the
+  // current leaf set left the run rejected for a leaf its own creation removed.
+  for (const [issueId, declared] of declaredByIssueId) {
+    if (!declared.created || nextLeaves.has(issueId) || unattributed.has(issueId)) continue;
+    // Same bar as a created leaf: a half-described creation could be carrying
+    // somebody else's edit, and cannot speak for anything.
+    if (!declarationCoversEveryMaterialField(declared.declared)) continue;
+    // An issue the run created and that is no longer in the watched subtree
+    // cannot be why a leaf there is missing.
+    if (!input.parentByIssueId.has(issueId)) continue;
+    attributeCreatedChildToItsParent(issueId);
   }
 
   // A leaf leaves the fingerprint when it goes terminal or gains a child. Both
   // have to be explained: the run declared a terminal status for it, or the run
-  // created the child that displaced it.
+  // created the child that displaced it. The two are not interchangeable — a
+  // created child says nothing about a leaf somebody else closed — so a leaf
+  // that went terminal is only ever explained by the run declaring that.
   for (const issueId of baselineLeafIds) {
     if (nextLeaves.has(issueId)) continue;
     const declaredStatus = declaredByIssueId.get(issueId)?.declared.status;
     const wentTerminalOnPurpose = declaredStatus != null && isTerminalIssueStatus(declaredStatus);
-    if (wentTerminalOnPurpose || attributableNewLeafParentIds.has(issueId)) continue;
+    const stillOpen = !isTerminalIssueStatus(input.nextMaterialByIssueId[issueId]?.status ?? "done");
+    if (wentTerminalOnPurpose || (stillOpen && attributableNewLeafParentIds.has(issueId))) continue;
     unattributed.add(issueId);
   }
 
@@ -582,12 +605,18 @@ export function unattributedSubtreeChanges(input: {
 // resolving one of its interactions (which wakes the assignee). Anything else a
 // route may have declared — a blocker list, a pending approval — is not a cause
 // of liveness and does not license it.
+//
+// Two of those four only start work depending on the value written, and the
+// value is in the declaration: closing an issue takes it out of the running
+// rather than putting it there, and clearing an assignee leaves nobody to wake.
+// A run appearing on a leaf the run only closed or only un-assigned is
+// therefore somebody else's, and saying so costs the watchdog nothing — it
+// never had a reason to expect work there.
 function declarationCanStartWork(declaration: TaskWatchdogMergedDeclaration) {
-  return declaration.created
-    || declaration.resolvedInteractionIds.size > 0
-    || declaration.declared.status !== undefined
-    || declaration.declared.assigneeAgentId !== undefined
-    || declaration.declared.assigneeUserId !== undefined;
+  if (declaration.created || declaration.resolvedInteractionIds.size > 0) return true;
+  const { status, assigneeAgentId, assigneeUserId } = declaration.declared;
+  if (status !== undefined && !isTerminalIssueStatus(status)) return true;
+  return assigneeAgentId != null || assigneeUserId != null;
 }
 
 // Whether the reason the subtree is no longer stopped is this run's own doing.
@@ -1994,6 +2023,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     const unattributedIssueIds = unattributedSubtreeChanges({
       ledger,
       next: classification.stopSnapshot,
+      nextMaterialByIssueId: classification.materialByIssueId,
       parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
     });
     const unattributedLiveness = classification.state === "live"

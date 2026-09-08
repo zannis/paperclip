@@ -1956,6 +1956,111 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     });
   });
 
+  // WDOG-006. Reopening the reviewed issue is a write to a leaf a task-watchdog
+  // run may be standing on, and a run that cannot say it made that write is
+  // locked out of the rest of its own recovery. What the resolution reports has
+  // to be what it wrote — the columns it patched, at the values its own update
+  // returned — so assert it against the issue the write actually produced.
+  it("reports the source-issue write a rejection made", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Report the rejection write");
+    const created = await interactionsSvc.create(
+      { id: issueId, companyId },
+      {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee",
+        payload: {
+          version: 1,
+          prompt: "Continue the next turn?",
+          rejectLabel: "Continue work",
+          rejectRequiresReason: true,
+          target: { type: "custom", key: "warm_turn_2", revisionId: "warm-turn-2" },
+        },
+      },
+      { userId: "local-board" },
+    );
+    await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
+
+    const writes: unknown[] = [];
+    await interactionsSvc.rejectInteraction(
+      { id: issueId, companyId, status: "in_review" },
+      created.id,
+      { reason: "Proceed with turn two." },
+      { userId: "local-board" },
+      { onSourceIssueWrite: (write) => { writes.push(write); } },
+    );
+
+    const reopened = await issuesSvc.getById(issueId);
+    expect(writes).toEqual([{
+      status: reopened!.status,
+      assigneeAgentId: reopened!.assigneeAgentId ?? null,
+      assigneeUserId: reopened!.assigneeUserId ?? null,
+    }]);
+    expect(reopened!.status).toBe("todo");
+  });
+
+  it("reports the source-issue write an accepted completion review made", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Report the completion write");
+    const created = await interactionsSvc.create(
+      { id: issueId, companyId },
+      {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee_on_accept",
+        payload: {
+          version: 1,
+          prompt: "Is this done?",
+          target: { type: "custom", key: "native_completion_review", revisionId: "decision-1" },
+        },
+      },
+      { userId: "local-board" },
+    );
+    await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
+
+    const writes: unknown[] = [];
+    await interactionsSvc.acceptInteraction(
+      { id: issueId, companyId, projectId: null, goalId: null, status: "in_review" },
+      created.id,
+      {},
+      { userId: "local-board" },
+      { onSourceIssueWrite: (write) => { writes.push(write); } },
+    );
+
+    // Accepting a completion review closes the issue and patches nothing else,
+    // so status is the only column it may claim.
+    await expect(issuesSvc.getById(issueId)).resolves.toMatchObject({ status: "done" });
+    expect(writes).toEqual([{ status: "done" }]);
+  });
+
+  it("reports nothing when a rejection leaves the source issue alone", async () => {
+    const { companyId, issueId } = await seedConfirmationIssue("Silent rejection");
+    const created = await interactionsSvc.create(
+      { id: issueId, companyId },
+      {
+        kind: "request_confirmation",
+        continuationPolicy: "wake_assignee_on_accept",
+        payload: {
+          version: 1,
+          prompt: "Ship it?",
+          target: { type: "custom", key: "ship_it", revisionId: "ship-it-1" },
+        },
+      },
+      { userId: "local-board" },
+    );
+
+    const writes: unknown[] = [];
+    await interactionsSvc.rejectInteraction(
+      { id: issueId, companyId },
+      created.id,
+      { reason: "Not yet." },
+      { userId: "local-board" },
+      { onSourceIssueWrite: (write) => { writes.push(write); } },
+    );
+
+    // Declaring a write that did not happen is the mirror of the laundering
+    // this ledger exists to prevent: it would tell the guard a leaf moved for
+    // this run's reasons when somebody else moved it.
+    expect(writes).toEqual([]);
+  });
+
   it("records an authorized agent as the review-confirmation resolver", async () => {
     const { companyId, goalId, issueId } = await seedConfirmationIssue("Agent review verdict");
     const resolverAgentId = randomUUID();

@@ -2305,11 +2305,15 @@ describe("agent issue mutation checkout ownership", () => {
       expect(entry.mutations[0]!.declared).not.toHaveProperty("assigneeAgentId");
     });
 
-    it("declares both assignee columns when the request asked for either of them", async () => {
+    // WDOG-001A. The update writes the assignee columns the body named and
+    // leaves the other one alone, so the pair is not a unit and must not be
+    // declared as one: the sibling column on the returned row can be somebody
+    // else's write.
+    it("declares only the assignee column the request asked for", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue({ assigneeAgentId: ownerAgentId, assigneeUserId: null }),
+        ...makeIssue({ assigneeAgentId: "concurrently-reassigned-agent", assigneeUserId: null }),
         ...patch,
       }));
       mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
@@ -2328,12 +2332,8 @@ describe("agent issue mutation checkout ownership", () => {
         unknown,
         { mutations: { declared: Record<string, unknown> }[] },
       ];
-      // Handing an issue to a user clears the agent and vice versa, so the pair
-      // is written together and declared together.
-      expect(entry.mutations[0]!.declared).toEqual({
-        assigneeAgentId: ownerAgentId,
-        assigneeUserId: null,
-      });
+      expect(entry.mutations[0]!.declared).toEqual({ assigneeUserId: null });
+      expect(entry.mutations[0]!.declared).not.toHaveProperty("assigneeAgentId");
     });
 
     it("does not record anything when the mutation was rejected", async () => {
