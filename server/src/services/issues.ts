@@ -231,6 +231,39 @@ function assertTransition(from: string, to: string) {
   }
 }
 
+// The values a caller read before deciding to write, carried into the write so
+// the two happen as one step. A caller that adjudicated a mutation against a
+// state it read separately — the task-watchdog freshness guard is the one that
+// needs this today — otherwise has a window in which a third party can write the
+// same fields and be silently overwritten, leaving no trace that the decision
+// was made against a state that no longer existed.
+export type IssueUpdatePrecondition = {
+  status?: string;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+};
+
+// Rendered as extra `WHERE` terms on the update rather than a re-read: a read
+// followed by a write is the very window being closed, and only the database
+// can compare and swap in one statement. Nullable columns compare with `IS
+// NULL`, since `= NULL` is never true and would reject every unassigned issue.
+function issueUpdatePreconditionConditions(expected: IssueUpdatePrecondition | null | undefined) {
+  if (!expected) return [];
+  const conditions: SQL[] = [];
+  if (expected.status !== undefined) conditions.push(eq(issues.status, expected.status));
+  if (expected.assigneeAgentId !== undefined) {
+    conditions.push(expected.assigneeAgentId === null
+      ? isNull(issues.assigneeAgentId)
+      : eq(issues.assigneeAgentId, expected.assigneeAgentId));
+  }
+  if (expected.assigneeUserId !== undefined) {
+    conditions.push(expected.assigneeUserId === null
+      ? isNull(issues.assigneeUserId)
+      : eq(issues.assigneeUserId, expected.assigneeUserId));
+  }
+  return conditions;
+}
+
 function applyStatusSideEffects(
   status: string | undefined,
   patch: Partial<typeof issues.$inferInsert>,
@@ -7769,6 +7802,7 @@ export function issueService(db: Db) {
         blockedByIssueIds?: string[];
         actorAgentId?: string | null;
         actorUserId?: string | null;
+        expectedCurrentLeaf?: IssueUpdatePrecondition | null;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -7790,6 +7824,7 @@ export function issueService(db: Db) {
         blockedByIssueIds,
         actorAgentId,
         actorUserId,
+        expectedCurrentLeaf,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -7975,9 +8010,19 @@ export function issueService(db: Db) {
         const updated = await tx
           .update(issues)
           .set(patch)
-          .where(eq(issues.id, id))
+          .where(and(eq(issues.id, id), ...issueUpdatePreconditionConditions(expectedCurrentLeaf)))
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
+        // With a precondition, matching no row does not mean the issue is gone —
+        // the caller read it moments ago. It means somebody else wrote it in
+        // between, which is the case the precondition exists to catch, so it has
+        // to be reported rather than folded into "not found".
+        if (!updated && expectedCurrentLeaf) {
+          throw conflict(
+            "Issue changed since it was read; the update was not applied.",
+            { issueId: id, expected: expectedCurrentLeaf },
+          );
+        }
         if (!updated) return null;
         if (existing.status !== updated.status) {
           if (

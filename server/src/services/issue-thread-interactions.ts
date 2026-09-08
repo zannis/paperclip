@@ -262,6 +262,7 @@ type IssueWakeTarget = {
   assigneeUserId?: string | null;
   status: string;
   workMode?: string;
+  parentId?: string | null;
 };
 
 // The leaf fields a resolution wrote to the source issue itself, read from the
@@ -3077,6 +3078,10 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             id: createdIssue.id,
             assigneeAgentId: createdIssue.assigneeAgentId ?? null,
             status: createdIssue.status,
+            // The parent this resolution hung the task off, so a caller that
+            // has to account for the displacement it caused can name the edge
+            // rather than re-reading where the child sits later.
+            parentId: parentIssueId,
           });
         }
 

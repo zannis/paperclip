@@ -857,7 +857,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       createdAt: new Date(),
     });
     expect((await recordMutations(scope, admitted, [
-      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+      { issueId: childId, created: true, parentId: sourceId, declared: declaredCreatedLeaf() },
     ])).recorded).toBe(true);
 
     const duringGrace = await service.revalidateMutationScope(await resolveScope());
@@ -912,7 +912,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       createdAt: new Date(Date.now() - 60 * 60 * 1000),
     });
     expect((await recordMutations(scope, admitted, [
-      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+      { issueId: childId, created: true, parentId: sourceId, declared: declaredCreatedLeaf() },
     ])).recorded).toBe(true);
     expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
 
@@ -1029,6 +1029,117 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([leafId]);
   });
 
+  // WDOG-001B. Potential causation is not causation. Of the four writes that
+  // can start work, two only do so depending on the value — and "depends on the
+  // value" means depends on it *changing*. Writing a leaf's status back to the
+  // status it already held fires no wake, so a run appearing on that leaf
+  // afterwards is a third party's, and the declaration must not launder it just
+  // because the value it names happens to be non-terminal.
+  it("rejects a live path on a leaf whose declared status never moved", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-NOOP", { establishedChildren: ["WDOG-LIVE-NOOP-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    // The leaf was seeded `todo` and is still `todo`. Declaring `todo` over it
+    // is a write that changed nothing.
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ status: "todo" }) },
+    ])).recorded).toBe(true);
+
+    // Somebody else now starts a run on that same leaf.
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
+  // The same gap reached through the other value-dependent write: re-assigning
+  // a leaf to the agent that already held it wakes nobody either.
+  it("rejects a live path on a leaf re-assigned to the agent that already held it", async () => {
+    let heldByAgentId = "";
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-SAME-ASSIGNEE", {
+        establishedChildren: ["WDOG-LIVE-SAME-ASSIGNEE-A"],
+        beforePin: async ({ agentId, childIds: seeded }) => {
+          heldByAgentId = agentId;
+          await db.update(issues)
+            .set({ assigneeAgentId: agentId })
+            .where(eq(issues.id, seeded[0]!));
+        },
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: heldByAgentId }) },
+    ])).recorded).toBe(true);
+
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
+  // The positive control for the two above, through a value that *did* move:
+  // a leaf this run drove to `in_progress` and then handed back to `todo` woke
+  // its assignee on the way through, so the net declaration matching the
+  // baseline must not read as a no-op.
+  it("lets the run keep working on a leaf it moved and then put back", async () => {
+    const { companyId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-ROUNDTRIP", {
+        establishedChildren: ["WDOG-LIVE-ROUNDTRIP-A"],
+      });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ status: "in_progress", assigneeAgentId: agentId }) },
+      { issueId: leafId, declared: declaredLeaf({ status: "todo" }) },
+    ])).recorded).toBe(true);
+
+    const [agent] = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: agent!.id,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.classification?.state).toBe("live");
+    expect(
+      revalidated.allowed,
+      "unattributedLivenessIssueIds" in revalidated
+        ? JSON.stringify(revalidated.unattributedLivenessIssueIds)
+        : "",
+    ).toBe(true);
+  });
+
   // WDOG-006. Resolving an interaction is one of the four granted operations
   // that rotate the fingerprint: the waiting paths are a fingerprint input in
   // their own right. Without a declaration the resolution reads as somebody
@@ -1136,8 +1247,8 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       createdAt: aged,
     });
     expect((await recordMutations(scope, admitted, [
-      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
-      { issueId: grandchildId, created: true, declared: declaredCreatedLeaf() },
+      { issueId: childId, created: true, parentId: leafId, declared: declaredCreatedLeaf() },
+      { issueId: grandchildId, created: true, parentId: childId, declared: declaredCreatedLeaf() },
     ])).recorded).toBe(true);
 
     // Only the grandchild is a material leaf now: the child gained one, and the
@@ -1165,7 +1276,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     // A terminal child never appears in `materialLeaves` at all, so nothing in
     // the current leaf set can speak for the leaf it displaced.
     expect((await recordMutations(scope, admitted, [
-      { issueId: childId, created: true, declared: declaredCreatedLeaf({ status: "done" }) },
+      { issueId: childId, created: true, parentId: leafId, declared: declaredCreatedLeaf({ status: "done" }) },
     ])).recorded).toBe(true);
 
     const revalidated = await service.revalidateMutationScope(await resolveScope());
@@ -1173,6 +1284,44 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       revalidated.allowed,
       "unattributedIssueIds" in revalidated ? JSON.stringify(revalidated.unattributedIssueIds) : "",
     ).toBe(true);
+  });
+
+  // WDOG-009. A created child only ever explains the displacement of the parent
+  // it was created *under*. Resolving that parent from the child's current row
+  // instead lets a third party who reparents the child onto another branch have
+  // this run's creation explain away the leaf their reparenting displaced there.
+  it("still rejects a leaf displaced by a third party reparenting the run's created child onto it", async () => {
+    const { companyId, childIds, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-REPARENT", {
+        establishedChildren: ["WDOG-REPARENT-A", "WDOG-REPARENT-B"],
+      });
+    const [ownParentId, otherLeafId] = childIds as [string, string];
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    const childId = await seedIssue(companyId, {
+      identifier: "WDOG-REPARENT-FOLLOWUP",
+      status: "todo",
+      parentId: ownParentId,
+      createdAt: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    expect((await recordMutations(scope, admitted, [
+      { issueId: childId, created: true, parentId: ownParentId, declared: declaredCreatedLeaf() },
+    ])).recorded).toBe(true);
+    expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
+
+    // A third party moves the run's follow-up onto the other established leaf.
+    // That leaf leaving the fingerprint is their doing, not this run's — and
+    // the run's own parent becomes a leaf again, so nothing here is explained.
+    await db.update(issues)
+      .set({ parentId: otherLeafId, updatedAt: new Date() })
+      .where(eq(issues.id, childId));
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds ?? [] : [],
+    ).toContain(otherLeafId);
   });
 
   // The negative control for the two above. A leaf can stop being a leaf for
@@ -1193,7 +1342,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       createdAt: new Date(Date.now() - 60 * 60 * 1000),
     });
     expect((await recordMutations(scope, admitted, [
-      { issueId: childId, created: true, declared: declaredCreatedLeaf() },
+      { issueId: childId, created: true, parentId: leafId, declared: declaredCreatedLeaf() },
     ])).recorded).toBe(true);
     expect((await service.revalidateMutationScope(await resolveScope())).allowed).toBe(true);
 

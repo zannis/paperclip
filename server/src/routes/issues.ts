@@ -165,6 +165,7 @@ import type {
   TaskWatchdogAuthorizedMutation,
   TaskWatchdogDeclaredLeafWrite,
   TaskWatchdogLedgerBaseline,
+  TaskWatchdogMaterialByIssueId,
   TaskWatchdogServiceDeps,
   taskWatchdogService,
 } from "../services/task-watchdogs.js";
@@ -4307,6 +4308,9 @@ export function issueRoutes(
   type PendingTaskWatchdogRecord = {
     scope: Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>;
     ledgerBaseline: TaskWatchdogLedgerBaseline | null;
+    // What the subtree looked like at the instant the guard admitted this
+    // request, kept so the route's own write can be made conditional on it.
+    observedMaterialByIssueId: TaskWatchdogMaterialByIssueId | null;
     mutations: TaskWatchdogAuthorizedMutation[];
   };
   const pendingTaskWatchdogRecords = new WeakMap<Response, PendingTaskWatchdogRecord>();
@@ -4349,19 +4353,35 @@ export function issueRoutes(
   // against, so every material field has to be declared for it to be
   // attributable at all — an issue this run created but only half-described
   // could still be carrying somebody else's edit.
+  //
+  // The parent comes from the created row too, and for the same reason as every
+  // other declared value: it is the edge this request made. Letting the guard
+  // resolve it later from the child's current row would hand a third party's
+  // reparenting to the ledger as this run's own displacement.
   function noteTaskWatchdogCreatedIssue(
     req: Request,
     res: Response,
-    issue: { id: string; status: string; assigneeAgentId: string | null; assigneeUserId: string | null },
+    issue: {
+      id: string;
+      status: string;
+      assigneeAgentId: string | null;
+      assigneeUserId: string | null;
+      parentId?: string | null;
+    },
+    // Routes that create one issue from the request body read its blockers off
+    // that body; a route that creates several reads each child's own, which is
+    // not the same list.
+    blockerIssueIds?: string[],
   ) {
     noteTaskWatchdogAuthorizedWrite(res, {
       issueId: issue.id,
       created: true,
+      parentId: issue.parentId ?? null,
       declared: {
         status: issue.status,
         assigneeAgentId: issue.assigneeAgentId ?? null,
         assigneeUserId: issue.assigneeUserId ?? null,
-        blockerIssueIds: requestedBlockerIssueIds(req),
+        blockerIssueIds: blockerIssueIds ?? requestedBlockerIssueIds(req),
         // A just-created issue has no waiting paths of its own; anything the
         // classifier reports on it came from somewhere else.
         pendingInteractionIds: [],
@@ -4400,6 +4420,7 @@ export function issueRoutes(
       status: string;
       assigneeAgentId: string | null;
       assigneeUserId?: string | null;
+      parentId?: string | null;
     }[] = [],
     sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null,
   ) {
@@ -4424,6 +4445,7 @@ export function issueRoutes(
       noteTaskWatchdogAuthorizedWrite(res, {
         issueId: created.id,
         created: true,
+        parentId: created.parentId ?? null,
         declared: {
           status: created.status,
           assigneeAgentId: created.assigneeAgentId ?? null,
@@ -4440,6 +4462,43 @@ export function issueRoutes(
     revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
   ) {
     return "ledgerBaseline" in revalidated ? revalidated.ledgerBaseline ?? null : null;
+  }
+
+  function taskWatchdogObservedMaterialOf(
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ): TaskWatchdogMaterialByIssueId | null {
+    const classification = revalidated.classification;
+    if (!classification || !("materialByIssueId" in classification)) return null;
+    return classification.materialByIssueId;
+  }
+
+  // The state a watched issue was in at the instant the freshness guard admitted
+  // this request, handed to `svc.update` as a compare-and-swap precondition.
+  //
+  // Adjudicating freshness and then writing are two statements with a window
+  // between them, and the ledger cannot see into that window: it diffs the
+  // final state against `baseline + declared`, so a third-party write that
+  // lands in the window and is then overwritten by this run's own write —
+  // to the value the ledger already expects — leaves a final state that matches
+  // exactly, and the third party's change is erased with no drift recorded, on
+  // this revalidation or any later one. Conditioning the write on the values the
+  // guard actually saw closes that window: the racing write moves one of them,
+  // the UPDATE matches no row, and the run is told it is stale instead of
+  // silently clobbering somebody.
+  //
+  // Only the material columns are compared — the ones the fingerprint is built
+  // from and the only ones whose loss the guard exists to prevent. An issue the
+  // guard never observed (outside the watched subtree, or no watchdog scope at
+  // all) yields no precondition and the write is unconditional, exactly as
+  // before.
+  function taskWatchdogWritePrecondition(res: Response, issueId: string) {
+    const observed = pendingTaskWatchdogRecords.get(res)?.observedMaterialByIssueId?.[issueId];
+    if (!observed) return null;
+    return {
+      status: observed.status,
+      assigneeAgentId: observed.assigneeAgentId ?? null,
+      assigneeUserId: observed.assigneeUserId ?? null,
+    };
   }
 
   // The mutation itself is adjudicated in `revalidateMutationScope`, before the
@@ -4462,6 +4521,7 @@ export function issueRoutes(
     const record: PendingTaskWatchdogRecord = {
       scope,
       ledgerBaseline: taskWatchdogLedgerBaselineOf(revalidated),
+      observedMaterialByIssueId: taskWatchdogObservedMaterialOf(revalidated),
       mutations: [],
     };
     pendingTaskWatchdogRecords.set(res, record);
@@ -9936,6 +9996,11 @@ export function issueRoutes(
       }
     }
 
+    const decompositionChildBlockerIds = new Map(normalizedChildren.map((child) => [
+      child.id as string,
+      [...new Set((child.blockedByIssueIds ?? []) as string[])].sort(),
+    ]));
+
     const result = await svc.decomposeAcceptedPlan(sourceIssue.id, {
       acceptedPlanRevisionId: req.body.acceptedPlanRevisionId,
       children: normalizedChildren,
@@ -10037,6 +10102,12 @@ export function issueRoutes(
           requestedByActorId: actor.actorId,
         });
       }
+      // Creating through the plan-decomposition route is a watched-subtree
+      // creation like any other — it passed the same freshness guard, and each
+      // new non-terminal child rotates the fingerprint. Undeclared, they lock
+      // the run out of its own next mutation, which is the defect this ledger
+      // exists to fix reached through this route.
+      noteTaskWatchdogCreatedIssue(req, res, issue, decompositionChildBlockerIds.get(issue.id) ?? []);
       await queueTaskWatchdogEvaluation(issue, actor.runId);
     }
     await blockWatchdogParentOnCurrentChild({
@@ -10697,10 +10768,12 @@ export function issueRoutes(
     } = { value: null };
     const postCommitActivityPublications: ActivityPublication[] = [];
     const postCommitIssueActions: IssuePostCommitAction[] = [];
+    const watchdogWritePrecondition = taskWatchdogWritePrecondition(res, id);
     const issueUpdateData = {
       ...updateFields,
       actorAgentId: actor.agentId ?? null,
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
+      ...(watchdogWritePrecondition ? { expectedCurrentLeaf: watchdogWritePrecondition } : {}),
     };
     const shouldCollectCompletionPublication =
       actor.actorType === "user" && existing.status !== "done" && updateFields.status === "done";

@@ -401,6 +401,13 @@ export type TaskWatchdogAuthorizedMutation = {
   // has no baseline to diff against, so `declared` must cover every material
   // field for it to be attributable at all.
   created?: boolean;
+  // The parent the run created this issue *under*, taken from the creating
+  // route's own row. A creation is what explains its parent dropping out of
+  // the material leaves, and that explanation has to be pinned to the edge the
+  // run actually made: resolving the parent from the child's *current* row
+  // instead lets a third party reparent the child and have this run's ledger
+  // account for the displacement their reparenting caused.
+  parentId?: string | null;
   // Interactions this request resolved. Declared as a *delta* rather than as an
   // absolute `pendingInteractionIds`, deliberately: the resulting list is only
   // knowable from a fresh read, and a fresh read is exactly how a third party's
@@ -433,6 +440,7 @@ const EMPTY_RESOLVED_INTERACTION_IDS: ReadonlySet<string> = new Set<string>();
 type TaskWatchdogMergedDeclaration = {
   declared: TaskWatchdogDeclaredLeafWrite;
   created: boolean;
+  createdUnderParentId: string | null;
   resolvedInteractionIds: Set<string>;
 };
 
@@ -441,7 +449,12 @@ function mergeDeclaredWrites(mutations: TaskWatchdogAuthorizedMutation[]) {
   for (const mutation of mutations) {
     if (!mutation || typeof mutation.issueId !== "string") continue;
     const current = merged.get(mutation.issueId)
-      ?? { declared: {}, created: false, resolvedInteractionIds: new Set<string>() };
+      ?? {
+        declared: {},
+        created: false,
+        createdUnderParentId: null,
+        resolvedInteractionIds: new Set<string>(),
+      };
     for (const interactionId of mutation.resolvedInteractionIds ?? []) {
       if (typeof interactionId === "string") current.resolvedInteractionIds.add(interactionId);
     }
@@ -449,10 +462,29 @@ function mergeDeclaredWrites(mutations: TaskWatchdogAuthorizedMutation[]) {
     merged.set(mutation.issueId, {
       declared: { ...current.declared, ...(mutation.declared ?? {}) },
       created: current.created || mutation.created === true,
+      createdUnderParentId: typeof mutation.parentId === "string"
+        ? mutation.parentId
+        : current.createdUnderParentId,
       resolvedInteractionIds: current.resolvedInteractionIds,
     });
   }
   return merged;
+}
+
+// Every mutation this run declared against one issue, in the order the run's
+// requests made them. `mergeDeclaredWrites` collapses those into a final value,
+// which is what the drift comparison wants; causation wants the steps, because
+// a field that ends the run where it started may still have moved — and woken
+// somebody — on the way.
+function declaredMutationsByIssueId(mutations: TaskWatchdogAuthorizedMutation[]) {
+  const byIssueId = new Map<string, TaskWatchdogAuthorizedMutation[]>();
+  for (const mutation of mutations) {
+    if (!mutation || typeof mutation.issueId !== "string") continue;
+    const current = byIssueId.get(mutation.issueId);
+    if (current) current.push(mutation);
+    else byIssueId.set(mutation.issueId, [mutation]);
+  }
+  return byIssueId;
 }
 
 // A resolution takes a named interaction out of the issue's waiting paths and
@@ -493,9 +525,21 @@ export function unattributedSubtreeChanges(input: {
   const nextLeaves = new Map(input.next.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
   const unattributed = new Set<string>();
   const attributableNewLeafParentIds = new Set<string>();
-  const attributeCreatedChildToItsParent = (issueId: string) => {
-    const parentId = input.parentByIssueId.get(issueId) ?? null;
-    if (parentId != null) attributableNewLeafParentIds.add(parentId);
+  // A creation only explains the parent the run actually hung it off, and only
+  // while the child is still hanging there. The declared parent is the edge the
+  // run made; the current parent is where the child sits now. Requiring the two
+  // to agree rejects both directions of a third party moving it: reparented to
+  // some other leaf, that leaf's displacement is theirs and not attributable
+  // here, and moved away from the declared parent, the creation no longer
+  // explains anything about it either.
+  const attributeCreatedChildToItsParent = (
+    issueId: string,
+    declared: TaskWatchdogMergedDeclaration,
+  ) => {
+    const declaredParentId = declared.createdUnderParentId;
+    if (declaredParentId == null) return;
+    if (input.parentByIssueId.get(issueId) !== declaredParentId) return;
+    attributableNewLeafParentIds.add(declaredParentId);
   };
 
   for (const [issueId, leaf] of nextLeaves) {
@@ -523,7 +567,7 @@ export function unattributedSubtreeChanges(input: {
       unattributed.add(issueId);
       continue;
     }
-    attributeCreatedChildToItsParent(issueId);
+    attributeCreatedChildToItsParent(issueId, declared);
   }
 
   // A created issue displaces the leaf it hangs off whether or not it is still
@@ -536,10 +580,11 @@ export function unattributedSubtreeChanges(input: {
     // Same bar as a created leaf: a half-described creation could be carrying
     // somebody else's edit, and cannot speak for anything.
     if (!declarationCoversEveryMaterialField(declared.declared)) continue;
-    // An issue the run created and that is no longer in the watched subtree
-    // cannot be why a leaf there is missing.
-    if (!input.parentByIssueId.has(issueId)) continue;
-    attributeCreatedChildToItsParent(issueId);
+    // An issue the run created and that is no longer under the parent the run
+    // created it under cannot be why a leaf there is missing — the agreement
+    // check inside the helper covers both that and its leaving the subtree
+    // entirely, since neither leaves the declared parent in `parentByIssueId`.
+    attributeCreatedChildToItsParent(issueId, declared);
   }
 
   // A leaf leaves the fingerprint when it goes terminal or gains a child. Both
@@ -612,11 +657,54 @@ export function unattributedSubtreeChanges(input: {
 // A run appearing on a leaf the run only closed or only un-assigned is
 // therefore somebody else's, and saying so costs the watchdog nothing — it
 // never had a reason to expect work there.
-function declarationCanStartWork(declaration: TaskWatchdogMergedDeclaration) {
-  if (declaration.created || declaration.resolvedInteractionIds.size > 0) return true;
-  const { status, assigneeAgentId, assigneeUserId } = declaration.declared;
-  if (status !== undefined && !isTerminalIssueStatus(status)) return true;
-  return assigneeAgentId != null || assigneeUserId != null;
+//
+// The value alone is still not enough: the routes that fire these wakes all
+// compare against the row they are overwriting (`assigneeChanged`,
+// `statusChangedFromBacklog`, `statusChangedFromClosedToTodo` in the issue
+// PATCH route), so a write that lands the field on the value it already held
+// wakes nobody. Licensing liveness off a no-op — a `status: "todo"` PATCH of an
+// issue already `todo`, a reassignment to the agent already assigned — accepts
+// what the run *could* have caused as proof of what it did cause, and a third
+// party's run on that leaf walks straight through.
+//
+// So each declared step is judged against the value the field held going into
+// it, starting from the baseline the ledger is anchored to. The steps are
+// walked rather than the merged final value because a field can move and move
+// back inside one run: `todo -> in_progress -> todo` wakes the assignee on the
+// first step, and collapsing it to `todo` would hide a liveness the run really
+// did cause and lock the run out of the rest of its own recovery.
+function declaredStepsCanStartWork(
+  mutations: TaskWatchdogAuthorizedMutation[],
+  before: TaskWatchdogMaterialLeaf | null,
+) {
+  let status = before?.status ?? null;
+  let assigneeAgentId = before?.assigneeAgentId ?? null;
+  let assigneeUserId = before?.assigneeUserId ?? null;
+  let canStartWork = false;
+  for (const mutation of mutations) {
+    // Resolving an interaction wakes the issue's assignee whatever the leaf
+    // fields end up at, and a creation is a new issue reaching its assignee for
+    // the first time — neither is a no-op that can be argued away by value.
+    if ((mutation.resolvedInteractionIds ?? []).length > 0) canStartWork = true;
+    const declared = mutation.declared ?? {};
+    if (declared.status !== undefined) {
+      if (declared.status !== status && !isTerminalIssueStatus(declared.status)) canStartWork = true;
+      status = declared.status;
+    }
+    if (declared.assigneeAgentId !== undefined) {
+      if (declared.assigneeAgentId != null && declared.assigneeAgentId !== assigneeAgentId) {
+        canStartWork = true;
+      }
+      assigneeAgentId = declared.assigneeAgentId;
+    }
+    if (declared.assigneeUserId !== undefined) {
+      if (declared.assigneeUserId != null && declared.assigneeUserId !== assigneeUserId) {
+        canStartWork = true;
+      }
+      assigneeUserId = declared.assigneeUserId;
+    }
+  }
+  return canStartWork;
 }
 
 // Whether the reason the subtree is no longer stopped is this run's own doing.
@@ -628,11 +716,12 @@ function unattributedLivenessIssueIds(
   ledger: TaskWatchdogMutationLedger,
   livenessIssueIds: string[],
 ) {
-  const declaredByIssueId = mergeDeclaredWrites(ledger.mutations ?? []);
+  const mutationsByIssueId = declaredMutationsByIssueId(ledger.mutations ?? []);
+  const baselineMaterial = ledger.baselineMaterialByIssueId ?? {};
   return livenessIssueIds
     .filter((issueId) => {
-      const declaration = declaredByIssueId.get(issueId);
-      return !declaration || !declarationCanStartWork(declaration);
+      const mutations = mutationsByIssueId.get(issueId);
+      return !mutations || !declaredStepsCanStartWork(mutations, baselineMaterial[issueId] ?? null);
     })
     .sort();
 }
