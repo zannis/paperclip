@@ -610,6 +610,52 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     });
   });
 
+  // A caller that adjudicated a write against a state it read separately needs
+  // the read carried into the write, or the two are a check-then-act with a
+  // window in it. The precondition is that read, applied by the database in the
+  // same statement as the write.
+  it("refuses an update whose expected current state no longer holds", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const issue = await svc.create(companyId, {
+      title: "Raced issue",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+
+    // Somebody else writes the row after the caller read it as `todo`.
+    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, issue.id));
+
+    await expect(svc.update(issue.id, {
+      status: "todo",
+      expectedCurrentLeaf: { status: "todo", assigneeAgentId: null, assigneeUserId: null },
+    })).rejects.toMatchObject({ status: 409 });
+
+    // The racing write survives: a rejected precondition must not have written.
+    const persisted = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, issue.id))
+      .then((rows) => rows[0] ?? null);
+    expect(persisted?.status).toBe("in_progress");
+  });
+
+  it("applies an update whose expected current state still holds", async () => {
+    const companyId = await seedAssignableAgentCompany();
+    const issue = await svc.create(companyId, {
+      title: "Unraced issue",
+      description: null,
+      status: "todo",
+      priority: "medium",
+    });
+
+    const updated = await svc.update(issue.id, {
+      title: "Unraced issue, restated",
+      expectedCurrentLeaf: { status: "todo", assigneeAgentId: null, assigneeUserId: null },
+    });
+    expect(updated?.title).toBe("Unraced issue, restated");
+  });
+
   it("expires pending thread interactions on any service-level terminal transition", async () => {
     const companyId = await seedAssignableAgentCompany();
     const issue = await svc.create(companyId, {

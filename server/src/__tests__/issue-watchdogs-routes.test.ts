@@ -12,10 +12,15 @@ import {
   companyMemberships,
   companySkills,
   createDb,
+  documentRevisions,
+  documents,
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueDocuments,
+  issuePlanDecompositions,
   issueRelations,
+  issueThreadInteractions,
   issueWatchdogs,
   issues,
   principalPermissionGrants,
@@ -55,6 +60,37 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
+// The window between the freshness guard and the route's own write is the thing
+// under test, and it is not otherwise addressable from outside: both happen
+// inside one request. This hook fires once, immediately after the guard has
+// adjudicated, so a test can land a third party's write in exactly that window
+// rather than approximating it with two ordinary sequential requests.
+const raceAfterRevalidate = vi.hoisted(() => ({ current: null as null | (() => Promise<void>) }));
+
+vi.mock("../services/index.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/index.js")>("../services/index.js");
+  return {
+    ...actual,
+    taskWatchdogService: (...args: Parameters<typeof actual.taskWatchdogService>) => {
+      const service = actual.taskWatchdogService(...args);
+      return {
+        ...service,
+        revalidateMutationScope: async (
+          scope: Parameters<typeof service.revalidateMutationScope>[0],
+        ) => {
+          const result = await service.revalidateMutationScope(scope);
+          const race = raceAfterRevalidate.current;
+          if (race) {
+            raceAfterRevalidate.current = null;
+            await race();
+          }
+          return result;
+        },
+      };
+    },
+  };
+});
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -79,6 +115,9 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     await db.delete(activityLog);
     await db.delete(issueComments);
+    await db.delete(issuePlanDecompositions);
+    await db.delete(issueThreadInteractions);
+    await db.delete(issueDocuments);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
@@ -86,6 +125,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await db.delete(issueRelations);
     await db.delete(issueWatchdogs);
     await db.delete(issues);
+    await db.delete(documents);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(principalPermissionGrants);
@@ -225,6 +265,65 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       },
     });
     return runId;
+  }
+
+  // The plan document, its revision, and the acceptance that `decomposeAcceptedPlan`
+  // requires before it will create anything.
+  async function seedAcceptedPlan(companyId: string, sourceIssueId: string, authorAgentId: string) {
+    const planDocumentId = randomUUID();
+    const acceptedPlanRevisionId = randomUUID();
+    await db.insert(documents).values({
+      id: planDocumentId,
+      companyId,
+      title: "Plan",
+      format: "markdown",
+      latestBody: "Plan body",
+      latestRevisionId: acceptedPlanRevisionId,
+      latestRevisionNumber: 1,
+      createdByAgentId: authorAgentId,
+      updatedByAgentId: authorAgentId,
+    });
+    await db.insert(documentRevisions).values({
+      id: acceptedPlanRevisionId,
+      companyId,
+      documentId: planDocumentId,
+      revisionNumber: 1,
+      title: "Plan",
+      format: "markdown",
+      body: "Plan body",
+      createdByAgentId: authorAgentId,
+    });
+    await db.insert(issueDocuments).values({
+      companyId,
+      issueId: sourceIssueId,
+      documentId: planDocumentId,
+      key: "plan",
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: randomUUID(),
+      companyId,
+      issueId: sourceIssueId,
+      kind: "request_confirmation",
+      status: "accepted",
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Approve this plan?",
+        target: {
+          type: "issue_document",
+          issueId: sourceIssueId,
+          documentId: planDocumentId,
+          key: "plan",
+          revisionId: acceptedPlanRevisionId,
+          revisionNumber: 1,
+        },
+      },
+      result: { version: 1, outcome: "accepted" },
+      resolvedAt: new Date(),
+      createdByUserId: "cloud-user-1",
+      resolvedByUserId: "cloud-user-1",
+    });
+    return acceptedPlanRevisionId;
   }
 
   async function waitForAssignmentWakeup(companyId: string) {
@@ -597,6 +696,260 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         watchdogIssueId,
       },
     });
+  });
+
+  // WDOG-010. Creating children through the accepted-plan decomposition route
+  // passes the same freshness guard as the ordinary create routes and rotates
+  // the fingerprint the same way — each new non-terminal child is a material
+  // leaf. Undeclared, they lock the run out of its own next mutation, which is
+  // this issue's whole defect reached through a route that never joined the
+  // ledger.
+  it("keeps a watchdog run mutating after it creates children through accepted-plan decomposition", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Decomposing Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Watched child",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const acceptedPlanRevisionId = await seedAcceptedPlan(companyId, watchedChildId, watchdogAgentId);
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const decomposed = await request(app)
+      .post(`/api/issues/${watchedChildId}/accepted-plan-decompositions`)
+      .send({
+        acceptedPlanRevisionId,
+        children: [{ title: "Plan step one" }],
+      });
+    expect(decomposed.status, JSON.stringify(decomposed.body)).toBe(200);
+    expect(decomposed.body.newlyCreatedChildIssueIds).toHaveLength(1);
+
+    // The run's own creation rotated the fingerprint. Its summary comment on the
+    // watched subtree is the step this issue exists to keep working.
+    const comment = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Recovery follow-ups created from the accepted plan." });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+  });
+
+  // WDOG-005. The guard reads the subtree and the route writes it, and between
+  // those two statements somebody else can write the same leaf. The mutation
+  // ledger cannot see that: it diffs the final state against baseline+declared,
+  // so a third party's write that this run's own write then lands back on the
+  // expected value leaves a state that matches exactly — their change is erased
+  // and no drift is ever recorded, on this revalidation or any later one. The
+  // write has to carry the guard's reading with it.
+  it("rejects a watched-leaf write whose read state changed underneath it", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Racing Watchdog" });
+    const otherAgentId = await seedAgent(companyId, { name: "Third Party" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, { title: "Watched child", parentId: watchedRootId });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    // The third party starts the leaf's work in the window the guard just
+    // finished reading. The watchdog's own write names `todo` — the value the
+    // leaf held when the guard read it — so without the read being carried into
+    // the write, this lands, reverts them, and matches the ledger exactly.
+    raceAfterRevalidate.current = async () => {
+      await db.update(issues)
+        .set({ status: "in_progress", assigneeAgentId: otherAgentId, updatedAt: new Date() })
+        .where(eq(issues.id, watchedChildId));
+    };
+
+    const raced = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ status: "todo" });
+    expect(raced.status, JSON.stringify(raced.body)).toBe(409);
+
+    const [afterRace] = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(eq(issues.id, watchedChildId));
+    expect(afterRace?.status).toBe("in_progress");
+    expect(afterRace?.assigneeAgentId).toBe(otherAgentId);
+  });
+
+  // WDOG-005-PARTIAL-CAS. Blockers are a material leaf field, and the one this
+  // route does not merely overwrite but replaces wholesale — a
+  // `blockedByIssueIds` patch deletes every relation not named in it. They also
+  // live in `issue_relations` rather than on the issue row, so they cannot ride
+  // in the update's `WHERE` clause with the columns; leaving them out left the
+  // most destructive write on the leaf as the only one with nothing to compare
+  // against, including the blockers-only patch, which names no column the
+  // precondition covered at all.
+  it("rejects a watched-leaf blocker write whose blockers changed underneath it", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Blocker Racing Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, { title: "Watched child", parentId: watchedRootId });
+    const raceBlockerId = await seedIssue(companyId, { title: "Blocker the board added" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    // A board user blocks the leaf in the window the guard just finished
+    // reading. The watchdog's patch names the blocker list it saw — empty — so
+    // without the read being carried into the write it lands and the blocker is
+    // deleted, with a final state that matches the ledger exactly.
+    raceAfterRevalidate.current = async () => {
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: raceBlockerId,
+        relatedIssueId: watchedChildId,
+        type: "blocks",
+      });
+    };
+
+    const raced = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ blockedByIssueIds: [] });
+    expect(raced.status, JSON.stringify(raced.body)).toBe(409);
+
+    const survivingBlockers = await db
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.relatedIssueId, watchedChildId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    expect(survivingBlockers.map((row) => row.blockerIssueId)).toEqual([raceBlockerId]);
+  });
+
+  // The control: the same blockers write with nobody racing is the run's own
+  // sanctioned recovery and must land.
+  it("lets a watched-leaf blocker write land when the blockers did not move", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Unraced Blocker Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, { title: "Watched child", parentId: watchedRootId });
+    const blockerId = await seedIssue(companyId, { title: "Blocker the watchdog adds" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const patched = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ blockedByIssueIds: [blockerId] });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+
+    const blockers = await db
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.relatedIssueId, watchedChildId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    expect(blockers.map((row) => row.blockerIssueId)).toEqual([blockerId]);
+  });
+
+  // The control for the above: with nobody racing, the very same write is the
+  // run's own sanctioned recovery and must land. A precondition that rejected
+  // this would lock the watchdog out of the subtree it is there to restore.
+  it("lets a watched-leaf write land when nothing moved underneath it", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Unraced Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, { title: "Watched child", parentId: watchedRootId });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const patched = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ title: "Watched child, restated" });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    expect(patched.body.title).toBe("Watched child, restated");
   });
 
   it("rejects watchdog interaction-resolution attempts outside the persisted watched subtree", async () => {

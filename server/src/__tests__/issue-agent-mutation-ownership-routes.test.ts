@@ -102,7 +102,7 @@ const mockTaskWatchdogService = vi.hoisted(() => ({
     allowed: true,
     classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test" },
   })),
-  repinMutationScope: vi.fn(async () => ({ repinned: false, reason: "fingerprint_unchanged" })),
+  recordAuthorizedMutation: vi.fn(async () => ({ recorded: true })),
   reconcileForIssueAndAncestors: vi.fn(async () => ({
     checked: 0,
     triggered: 0,
@@ -2170,180 +2170,6 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
-    // A run whose own recovery action restored a live path is past the point
-    // where the stop fingerprint exists, so the freshness guard can only judge
-    // its writes by intent. The comment — the summary the mandate asks for —
-    // is the one write that cannot change the subtree, and it is the one that
-    // has to survive.
-    it("asks the freshness guard for comment intent on a comment and mutate intent on a status change", async () => {
-      denyBaseBoundary();
-      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
-      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue({ assigneeAgentId: ownerAgentId }),
-        ...patch,
-      }));
-
-      const app = await createApp(watchdogActor(), createWatchdogDb());
-      await request(app).post(`/api/issues/${issueId}/comments`).send({ body: "Restored the path." });
-      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenLastCalledWith(
-        expect.objectContaining({ kind: "watchdog" }),
-        { intent: "comment" },
-      );
-      // A comment cannot rotate the pin, so it must not pay for a re-pin.
-      expect(mockTaskWatchdogService.repinMutationScope).not.toHaveBeenCalled();
-
-      await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
-      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenLastCalledWith(
-        expect.objectContaining({ kind: "watchdog" }),
-        { intent: "mutate" },
-      );
-    });
-
-    it("lets a granted run comment on a live watched subtree but still refuses to change its state", async () => {
-      denyBaseBoundary();
-      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "todo", assigneeAgentId: ownerAgentId }));
-      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue({ assigneeAgentId: ownerAgentId }),
-        ...patch,
-      }));
-
-      // The service grants comment-only scope: the subtree is live because
-      // this run restored it, so the comment is admitted and the state change
-      // is not.
-      mockTaskWatchdogService.revalidateMutationScope.mockImplementation(
-        async (_scope: unknown, opts?: { intent?: string }) =>
-          opts?.intent === "comment"
-            ? {
-              allowed: true,
-              classification: { state: "live", liveIssueIds: [issueId] },
-              liveCommentScope: true,
-            }
-            : {
-              allowed: false,
-              reason:
-                "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
-              classification: { state: "live", liveIssueIds: [issueId] },
-            },
-      );
-
-      const app = await createApp(watchdogActor(), createWatchdogDb());
-
-      const commented = await request(app)
-        .post(`/api/issues/${issueId}/comments`)
-        .send({ body: "Reassigned the stalled leaf; a live path is running again." });
-      expect(commented.status, JSON.stringify(commented.body)).toBe(201);
-
-      const mutated = await request(app).patch(`/api/issues/${issueId}`).send({ status: "done" });
-      expect(mutated.status, JSON.stringify(mutated.body)).toBe(409);
-      expect(mutated.body.details).toMatchObject({ currentState: "live" });
-      expect(mockIssueService.update).not.toHaveBeenCalled();
-    });
-
-    // `intent: "comment"` is a claim about what the request can *do*, not about
-    // which route it arrived on. The comment route is not a read-only surface:
-    // `resume`/`reopen` move a terminal or blocked issue back to `todo`,
-    // `interrupt` cancels the live run, and an approval-marker body drives an
-    // execution-policy decision. Those are state changes wearing a comment's
-    // clothes, so they take the strict check the same way a status PATCH does.
-    it.each([
-      ["resume", { body: "Picking this back up.", resume: true }],
-      ["reopen", { body: "Picking this back up.", reopen: true }],
-      ["an approval marker", { body: "## Review: APPROVED\n\nShip it." }],
-    ])("takes the strict mutate check for a comment carrying %s", async (_label, payload) => {
-      denyBaseBoundary();
-      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
-      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue({ assigneeAgentId: ownerAgentId }),
-        ...patch,
-      }));
-
-      const app = await createApp(watchdogActor(), createWatchdogDb());
-      mockTaskWatchdogService.revalidateMutationScope.mockClear();
-      await request(app).post(`/api/issues/${issueId}/comments`).send(payload);
-
-      // The comment gate is the first thing the route consults, and it is the
-      // one whose verdict this request rides in on.
-      expect(mockTaskWatchdogService.revalidateMutationScope.mock.calls[0]?.[1]).toEqual({ intent: "mutate" });
-    });
-
-    // The regression this guards: the live-subtree grant is issued on the
-    // premise that a comment cannot change the watched subtree. A `resume` on
-    // the comment route breaks that premise, so it must not ride in on the
-    // grant — it has to fail the strict check like any other state change.
-    it("does not let a live-subtree comment grant carry a resume through the comment route", async () => {
-      // A default-open company: `issue:mutate` resolves to the visible-write
-      // decision, which is what lets `assertExplicitResumeIntentAllowed` admit
-      // a follow-up on another agent's issue. That is the shape in which the
-      // comment route's `resume` actually reaches `svc.update`.
-      mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
-        allowed: true,
-        action: input.action,
-        reason: input.action === "issue:mutate" ? "allow_visible_issue_write" : "allow_explicit_grant",
-        explanation: "Default-open write boundary.",
-      }));
-      // `blocked` with no unresolved blockers is the state a comment-route
-      // `resume` moves back to `todo` without ever consulting the mutation
-      // gate — only the comment gate stands between the request and the write.
-      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
-      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue({ assigneeAgentId: ownerAgentId }),
-        ...patch,
-      }));
-      mockTaskWatchdogService.revalidateMutationScope.mockImplementation(
-        async (_scope: unknown, opts?: { intent?: string }) =>
-          opts?.intent === "comment"
-            ? {
-              allowed: true,
-              classification: { state: "live", liveIssueIds: [issueId] },
-              liveCommentScope: true,
-            }
-            : {
-              allowed: false,
-              reason:
-                "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
-              classification: { state: "live", liveIssueIds: [issueId] },
-            },
-      );
-
-      const app = await createApp(watchdogActor(), createWatchdogDb());
-      const res = await request(app)
-        .post(`/api/issues/${issueId}/comments`)
-        .send({ body: "Reassigned the stalled leaf.", resume: true });
-
-      expect(mockIssueService.update).not.toHaveBeenCalled();
-      expect(res.status, JSON.stringify(res.body)).toBe(409);
-      expect(mockIssueService.addComment).not.toHaveBeenCalled();
-    });
-
-    // The other half of treating a state-changing comment as a mutation: it
-    // rotates the fingerprint the run is pinned to, so it has to re-pin, or the
-    // run is locked out of everything it does afterwards.
-    it("re-pins the run after a comment that moves the watched issue", async () => {
-      mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
-        allowed: true,
-        action: input.action,
-        reason: input.action === "issue:mutate" ? "allow_visible_issue_write" : "allow_explicit_grant",
-        explanation: "Default-open write boundary.",
-      }));
-      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
-      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
-        ...makeIssue({ assigneeAgentId: ownerAgentId }),
-        ...patch,
-      }));
-
-      const app = await createApp(watchdogActor(), createWatchdogDb());
-      const res = await request(app)
-        .post(`/api/issues/${issueId}/comments`)
-        .send({ body: "Handing this back.", resume: true });
-
-      expect(res.status, JSON.stringify(res.body)).toBe(201);
-      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "todo" }));
-      expect(mockTaskWatchdogService.repinMutationScope).toHaveBeenCalledWith(
-        expect.objectContaining({ kind: "watchdog" }),
-        expect.objectContaining({ authorizedIssueIds: [issueId] }),
-      );
-    });
-
     it.each([
       ["in_progress"],
       ["blocked"],
@@ -2385,7 +2211,15 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
-    it("re-pins the run before the mutation response reaches the client", async () => {
+    const stopSnapshot = {
+      version: 2,
+      fingerprint: "task_watchdog_stop:test",
+      materialLeaves: [],
+      waitsByIssueId: {},
+    };
+    const ledgerBaseline = { baseline: stopSnapshot, baselineMaterialByIssueId: {} };
+
+    it("records the authorized mutation before the response reaches the client", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
@@ -2393,15 +2227,15 @@ describe("agent issue mutation checkout ownership", () => {
         ...patch,
       }));
 
-      // The run's very next request reads its pin from the run context. If the
-      // response is flushed while the re-pin is still in flight, that request
-      // sees the stale fingerprint and is rejected by the guard the re-pin
-      // exists to satisfy — so the response must wait for the re-pin.
+      // The run's very next request reads its ledger from the run context. If
+      // the response is flushed while the record is still in flight, that
+      // request cannot account for its own change and is rejected by the guard
+      // the record exists to satisfy — so the response must wait for it.
       const order: string[] = [];
-      mockTaskWatchdogService.repinMutationScope.mockImplementationOnce(async () => {
+      mockTaskWatchdogService.recordAuthorizedMutation.mockImplementationOnce(async () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
-        order.push("repin");
-        return { repinned: true, reason: "repinned" };
+        order.push("record");
+        return { recorded: true };
       });
 
       const app = await createApp(watchdogActor(), createWatchdogDb());
@@ -2409,38 +2243,106 @@ describe("agent issue mutation checkout ownership", () => {
       order.push("response");
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(order).toEqual(["repin", "response"]);
+      expect(order).toEqual(["record", "response"]);
     });
 
-    it("carries the mutated issue and its pre-mutation snapshot into the re-pin", async () => {
+    it("declares the values its own update returned, not a re-read of the issue", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
         ...makeIssue({ assigneeAgentId: ownerAgentId }),
         ...patch,
       }));
-      const stopSnapshot = {
-        version: 2,
-        fingerprint: "task_watchdog_stop:test",
-        materialLeaves: [],
-        waitsByIssueId: {},
-      };
       mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
         allowed: true,
         classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test", stopSnapshot },
+        ledgerBaseline,
       });
 
       const app = await createApp(watchdogActor(), createWatchdogDb());
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockTaskWatchdogService.repinMutationScope).toHaveBeenCalledWith(
+      expect(mockTaskWatchdogService.recordAuthorizedMutation).toHaveBeenCalledWith(
         expect.objectContaining({ kind: "watchdog" }),
-        { authorizedIssueIds: [issueId], previousStopSnapshot: stopSnapshot },
+        {
+          ledgerBaseline,
+          mutations: [{ issueId, declared: { status: "todo" } }],
+        },
       );
     });
 
-    it("does not re-pin the run when the mutation was rejected", async () => {
+    // The returned row reports every column's current value, including ones
+    // this request never wrote. Declaring those would hand a concurrent
+    // writer's change to the ledger as this run's own, and the guard would then
+    // find the subtree exactly where it "expected" it and never flag the third
+    // party again — the laundering the declared-writes model exists to stop.
+    it("does not claim an assignee the request never asked to change", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      // A board user reassigned the issue in the window between revalidation
+      // and this update, so the row this request gets back carries *their*
+      // assignee even though the body only asked for a status change.
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: "concurrently-reassigned-agent", assigneeUserId: null }),
+        ...patch,
+      }));
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: true,
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test", stopSnapshot },
+        ledgerBaseline,
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "todo" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const [, entry] = mockTaskWatchdogService.recordAuthorizedMutation.mock.calls.at(-1) as [
+        unknown,
+        { mutations: { declared: Record<string, unknown> }[] },
+      ];
+      // Merged across every mutation the request recorded rather than read off
+      // the first: a request records the wake it fired as well as the write it
+      // made, and the claim under test is that nothing anywhere in it names a
+      // field the body did not.
+      const declared = Object.assign({}, ...entry.mutations.map((mutation) => mutation.declared));
+      expect(declared).toEqual({ status: "todo" });
+      expect(declared).not.toHaveProperty("assigneeAgentId");
+    });
+
+    // WDOG-001A. The update writes the assignee columns the body named and
+    // leaves the other one alone, so the pair is not a unit and must not be
+    // declared as one: the sibling column on the returned row can be somebody
+    // else's write.
+    it("declares only the assignee column the request asked for", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: "concurrently-reassigned-agent", assigneeUserId: null }),
+        ...patch,
+      }));
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: true,
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test", stopSnapshot },
+        ledgerBaseline,
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app)
+        .patch(`/api/issues/${issueId}`)
+        .send({ assigneeUserId: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const [, entry] = mockTaskWatchdogService.recordAuthorizedMutation.mock.calls.at(-1) as [
+        unknown,
+        { mutations: { declared: Record<string, unknown> }[] },
+      ];
+      const declared = Object.assign({}, ...entry.mutations.map((mutation) => mutation.declared));
+      expect(declared).toEqual({ assigneeUserId: null });
+      expect(declared).not.toHaveProperty("assigneeAgentId");
+    });
+
+    it("does not record anything when the mutation was rejected", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
       mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
@@ -2453,7 +2355,33 @@ describe("agent issue mutation checkout ownership", () => {
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
 
       expect(res.status, JSON.stringify(res.body)).toBe(409);
-      expect(mockTaskWatchdogService.repinMutationScope).not.toHaveBeenCalled();
+      expect(mockTaskWatchdogService.recordAuthorizedMutation).not.toHaveBeenCalled();
+    });
+
+    // Concurrent drift has to stop the mutation, not be noticed after it has
+    // already been written. The guard runs before the route touches anything,
+    // so a subtree that moved underneath this run means the update never
+    // happens and the client is told which issues could not be accounted for.
+    it("rejects the mutation outright when a third party moved the watched subtree", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
+      mockTaskWatchdogService.revalidateMutationScope.mockResolvedValueOnce({
+        allowed: false,
+        reason: "Task-watchdog review is stale because the watched subtree stop fingerprint changed.",
+        classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:moved" },
+        unattributedIssueIds: ["other-leaf-id"],
+        unattributedLivenessIssueIds: [],
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ status: "blocked" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      // The mutation that raced is never applied, so there is nothing committed
+      // for the stale pin to be a consolation prize for.
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(res.body.details.unattributedIssueIds).toEqual(["other-leaf-id"]);
+      expect(mockTaskWatchdogService.recordAuthorizedMutation).not.toHaveBeenCalled();
     });
 
     it("rejects stale watchdog source mutations when revalidation finds a live path", async () => {

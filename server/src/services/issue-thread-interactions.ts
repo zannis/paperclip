@@ -78,6 +78,7 @@ import {
   isIssueReviewVerdictInteraction,
 } from "./issue-review-policy.js";
 import {
+  type IssueUpdatePrecondition,
   issueService,
   readAcceptedPlanConfirmationTarget,
   runWorkspaceIsFinalized,
@@ -145,6 +146,18 @@ type InteractionResolutionMutationOptions = {
     tx: DbTransaction,
     interaction: IssueThreadInteraction,
   ) => Promise<void>;
+  // Reports what the resolution wrote to the source issue itself, so a caller
+  // that has to account for its own writes can declare them. Fired once, from
+  // inside the resolution's transaction, only when the write actually happened.
+  onSourceIssueWrite?: (write: ResolvedInteractionSourceIssueWrite) => void;
+  // Applied to whatever this resolution writes to the source issue, as a
+  // compare-and-swap on the state the caller made its decision against. The
+  // reopen and hand-back branches patch status and both assignee columns from
+  // `issueContext`, which was read before the interaction row was locked, so
+  // without this a third party reassigning the issue in that window has their
+  // change overwritten by a stale value and no one is any the wiser. A mismatch
+  // rolls the resolution back and the caller is told it is stale.
+  expectedCurrentLeaf?: IssueUpdatePrecondition | null;
 };
 
 const GITHUB_PULL_REQUEST_URL_PATTERN = /https:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]*)/gi;
@@ -258,6 +271,19 @@ type IssueWakeTarget = {
   assigneeUserId?: string | null;
   status: string;
   workMode?: string;
+  parentId?: string | null;
+};
+
+// The leaf fields a resolution wrote to the source issue itself, read from the
+// update's own `RETURNING` row and naming only the columns it patched. Callers
+// that have to account for what they changed — a task-watchdog run declaring
+// its writes — need this: a resolution can move the issue's status and
+// assignee, and those moves are otherwise indistinguishable from a third
+// party's.
+export type ResolvedInteractionSourceIssueWrite = {
+  status?: string;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
 };
 
 type ResolvedInteractionResult = {
@@ -1675,6 +1701,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
     current: IssueThreadInteractionRow;
     input: AcceptIssueThreadInteraction;
     actor: InteractionActor;
+    mutationOptions?: InteractionResolutionMutationOptions;
   }): Promise<{
     interaction: IssueThreadInteraction;
     continuationIssue: IssueWakeTarget | null;
@@ -1684,6 +1711,12 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
       actor: args.actor,
     });
     if (expired) throw interactionTerminalError({ status: expired.status, result: expired.result });
+
+    // Applied to every source-issue write below. Empty when the caller named no
+    // expectation, leaving those writes exactly as unconditional as before.
+    const sourceIssuePrecondition = args.mutationOptions?.expectedCurrentLeaf
+      ? { expectedCurrentLeaf: args.mutationOptions.expectedCurrentLeaf }
+      : {};
 
     const now = new Date();
     const postCommitActivityPublications: ActivityPublication[] = [];
@@ -1795,6 +1828,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
           status: "done",
           actorAgentId: args.actor.agentId ?? null,
           actorUserId: args.actor.userId ?? null,
+          ...sourceIssuePrecondition,
         }, tx, postCommitActivityPublications);
         if (completedIssue) {
           continuationIssue = {
@@ -1803,6 +1837,8 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             assigneeUserId: completedIssue.assigneeUserId ?? null,
             status: completedIssue.status,
           };
+          // Status only: the patch above named nothing else about the leaf.
+          args.mutationOptions?.onSourceIssueWrite?.({ status: completedIssue.status });
         }
       } else if (shouldReturnAcceptedConfirmationToCreatorAgent({
         issue: issueContext,
@@ -1812,6 +1848,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
         const returnStatus = issueContext.status === "blocked" ? "blocked" : "todo";
         const returnedIssue = await issueService(db).update(args.issue.id, {
           status: returnStatus,
+          ...sourceIssuePrecondition,
           ...(acceptedPlanStartsExecution ? { workMode: "standard" } : {}),
           assigneeAgentId: lockedCurrent.createdByAgentId,
           assigneeUserId: null,
@@ -1827,10 +1864,18 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             status: returnedIssue.status,
             ...(acceptedPlanStartsExecution ? { workMode: returnedIssue.workMode } : {}),
           };
+          // This branch hands the issue back to the confirmation's creator, so
+          // it patched the status and both assignee columns.
+          args.mutationOptions?.onSourceIssueWrite?.({
+            status: returnedIssue.status,
+            assigneeAgentId: returnedIssue.assigneeAgentId ?? null,
+            assigneeUserId: returnedIssue.assigneeUserId ?? null,
+          });
         }
       } else if (acceptedPlanStartsExecution) {
         const executionIssue = await issueService(db).update(args.issue.id, {
           workMode: "standard",
+          ...sourceIssuePrecondition,
           actorAgentId: args.actor.agentId ?? null,
           actorUserId: args.actor.userId ?? null,
         }, tx, postCommitActivityPublications);
@@ -1884,6 +1929,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
     current: IssueThreadInteractionRow;
     input: RejectIssueThreadInteraction;
     actor: InteractionActor;
+    mutationOptions?: InteractionResolutionMutationOptions;
   }): Promise<IssueThreadInteraction> {
     const expired = await expireStaleRequestConfirmationTarget(db, {
       row: args.current,
@@ -1896,6 +1942,12 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
     if (interaction.payload.rejectRequiresReason === true && reason.length === 0) {
       throw unprocessable("A decline reason is required for this confirmation");
     }
+
+    // Applied to every source-issue write below. Empty when the caller named no
+    // expectation, leaving those writes exactly as unconditional as before.
+    const sourceIssuePrecondition = args.mutationOptions?.expectedCurrentLeaf
+      ? { expectedCurrentLeaf: args.mutationOptions.expectedCurrentLeaf }
+      : {};
 
     const now = new Date();
     const updated = await db.transaction(async (tx) => {
@@ -2003,7 +2055,10 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
         isNativeCompletionReview(lockedCurrent) ||
         shouldResumeReviewedIssue
       ) {
-        await issueService(db).update(
+        // Reopening the reviewed issue patches its status and both assignee
+        // columns, and a watchdog run that declined a confirmation has to be
+        // able to say so — see `sourceIssueWrite` on the accept path.
+        const reopened = await issueService(db).update(
           args.issue.id,
           {
             status: "todo",
@@ -2011,9 +2066,17 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             assigneeUserId: null,
             actorAgentId: args.actor.agentId ?? null,
             actorUserId: args.actor.userId ?? null,
+            ...sourceIssuePrecondition,
           },
           tx,
         );
+        if (reopened) {
+          args.mutationOptions?.onSourceIssueWrite?.({
+            status: reopened.status,
+            assigneeAgentId: reopened.assigneeAgentId ?? null,
+            assigneeUserId: reopened.assigneeUserId ?? null,
+          });
+        }
       } else {
         await touchIssue(tx, args.issue.id);
       }
@@ -2868,6 +2931,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
       interactionId: string,
       input: AcceptIssueThreadInteraction,
       actor: InteractionActor,
+      mutationOptions?: InteractionResolutionMutationOptions,
     ): Promise<ResolvedInteractionResult> => {
       const data = acceptIssueThreadInteractionSchema.parse(input);
       const current = await getPendingInteractionForResolution({ issue, interactionId });
@@ -2885,6 +2949,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             current,
             input: data,
             actor,
+            mutationOptions,
           });
           return {
             interaction: accepted.interaction,
@@ -2899,6 +2964,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             current,
             input: data,
             actor,
+            mutationOptions,
           });
           return {
             interaction: accepted.interaction,
@@ -3037,6 +3103,10 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             id: createdIssue.id,
             assigneeAgentId: createdIssue.assigneeAgentId ?? null,
             status: createdIssue.status,
+            // The parent this resolution hung the task off, so a caller that
+            // has to account for the displacement it caused can name the edge
+            // rather than re-reading where the child sits later.
+            parentId: parentIssueId,
           });
         }
 
@@ -3077,6 +3147,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
       interactionId: string,
       input: RejectIssueThreadInteraction,
       actor: InteractionActor,
+      mutationOptions?: InteractionResolutionMutationOptions,
     ) => {
       const data = rejectIssueThreadInteractionSchema.parse(input);
       const current = await getPendingInteractionForResolution({ issue, interactionId });
@@ -3091,6 +3162,7 @@ export function issueThreadInteractionService(db: Db, opts: IssueThreadInteracti
             current,
             input: data,
             actor,
+            mutationOptions,
           });
         default:
           throw unprocessable(`Interactions of kind ${current.kind} cannot be rejected`);

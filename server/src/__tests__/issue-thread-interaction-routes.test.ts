@@ -62,6 +62,15 @@ const mockQuestionResponseDeliveries = vi.hoisted(() => ({
   deliver: vi.fn(async () => null),
 }));
 const mockResolveTaskWatchdogMutationScope = vi.hoisted(() => vi.fn(async () => ({ kind: "none" })));
+const mockRecordAuthorizedMutation = vi.hoisted(() => vi.fn(async () => ({ recorded: true })));
+const mockRevalidateMutationScope = vi.hoisted(() => vi.fn(async (scope: unknown) => ({
+  allowed: true,
+  scope,
+  ledgerBaseline: {
+    baseline: { version: 2, fingerprint: "stop-1", materialLeaves: [], waitsByIssueId: {} },
+    baselineMaterialByIssueId: {},
+  },
+})));
 const mockResolveCoreTrustPreset = vi.hoisted(() => vi.fn(() => ({ kind: "standard" })));
 const mockRunAttribution = vi.hoisted(() => ({
   value: {
@@ -227,8 +236,8 @@ function registerModuleMocks() {
       getActiveForIssue: vi.fn(async () => null),
       upsertForIssue: vi.fn(),
       disableForIssue: vi.fn(async () => null),
-      revalidateMutationScope: vi.fn(async (scope: unknown) => ({ allowed: true, scope })),
-      repinMutationScope: vi.fn(async () => ({ repinned: false, reason: "fingerprint_unchanged" })),
+      revalidateMutationScope: mockRevalidateMutationScope,
+      recordAuthorizedMutation: mockRecordAuthorizedMutation,
     }),
     logActivity: mockLogActivity,
     projectService: () => ({}),
@@ -334,6 +343,7 @@ describe.sequential("issue thread interaction routes", () => {
     mockQuestionResponseDeliveries.deliver.mockResolvedValue(null);
     mockRequestNativeQuestionRunCancellation.mockResolvedValue(null);
     mockResolveTaskWatchdogMutationScope.mockResolvedValue({ kind: "none" });
+    mockRecordAuthorizedMutation.mockClear();
     mockResolveCoreTrustPreset.mockReturnValue({ kind: "standard" });
     mockAccessDecide.mockImplementation(async (input: { action?: string }) => ({
       allowed: true,
@@ -765,6 +775,7 @@ describe.sequential("issue thread interaction routes", () => {
       "interaction-1",
       { selectedClientKeys: ["task-1"] },
       expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ onSourceIssueWrite: expect.any(Function) }),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(2);
     expect(mockHeartbeatService.wakeup).toHaveBeenNthCalledWith(
@@ -1582,6 +1593,7 @@ describe.sequential("issue thread interaction routes", () => {
       "interaction-checkbox",
       { selectedOptionIds: ["file-b"] },
       expect.objectContaining({ userId: "local-board" }),
+      expect.objectContaining({ onSourceIssueWrite: expect.any(Function) }),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -2107,6 +2119,145 @@ describe.sequential("issue thread interaction routes", () => {
     );
   });
 
+  // WDOG-006. Declining a completion review reopens the issue and hands it back
+  // to its assignee - a leaf write like any other. A watchdog run that made
+  // that write has to be able to say so, or the next request in the same run
+  // reads its own recovery as somebody else's change and 409s.
+  it("declares the source-issue write a declined confirmation made", async () => {
+    const issue = createIssue({ status: "in_review" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    // Not `Once`: the request resolves the scope more than once, and the
+    // beforeEach hook puts it back to `none` for every other test.
+    mockResolveTaskWatchdogMutationScope.mockResolvedValue({
+      kind: "watchdog",
+      watchdogId: "watchdog-1",
+      companyId: "company-1",
+      watchedIssueId: issue.id,
+      watchdogIssueId: null,
+      stopFingerprint: "stop-1",
+      runId: RUN_WATCHDOG,
+    });
+    mockInteractionService.rejectInteraction.mockImplementationOnce(async (
+      _issue: unknown,
+      _interactionId: unknown,
+      _input: unknown,
+      _actor: unknown,
+      mutationOptions?: { onSourceIssueWrite?: (write: unknown) => void },
+    ) => {
+      mutationOptions?.onSourceIssueWrite?.({
+        status: "todo",
+        assigneeAgentId: ASSIGNEE_AGENT_ID,
+        assigneeUserId: null,
+      });
+      return {
+        id: "interaction-watchdog-decline",
+        companyId: "company-1",
+        issueId: issue.id,
+        kind: "request_confirmation",
+        status: "rejected",
+        continuationPolicy: "wake_assignee",
+        idempotencyKey: null,
+        sourceCommentId: null,
+        sourceRunId: RUN_3,
+        payload: { version: 1, prompt: "Approve completion?" },
+        result: { version: 1, outcome: "rejected", reason: "Not yet." },
+        createdAt: "2026-04-20T12:00:00.000Z",
+        updatedAt: "2026-04-20T12:05:00.000Z",
+        resolvedAt: "2026-04-20T12:05:00.000Z",
+      };
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      runId: RUN_WATCHDOG,
+    });
+    const res = await request(app)
+      .post(`/api/issues/${issue.id}/interactions/interaction-watchdog-decline/reject`)
+      .send({ reason: "Not yet." });
+
+    expect(res.status).toBe(200);
+    expect(mockRecordAuthorizedMutation).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "watchdog" }),
+      expect.objectContaining({
+        mutations: [
+          {
+            issueId: issue.id,
+            declared: {
+              status: "todo",
+              assigneeAgentId: ASSIGNEE_AGENT_ID,
+              assigneeUserId: null,
+            },
+            resolvedInteractionIds: ["interaction-watchdog-decline"],
+          },
+          // The continuation wake really fired for this one — the interaction
+          // carries `wake_assignee` — so the request also reports that it
+          // started work here, which is what lets the guard tell the run this
+          // request began from a run it merely found.
+          { issueId: issue.id, declared: {}, startsWork: true },
+        ],
+      }),
+    );
+  });
+
+  // WDOG-001B-POTENTIAL-CAUSE. The same decline under a continuation policy
+  // that wakes nobody. The waiting-path shrink is still declared — it happened
+  // — but nothing started, and the request must not say otherwise: a run that
+  // turns up on this issue afterwards is a third party's, and licensing it off
+  // "an interaction left the waiting paths" is the guard failing open.
+  it("does not report starting work for a resolution that woke nobody", async () => {
+    const issue = createIssue({ status: "todo" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockResolveTaskWatchdogMutationScope.mockResolvedValue({
+      kind: "watchdog",
+      watchdogId: "watchdog-1",
+      companyId: "company-1",
+      watchedIssueId: issue.id,
+      watchdogIssueId: null,
+      stopFingerprint: "stop-1",
+      runId: RUN_WATCHDOG,
+    });
+    mockInteractionService.rejectInteraction.mockResolvedValueOnce({
+      id: "interaction-watchdog-inert",
+      companyId: "company-1",
+      issueId: issue.id,
+      kind: "request_confirmation",
+      status: "rejected",
+      continuationPolicy: "none",
+      idempotencyKey: null,
+      sourceCommentId: null,
+      sourceRunId: RUN_3,
+      payload: { version: 1, prompt: "Approve completion?" },
+      result: { version: 1, outcome: "rejected", reason: "Not yet." },
+      createdAt: "2026-04-20T12:00:00.000Z",
+      updatedAt: "2026-04-20T12:05:00.000Z",
+      resolvedAt: "2026-04-20T12:05:00.000Z",
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: ASSIGNEE_AGENT_ID,
+      companyId: "company-1",
+      runId: RUN_WATCHDOG,
+    });
+    const res = await request(app)
+      .post(`/api/issues/${issue.id}/interactions/interaction-watchdog-inert/reject`)
+      .send({ reason: "Not yet." });
+
+    expect(res.status).toBe(200);
+    expect(mockRecordAuthorizedMutation).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "watchdog" }),
+      expect.objectContaining({
+        mutations: [{
+          issueId: issue.id,
+          declared: {},
+          resolvedInteractionIds: ["interaction-watchdog-inert"],
+        }],
+      }),
+    );
+  });
+
   it("overrides accept-only continuation when rejection consumes the last review path", async () => {
     const issue = createIssue({ status: "in_review" });
     mockIssueService.getById.mockResolvedValue(issue);
@@ -2361,6 +2512,7 @@ describe.sequential("issue thread interaction routes", () => {
         resolverPolicyRestriction: "anyone",
         suggestedTaskEffectsAuthorized: true,
       },
+      expect.objectContaining({ onSourceIssueWrite: expect.any(Function) }),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       actorType: "agent",
@@ -2411,6 +2563,7 @@ describe.sequential("issue thread interaction routes", () => {
         agentId: ASSIGNEE_AGENT_ID,
         resolverPolicyRestriction: "anyone",
       }),
+      expect.objectContaining({ onSourceIssueWrite: expect.any(Function) }),
     );
   });
 
