@@ -1146,11 +1146,25 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(first.allowed).toBe(true);
     expect("auditCommentOnly" in first ? first.auditCommentOnly : null).toBe(true);
 
-    // And the second one does not. The run has said what it did; every further
-    // comment is a wake it was never granted. The grant is spent by the request
-    // the guard admitted, not by a comment row somebody can read back — a run
-    // that could delete its way to a fresh grant, or race its own check, has an
-    // unlimited one.
+    // Admission on its own spends nothing. It is several validations and one
+    // insert short of the write the grant exists for, and a request refused in
+    // that window wrote no summary — so a run admitted twice without writing is
+    // still owed exactly one.
+    const readmitted = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(readmitted.allowed).toBe(true);
+    expect("auditCommentOnly" in readmitted ? readmitted.auditCommentOnly : null).toBe(true);
+
+    // The claim is what spends it, and it belongs in the comment's own
+    // transaction.
+    expect(await service.claimAuditCommentGrant({ companyId, runId })).toBeNull();
+
+    // After that the run has said what it did; every further comment is a wake
+    // it was never granted. The grant is spent by the write, not by a comment
+    // row somebody can read back — a run that could delete its way to a fresh
+    // grant, or race its own check, has an unlimited one.
     const second = await service.revalidateMutationScope(await resolveScope(), {
       intent: "comment",
       targetIssueId: sourceId,
@@ -1158,16 +1172,22 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(second.classification?.state).toBe("live");
     expect(second.allowed).toBe(false);
     expect(second.reason).toContain("already recorded what it did");
+
+    // And the claim itself refuses a second time, so two requests that both got
+    // past admission cannot both write: they serialise here, and the loser's
+    // transaction — comment included — goes back with the refusal.
+    expect(await service.claimAuditCommentGrant({ companyId, runId }))
+      .toContain("already recorded what it did");
   });
 
-  // The claim has to happen on admission — that is the only place it can be one
-  // statement with its own check — but the write it pays for is several
-  // validations and one insert later, and a request refused in between wrote no
-  // summary. So the claim is provisional, and giving it back is what keeps
-  // "spent" meaning "recorded" rather than "attempted".
-  it("returns an unused audit-comment grant so the summary can still be written", async () => {
+  // The claim runs in the transaction that inserts the comment, which is the
+  // whole point of moving it off admission: everything that can stop the
+  // comment from committing — a downstream refusal, a client that hangs up, a
+  // worker killed mid-request, the database outage that failed the insert —
+  // takes the claim with it, with no compensating release to miss.
+  it("does not spend the audit-comment grant when the writing transaction rolls back", async () => {
     const { companyId, sourceId, childIds, agentId, runId, service, resolveScope, admitMutation, recordMutations } =
-      await seedWokenWatchdogRun("WDOG-AUDIT-RELEASE", { establishedChildren: ["WDOG-AUDIT-RELEASE-A"] });
+      await seedWokenWatchdogRun("WDOG-AUDIT-ROLLBACK", { establishedChildren: ["WDOG-AUDIT-ROLLBACK-A"] });
     const leafId = childIds[0]!;
     const scope = await resolveScope();
     const admitted = await admitMutation(scope);
@@ -1180,26 +1200,30 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ])).recorded).toBe(true);
     await seedLiveRunOn(companyId, leafId, { originRunId: runId });
 
-    const claimed = await service.revalidateMutationScope(await resolveScope(), {
+    expect((await service.revalidateMutationScope(await resolveScope(), {
       intent: "comment",
       targetIssueId: sourceId,
-    });
-    expect(claimed.allowed).toBe(true);
+    })).allowed).toBe(true);
 
-    // This request wrote nothing, so the run is still owed its summary.
-    expect(await service.releaseAuditCommentGrant({ companyId, runId })).toBe(true);
+    // The write the claim was made for fails after the claim statement ran.
+    await expect(db.transaction(async (tx) => {
+      expect(await service.claimAuditCommentGrant({ companyId, runId }, tx)).toBeNull();
+      throw new Error("insert failed");
+    })).rejects.toThrow("insert failed");
+
+    // Nothing landed, so the run is still owed its summary — and can still
+    // write it, this time for good.
     const retried = await service.revalidateMutationScope(await resolveScope(), {
       intent: "comment",
       targetIssueId: sourceId,
     });
     expect(retried.allowed).toBe(true);
     expect("auditCommentOnly" in retried ? retried.auditCommentOnly : null).toBe(true);
-
-    // Release is idempotent, so the response hook that calls it cannot hand out
-    // a grant by firing twice: the first call returns the outstanding claim,
-    // and with nothing left to return the next one reports exactly that.
-    expect(await service.releaseAuditCommentGrant({ companyId, runId })).toBe(true);
-    expect(await service.releaseAuditCommentGrant({ companyId, runId })).toBe(false);
+    expect(await service.claimAuditCommentGrant({ companyId, runId })).toBeNull();
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    })).allowed).toBe(false);
   });
 
   // The grant is one *summary* — a record of a recovery that has happened. A
@@ -1251,8 +1275,10 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
   // Checking the grant and consuming it have to be one operation. Two requests
   // of the same run can be in flight at once — the run is a process, not a
   // queue — and a check that only reads state every racer can observe hands the
-  // grant to all of them.
-  it("admits exactly one of several concurrent audit comments", async () => {
+  // grant to all of them. Admission is deliberately that kind of read now, so
+  // the operation this pins is the claim: it is the statement each racer's
+  // comment transaction runs, and exactly one of them may win it.
+  it("lets exactly one of several concurrent audit comments claim the grant", async () => {
     const { companyId, sourceId, childIds, agentId, runId, service, resolveScope, admitMutation, recordMutations } =
       await seedWokenWatchdogRun("WDOG-AUDIT-RACE", { establishedChildren: ["WDOG-AUDIT-RACE-A"] });
     const leafId = childIds[0]!;
@@ -1273,10 +1299,19 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const verdicts = await Promise.all(scopes.map((racer) =>
       service.revalidateMutationScope(racer, { intent: "comment", targetIssueId: sourceId })
     ));
+    // Every racer is admitted — the read cannot tell them apart, and it is not
+    // asked to.
+    expect(verdicts.filter((verdict) => verdict.allowed)).toHaveLength(5);
 
-    expect(verdicts.filter((verdict) => verdict.allowed)).toHaveLength(1);
-    for (const verdict of verdicts.filter((candidate) => !candidate.allowed)) {
-      expect(verdict.reason).toContain("already recorded what it did");
+    // Each then runs its claim in the transaction its comment would be inserted
+    // in. Exactly one commits; the rest are refused, and in a real request that
+    // refusal takes the insert down with it.
+    const claims = await Promise.all(scopes.map((racer) =>
+      db.transaction((tx) => service.claimAuditCommentGrant(racer, tx))
+    ));
+    expect(claims.filter((denial) => denial === null)).toHaveLength(1);
+    for (const denial of claims.filter((candidate) => candidate !== null)) {
+      expect(denial).toContain("already recorded what it did");
     }
   });
 
@@ -1323,6 +1358,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
 
     // And it is still one record: the leaf being the root buys no second
     // comment, and no state change either.
+    expect(await service.claimAuditCommentGrant({ companyId, runId })).toBeNull();
     const secondSummary = await service.revalidateMutationScope(await resolveScope(), {
       intent: "comment",
       targetIssueId: sourceId,

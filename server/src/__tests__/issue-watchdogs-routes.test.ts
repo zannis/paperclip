@@ -209,6 +209,28 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     }
   }
 
+  // The wake a specific agent received. A comment can fire more than one wake —
+  // the target's assignee and one per @-mention — and the route enqueues them
+  // independently, so waiting on the comment's own wake says nothing about
+  // whether the mention has landed yet.
+  async function waitForAgentWake(companyId: string, agentId: string, timeoutMs = 5_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [row] = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, agentId),
+        ));
+      if (row) return row;
+      if (Date.now() >= deadline) {
+        throw new Error(`No wake request landed for agent ${agentId} within ${timeoutMs}ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   async function seedCloudTenantMember(companyId: string) {
     await db.insert(companyMemberships).values({
       companyId,
@@ -1035,7 +1057,11 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .post(`/api/issues/${watchedChildId}/comments`)
       .send({ body: `Board checking in. cc [@Mentioned Bystander](${buildAgentMentionHref(bystanderAgentId)})` });
     expect(control.status, JSON.stringify(control.body)).toBe(201);
-    await waitForIssueCommentWake(companyId, control.body.id);
+    // Wait on the *mention* the control fired, not just on the control's
+    // comment wake. The route enqueues the two separately, so waiting for the
+    // comment wake can observe the mention path mid-flight and read zero
+    // bystander wakes for a reason that has nothing to do with the summary.
+    await waitForAgentWake(companyId, bystanderAgentId);
     const wakes = await db
       .select()
       .from(agentWakeupRequests)
@@ -1044,7 +1070,9 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .toHaveLength(0);
     // Nothing reached the agent the summary mentioned; the only wake it has is
     // the control's.
-    expect(wakes.filter((row) => row.agentId === bystanderAgentId)).toHaveLength(1);
+    const bystanderWakes = wakes.filter((row) => row.agentId === bystanderAgentId);
+    expect(bystanderWakes).toHaveLength(1);
+    expect((bystanderWakes[0]!.payload as Record<string, unknown> | null)?.commentId).toBe(control.body.id);
 
     // Still one record: the update route spends the same grant the comment
     // route does, not a second one of its own.
@@ -1052,6 +1080,188 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .patch(`/api/issues/${watchedRootId}`)
       .send({ comment: "And another thing." });
     expect(second.status, JSON.stringify(second.body)).toBe(409);
+  });
+
+  // A generated client spells its optional fields out. `onBehalfOfUserId: null`
+  // is discarded by the attribution-spoof check (which only fires on a non-null
+  // value), and `reopen`/`resume`/`interrupt` gate on `=== true`, so a body
+  // carrying them at those values does exactly what a lone `comment` does.
+  // Counting keys called that a mutation and cost the run the summary the
+  // mandate requires.
+  it("records the recovery summary sent with no-op optional fields alongside the comment", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    const wake = await waitForIssueWake(companyId, watchedChildId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: watchedChildId },
+    });
+
+    const summary = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({
+        comment: "Revived the stalled leaf.",
+        onBehalfOfUserId: null,
+        reopen: false,
+        resume: false,
+        interrupt: false,
+      });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(200);
+    expect(await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(eq(issueComments.issueId, watchedRootId), eq(issueComments.createdByRunId, runId))))
+      .toHaveLength(1);
+
+    // Inert at those values only. `interrupt: true` cancels the live run this
+    // recovery just started, so it stays a mutation and takes the strict check.
+    const notInert = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ comment: "And cancel the run.", interrupt: true });
+    expect(notInert.status, JSON.stringify(notInert.body)).toBe(409);
+  });
+
+  // The grant is a grant of one *inert* write, and on the update route the
+  // request body does not settle whether the write is inert: this route derives
+  // fields of its own from the issue's execution policy. A watched root left in
+  // `in_review` with an execution state and no policy behind it is the reachable
+  // shape — `applyIssueExecutionPolicyTransition` clears the state and moves the
+  // issue to `in_progress` under its return assignee, off a body that asked for
+  // none of it. Suppressing the wake does not make that inert: the root would
+  // change owner while the child this run just revived already has a live one.
+  it("refuses a summary whose update route would derive a state change from it", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const returnAssigneeId = await seedAgent(companyId, { name: "Return Assignee" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root", assigneeAgentId: workerAgentId });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    const wake = await waitForIssueWake(companyId, watchedChildId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: watchedChildId },
+    });
+
+    // The root carries a review state whose policy is gone. Set after the
+    // recovery so the fingerprint the run was woken at is the one it is still
+    // being judged against.
+    await db.update(issues)
+      .set({
+        status: "in_review",
+        executionPolicy: null,
+        executionState: {
+          status: "pending",
+          currentStageId: randomUUID(),
+          currentStageIndex: 0,
+          currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: workerAgentId },
+          returnAssignee: { type: "agent", agentId: returnAssigneeId },
+          completedStageIds: [],
+          lastDecisionId: null,
+          lastDecisionOutcome: null,
+        },
+      })
+      .where(eq(issues.id, watchedRootId));
+
+    const summary = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ comment: "Revived the stalled leaf." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(409);
+    expect(summary.body.details?.derivedFields)
+      .toEqual(["assigneeAgentId", "assigneeUserId", "executionState", "status"]);
+
+    // Refused whole. The root is where it was, and no comment was written.
+    const [root] = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId, executionState: issues.executionState })
+      .from(issues)
+      .where(eq(issues.id, watchedRootId));
+    expect(root?.status).toBe("in_review");
+    expect(root?.assigneeAgentId).toBe(workerAgentId);
+    expect(root?.executionState).not.toBeNull();
+    expect(await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, watchedRootId))).toHaveLength(0);
+
+    // And the refusal did not cost the run its mandate. The grant is spent in
+    // the transaction that inserts the comment, and no comment was inserted, so
+    // the run still holds the summary it is owed — to write on the comments
+    // endpoint, which runs no transition and can derive nothing from it.
+    const [runRow] = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    const watchdogContext = (runRow?.contextSnapshot as Record<string, unknown> | null)?.taskWatchdog as
+      | Record<string, unknown>
+      | undefined;
+    expect(watchdogContext?.auditCommentSpentAt).toBeUndefined();
   });
 
   // The headline recovery lands on a subtree whose root is already terminal —
@@ -1137,12 +1347,13 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .toHaveLength(0);
   });
 
-  // The grant is claimed on admission, which is where the check and the claim
-  // can be one statement — but admission is several validations and one insert
-  // short of the write the grant exists for. A request refused in that window
-  // wrote no summary, so it must not have spent the one the run is owed.
-  // `presentation` is the reachable instance: the request schema accepts it,
-  // and the route rejects it for agents *after* the guard has run.
+  // Admission is several validations and one insert short of the write the
+  // grant exists for. A request refused in that window wrote no summary, so it
+  // must not have spent the one the run is owed — and it cannot, because the
+  // statement that spends the grant runs in the insert's own transaction rather
+  // than at the door. `presentation` is the reachable instance: the request
+  // schema accepts it, and the route rejects it for agents *after* the guard
+  // has run.
   it("does not spend the audit grant on a summary the route then refuses", async () => {
     const companyId = await seedCompany();
     const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
@@ -1199,7 +1410,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .send({ body: "Restarted this leaf and handed it back." });
     expect(summary.status, JSON.stringify(summary.body)).toBe(201);
 
-    // And exactly one: releasing an unused claim is not a second grant.
+    // And exactly one: a grant left unspent by the refusal is still one grant.
     const second = await request(app)
       .post(`/api/issues/${watchedRootId}/comments`)
       .send({ body: "And another thing." });

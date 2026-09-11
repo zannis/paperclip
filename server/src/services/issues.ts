@@ -9059,10 +9059,19 @@ export function issueService(db: Db) {
         authorizationReason?: string | null;
         sourceTrust?: typeof issueComments.$inferInsert.sourceTrust;
         createdAt?: Date | string | null;
+        // Runs inside the transaction that inserts this comment, immediately
+        // after the insert and before the commit. Throwing rolls the comment
+        // back with whatever it was doing, which is how a caller makes a write
+        // elsewhere in the database conditional on this comment actually
+        // landing — rather than doing it first and needing a compensating undo
+        // for every way the request can end without an insert. Not called on
+        // the run-replay path below, which returns an already-committed comment
+        // and inserts nothing.
+        afterInsert?: (tx: any) => Promise<void>;
       },
       dbOrTx: any = db,
     ): Promise<IssueComment> {
-      if (dbOrTx === db && actor.runId) {
+      if (dbOrTx === db && (actor.runId || options?.afterInsert)) {
         return db.transaction(async (tx) => {
           // Serialize run-authored comments on the issue so a provider retry
           // cannot publish the same visible result twice. This needs no schema
@@ -9166,6 +9175,8 @@ export function issueService(db: Db) {
           ...(createdAt && !Number.isNaN(createdAt.getTime()) ? { createdAt } : {}),
         })
         .returning();
+
+      if (options?.afterInsert) await options.afterInsert(dbOrTx);
 
       // Update issue's updatedAt so comment activity is reflected in recency sorting
       await dbOrTx

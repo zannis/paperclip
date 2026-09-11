@@ -2193,15 +2193,19 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   // fixes both — the marker exists only on this path, and one UPDATE reads and
   // writes it.
   //
-  // Claiming on admission is what makes the check and the claim one statement,
-  // so that is where it stays — but admission is not the write the grant exists
-  // for, and burning it on a request that never wrote anything loses the audit
-  // trail just as completely as refusing it. The request shape validated after
-  // this guard (`presentation`/`metadata` are 403 for agents), the cross-issue
-  // run cap, and any database error between here and the insert all reach that
-  // state. So the claim is provisional: the caller releases it when the comment
-  // did not land, and only a landed comment spends it for good. See
-  // `releaseAuditCommentGrant`.
+  // Admission is not the write the grant exists for, and burning it on a
+  // request that never wrote anything loses the audit trail just as completely
+  // as refusing it. The request shape validated after this guard
+  // (`presentation`/`metadata` are 403 for agents), the cross-issue run cap,
+  // and any database error between here and the insert all reach that state. So
+  // the claim does not happen here: admission only *reads* whether the summary
+  // is still owed, and the statement that spends it runs in the transaction
+  // that inserts the comment. Anything that stops the comment from committing —
+  // a downstream refusal, a client that hangs up, a worker killed mid-request,
+  // the database outage that failed the insert in the first place — rolls the
+  // claim back with it, so there is no out-of-band undo to get right and no
+  // failure mode where the marker outlives the comment it was supposed to pay
+  // for. See `auditCommentGrantDenial` and `claimAuditCommentGrant`.
 
   // Written to whichever of the two places the scope resolver reads the run's
   // watchdog context from, decided inside the statement rather than from an
@@ -2215,18 +2219,53 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     end`;
   }
 
-  async function claimAuditCommentGrant(scope: { companyId: string; runId?: string | null }) {
+  const AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL =
+    "Task-watchdog run context is missing the run id required to bound the summary comment to a single write.";
+  const AUDIT_COMMENT_GRANT_SPENT_DENIAL =
+    "Task-watchdog runs get one summary comment on the watched issue once the subtree has its own execution path again; this run has already recorded what it did.";
+
+  // The admission-time half: is the run's one summary still owed? Deliberately
+  // a read and nothing else. It can be raced — two requests can both see an
+  // unspent grant — and that is fine, because the claim below is what actually
+  // bounds the grant and it is a single conditional statement inside the
+  // comment's own transaction. What this read buys is refusing a run that has
+  // already recorded its summary at the door, with the same copy and the same
+  // freshness details as every other verdict this guard returns, instead of
+  // letting it travel as far as the insert to be told no.
+  async function auditCommentGrantDenial(scope: { companyId: string; runId?: string | null }) {
     // No run id is no way to bound the grant to one write, so it is refused
     // rather than guessed at.
-    if (!scope.runId) {
-      return "Task-watchdog run context is missing the run id required to bound the summary comment to a single write.";
-    }
+    if (!scope.runId) return AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL;
     const spentPath = auditCommentSpentPath();
-    // One statement tests the marker and writes it, so the check and the claim
-    // cannot be pulled apart. Concurrent requests serialise on the run row; the
-    // loser re-evaluates this `where` against the winner's committed row, finds
-    // the marker set, and updates nothing. `returning` is the verdict.
-    const claimed = await db
+    const row = await db
+      .select({ spentAt: sql<string | null>`(${heartbeatRuns.contextSnapshot} #>> (${spentPath}))` })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.id, scope.runId),
+        eq(heartbeatRuns.companyId, scope.companyId),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    // No row is no run to bound the grant against — the same refusal as no run
+    // id, rather than an admission the claim would have to take back.
+    if (!row) return AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL;
+    return row.spentAt === null ? null : AUDIT_COMMENT_GRANT_SPENT_DENIAL;
+  }
+
+  // Spends the grant, in the transaction that inserts the comment it pays for.
+  // One statement still tests the marker and writes it, so the check and the
+  // claim cannot be pulled apart and two concurrent summaries cannot both land:
+  // they serialise on the run row, and the loser's whole transaction — comment
+  // included — rolls back on the `conflict` the caller throws. Running here
+  // rather than at admission is what makes "spent" mean "recorded" instead of
+  // "attempted", with no compensating release to miss.
+  async function claimAuditCommentGrant(
+    scope: { companyId: string; runId?: string | null },
+    dbOrTx: any = db,
+  ) {
+    if (!scope.runId) return AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL;
+    const spentPath = auditCommentSpentPath();
+    const claimed = await dbOrTx
       .update(heartbeatRuns)
       .set({
         contextSnapshot: sql`jsonb_set(
@@ -2246,37 +2285,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         sql`(${heartbeatRuns.contextSnapshot} #>> (${spentPath})) is null`,
       ))
       .returning({ id: heartbeatRuns.id });
-    if (claimed.length === 0) {
-      return "Task-watchdog runs get one summary comment on the watched issue once the subtree has its own execution path again; this run has already recorded what it did.";
-    }
-    return null;
-  }
-
-  // Undoes a claim whose comment never landed, so the run can retry the summary
-  // it has not yet written. The marker is deleted rather than set to null: the
-  // claim tests `#>> path is null`, which a JSON null also satisfies, but a key
-  // that is absent is the state the run was in before the claim and leaves
-  // nothing for a later reader to misread as "spent, then unspent".
-  //
-  // This is not a general un-spend. It runs only on the response that claimed
-  // the grant and only when that response wrote no comment, so it cannot return
-  // a summary the run already posted. A concurrent racer that was refused in
-  // between keeps its refusal — it has to ask again, and asking again is free.
-  // A process that dies between the insert and this decision leaves the grant
-  // spent, which is the fail-closed direction.
-  async function releaseAuditCommentGrant(scope: { companyId: string; runId?: string | null }) {
-    if (!scope.runId) return false;
-    const spentPath = auditCommentSpentPath();
-    const released = await db
-      .update(heartbeatRuns)
-      .set({ contextSnapshot: sql`${heartbeatRuns.contextSnapshot} #- (${spentPath})` })
-      .where(and(
-        eq(heartbeatRuns.id, scope.runId),
-        eq(heartbeatRuns.companyId, scope.companyId),
-        sql`(${heartbeatRuns.contextSnapshot} #>> (${spentPath})) is not null`,
-      ))
-      .returning({ id: heartbeatRuns.id });
-    return released.length > 0;
+    return claimed.length === 0 ? AUDIT_COMMENT_GRANT_SPENT_DENIAL : null;
   }
 
   async function revalidateMutationScope(scope: {
@@ -2475,7 +2484,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           liveOwnedIssueIds: executionPathIssueIds,
         };
       }
-      const denial = await claimAuditCommentGrant(scope);
+      const denial = await auditCommentGrantDenial(scope);
       if (denial) {
         return {
           allowed: false as const,
@@ -2764,7 +2773,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     },
 
     revalidateMutationScope,
-    releaseAuditCommentGrant,
+    claimAuditCommentGrant,
     recordAuthorizedMutation,
   };
 }
