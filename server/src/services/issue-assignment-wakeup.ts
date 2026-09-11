@@ -1,4 +1,5 @@
 import { logger } from "../middleware/logger.js";
+import { TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY } from "./task-watchdog-scope.js";
 
 type WakeupTriggerDetail = "manual" | "ping" | "callback" | "system";
 type WakeupSource = "timer" | "assignment" | "on_demand" | "automation";
@@ -37,6 +38,11 @@ export function queueIssueAssignmentWakeup(input: {
   requestedByActorId?: string | null;
   taskKey?: string | null;
   rethrowOnError?: boolean;
+  // Set when the request firing this wake is acting under a task-watchdog
+  // mutation scope. Stamped into the payload so the live path this wake starts
+  // carries the watchdog run that caused it; see
+  // `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY`.
+  watchdogOriginRunId?: string | null;
 }) {
   const assigneeAgentId = input.issue.assigneeAgentId;
   if (!assigneeAgentId || !issueAssignmentWakeupFires(input.issue)) return;
@@ -50,6 +56,9 @@ export function queueIssueAssignmentWakeup(input: {
         issueId: input.issue.id,
         mutation: input.mutation,
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
+        ...(input.watchdogOriginRunId
+          ? { [TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY]: input.watchdogOriginRunId }
+          : {}),
       },
       requestedByActorType: input.requestedByActorType,
       requestedByActorId: input.requestedByActorId ?? null,

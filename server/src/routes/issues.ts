@@ -158,6 +158,7 @@ import {
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
+  TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY,
   resolveTaskWatchdogMutationScope,
   taskWatchdogScopeAllowsIssueMutation,
 } from "../services/task-watchdog-scope.js";
@@ -2196,6 +2197,9 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   workspaceRefreshReason?: string | null;
   newlyResolvedItemIds?: string[];
   idempotencyKey?: string | null;
+  // Set when the resolving request is acting under a task-watchdog mutation
+  // scope; see `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY`.
+  watchdogOriginRunId?: string | null;
 }) {
   if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status)) return false;
 
@@ -2312,6 +2316,12 @@ async function queueResolvedInteractionContinuationWakeup(input: {
           : {}),
         ...(reviewPathContext ?? {}),
         mutation: "interaction",
+        // A watchdog run resolving an interaction is starting the path it is
+        // about to be held responsible for; stamp the wake so the resulting
+        // live path says which run caused it.
+        ...(input.watchdogOriginRunId
+          ? { [TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY]: input.watchdogOriginRunId }
+          : {}),
       },
       idempotencyKey:
         input.idempotencyKey ??
@@ -4380,6 +4390,34 @@ export function issueRoutes(
   function noteTaskWatchdogStartedWork(res: Response, issueId: string) {
     if (!issueId) return;
     noteTaskWatchdogAuthorizedWrite(res, { issueId, declared: {}, startsWork: true });
+  }
+
+  // The watchdog run this request is acting under, if any.
+  //
+  // Every wake a watchdog-scoped request fires is stamped with it, so the live
+  // path that wake produces carries its own provenance and the guard can tell
+  // the run it started from one that merely happens to be running on the same
+  // issue. The ledger cannot supply that: the enqueues run in a detached tail
+  // after the response, long after the ledger has settled, so no wake id can be
+  // reported back in time. The stamp travels forward instead of the id
+  // travelling back.
+  //
+  // Absent a watchdog scope this is null and nothing is stamped — an ordinary
+  // request's wake is nobody's watchdog recovery.
+  function taskWatchdogWakeOriginRunId(res: Response) {
+    return pendingTaskWatchdogRecords.get(res)?.scope.runId ?? null;
+  }
+
+  // Adds the stamp to a wake payload about to be enqueued. Returns the payload
+  // unchanged when this request is not a watchdog's, so the common path carries
+  // no extra key.
+  function stampTaskWatchdogWakeOrigin(
+    res: Response,
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    const runId = taskWatchdogWakeOriginRunId(res);
+    if (!runId) return payload;
+    return { ...(payload ?? {}), [TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY]: runId };
   }
 
   function requestedBlockerIssueIds(req: Request) {
@@ -9793,6 +9831,7 @@ export function issueRoutes(
       contextSource: "issue.create",
       requestedByActorType: actor.actorType,
       requestedByActorId: actor.actorId,
+      watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
     });
     noteTaskWatchdogCreatedIssue(req, res, issue);
     await queueTaskWatchdogEvaluation(issue, actor.runId);
@@ -9965,6 +10004,7 @@ export function issueRoutes(
         contextSource: "issue.child_create",
         requestedByActorType: actor.actorType,
         requestedByActorId: actor.actorId,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
       });
     }
     await blockWatchdogParentOnCurrentChild({
@@ -10174,6 +10214,7 @@ export function issueRoutes(
           contextSource: "issue.accepted_plan_decomposition",
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         });
       }
       // Creating through the plan-decomposition route is a watched-subtree
@@ -11571,11 +11612,15 @@ export function issueRoutes(
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
             : issue.id;
-        wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
         // Every wake this route fires funnels through here — assignment, status
         // transition, comment, execution stage, dependency resolved — so the
         // watchdog ledger learns which issues this request actually started
-        // work on without each of those sites having to remember to say so.
+        // work on, and the wake itself carries which watchdog run started it,
+        // without each of those sites having to remember to say so.
+        wakeups.set(`${agentId}:${wakeIssueId}`, {
+          agentId,
+          wakeup: { ...wakeup, payload: stampTaskWatchdogWakeOrigin(res, wakeup.payload) },
+        });
         noteTaskWatchdogStartedWork(res, wakeIssueId);
       };
       const addDependencyResolvedWakeup = async (input: {
@@ -12999,6 +13044,7 @@ export function issueRoutes(
           contextSource: "issue.interaction.accept",
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         });
       }
 
@@ -13019,6 +13065,7 @@ export function issueRoutes(
         issue: { ...continuationWakeIssue, companyId: issue.companyId },
         interaction: continuationInteraction,
         actor,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         source: "issue.interaction.accept",
         forceFreshSession: acceptedPlanConfirmation,
         workspaceRefreshReason: acceptedPlanConfirmation ? "accepted_plan_confirmation" : null,
@@ -13103,6 +13150,7 @@ export function issueRoutes(
         issue,
         interaction,
         actor,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         source: "issue.interaction.reject",
       })) noteTaskWatchdogStartedWork(res, issue.id);
 
@@ -13249,6 +13297,7 @@ export function issueRoutes(
           issue,
           interaction,
           actor,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
           source: "issue.interaction.verdicts",
           newlyResolvedItemIds,
           idempotencyKey: buildRequestItemVerdictsWakeIdempotencyKey({
@@ -13338,6 +13387,7 @@ export function issueRoutes(
           issue,
           interaction,
           actor,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
           source: "issue.interaction.withdraw",
         })) noteTaskWatchdogStartedWork(res, issue.id);
       }
@@ -13471,6 +13521,7 @@ export function issueRoutes(
         issue,
         interaction,
         actor,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         source: "issue.interaction.cancel",
       })) noteTaskWatchdogStartedWork(res, issue.id);
 
@@ -14234,9 +14285,14 @@ export function issueRoutes(
             : currentIssue.id;
         const key = `${agentId}:${wakeIssueId}`;
         if (wakeups.has(key)) return;
-        wakeups.set(key, { agentId, wakeup });
         // Same funnel as the update route: the wake this comment fires is the
-        // fact the watchdog guard needs, and it is only knowable here.
+        // fact the watchdog guard needs, and it is only knowable here — both
+        // the declaration and the provenance stamp the resulting live path
+        // carries.
+        wakeups.set(key, {
+          agentId,
+          wakeup: { ...wakeup, payload: stampTaskWatchdogWakeOrigin(res, wakeup.payload) },
+        });
         noteTaskWatchdogStartedWork(res, wakeIssueId);
       };
       const addDependencyResolvedWakeup = async (input: {

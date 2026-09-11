@@ -158,6 +158,10 @@ vi.mock("../telemetry.js", () => ({
 
 vi.mock("../services/task-watchdog-scope.js", () => ({
   TASK_WATCHDOG_ORIGIN_KIND: "task_watchdog",
+  // Spelled out rather than omitted: the routes and the assignment-wake helper
+  // both read this binding, and vitest throws on an export a mock does not
+  // declare, so leaving it out turns every wake-firing route into a 500.
+  TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY: "_paperclipWatchdogOriginRunId",
   resolveTaskWatchdogMutationScope: mockResolveTaskWatchdogMutationScope,
   taskWatchdogScopeAllowsIssueMutation: vi.fn(async (_db, scope) => scope),
 }));
@@ -2177,7 +2181,7 @@ describe.sequential("issue thread interaction routes", () => {
       .post(`/api/issues/${issue.id}/interactions/interaction-watchdog-decline/reject`)
       .send({ reason: "Not yet." });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(mockRecordAuthorizedMutation).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "watchdog" }),
       expect.objectContaining({

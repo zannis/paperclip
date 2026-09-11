@@ -5,6 +5,28 @@ import { heartbeatRuns, issues, issueWatchdogs } from "@paperclipai/db";
 const MAX_WATCHDOG_SCOPE_ANCESTRY_DEPTH = 100;
 export const TASK_WATCHDOG_ORIGIN_KIND = "task_watchdog";
 
+// Payload key a route stamps onto every wake it fires while acting under a
+// task-watchdog mutation scope, naming the watchdog run that caused it.
+//
+// It lives in the wake request's payload because that is the only place both
+// ends can reach. The route knows the run id synchronously, but the enqueue
+// itself completes in a detached tail after the response — long after the
+// mutation ledger has settled — so no wake id can be reported back in time for
+// the ledger to record it. The stamp travels forward with the wake instead: the
+// queued request carries it, and the heartbeat run the wake starts inherits it
+// through `heartbeat_runs.wakeup_request_id`. That is what lets the mutation
+// guard tell the live path this run caused from one that merely happens to be
+// running on the same issue.
+//
+// It sits in this module for the same reason the terminal run statuses below
+// do: this is the end of the dependency edge, reachable from the guard in
+// `task-watchdogs.ts` and from the wake helpers the routes call, with no cycle.
+//
+// Underscore-prefixed to match the other reserved wake-payload keys
+// (`_paperclipWakeContext`) and keep it out of anything treating the payload as
+// caller-supplied data.
+export const TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY = "_paperclipWatchdogOriginRunId";
+
 // A run that has reached one of these is over. It lives here, next to the
 // resolver that has to refuse it, rather than in `task-watchdogs.ts` — that
 // module imports this one, so this is the end of the dependency edge both

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -163,6 +163,28 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
 
   function uniqueIssuePrefix() {
     return `W${randomUUID().replace(/-/g, "").slice(0, 5).toUpperCase()}`;
+  }
+
+  // The wake an issue route fired, once it lands. Routes enqueue their wakes in
+  // a detached tail that outlives the response, so a test reading the row
+  // straight after `await request(...)` races it. Polling keeps the assertion
+  // on the real row the route produced rather than a stand-in.
+  async function waitForIssueWake(companyId: string, issueId: string, timeoutMs = 5_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [row] = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, companyId),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+        ));
+      if (row) return row;
+      if (Date.now() >= deadline) {
+        throw new Error(`No wake request landed for issue ${issueId} within ${timeoutMs}ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   async function seedCloudTenantMember(companyId: string) {
@@ -798,13 +820,25 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .send({ assigneeAgentId: workerAgentId });
     expect(revived.status, JSON.stringify(revived.body)).toBe(200);
 
-    // The wake lands and the leaf is now genuinely being worked. The subtree is
-    // `live`, and no stop fingerprint exists for the run to hold.
+    // The route fires that wake in a detached tail, so wait for the real row
+    // rather than standing one in. It carries the watchdog run that caused it,
+    // which is the provenance the guard reads back — proving the stamp survives
+    // the round trip through the actual route, not just through the service.
+    const wake = await waitForIssueWake(companyId, watchedChildId);
+    expect((wake.payload as Record<string, unknown> | null)?._paperclipWatchdogOriginRunId).toBe(runId);
+
+    // The runner claims that wake and starts a run from it. The run inherits
+    // the provenance through `wakeup_request_id`, which is how a live path says
+    // whose recovery it is.
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
     await db.insert(heartbeatRuns).values({
       companyId,
       agentId: workerAgentId,
       status: "running",
       invocationSource: "assignment",
+      wakeupRequestId: wake.id,
       contextSnapshot: { issueId: watchedChildId },
     });
 
@@ -812,6 +846,68 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .post(`/api/issues/${watchedRootId}/comments`)
       .send({ body: "Reassigned the stalled leaf to a live agent." });
     expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+  });
+
+  // The negative control for the one above, and the defect it closes: the
+  // watchdog really did wake the leaf, but the path running on it now is not
+  // the one it started. An issue-level "this run woke that issue" boolean
+  // cannot tell the two apart and hands a third party's run to the watchdog as
+  // its own doing; provenance carried on the path itself can.
+  it("refuses a watchdog run's summary comment when the live path on the leaf it woke is somebody else's", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const strangerAgentId = await seedAgent(companyId, { name: "Unrelated Worker" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    // The watchdog's own wake is consumed without ever producing a run — it
+    // failed, was coalesced away, or its run has already finished.
+    const wake = await waitForIssueWake(companyId, watchedChildId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "failed", finishedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+
+    // Somebody else then starts the same leaf while the watchdog run is still
+    // going. Nothing the ledger records distinguishes this from the recovery
+    // the watchdog performed; the path carries no stamp of this run's.
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: strangerAgentId,
+      status: "running",
+      invocationSource: "on_demand",
+      contextSnapshot: { issueId: watchedChildId },
+    });
+
+    const comment = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Reassigned the stalled leaf to a live agent." });
+    expect(comment.status).toBe(409);
+    expect(comment.body?.details?.unattributedLivenessIssueIds).toEqual([watchedChildId]);
   });
 
   // The negative control for the grant above: liveness this run's ledger does

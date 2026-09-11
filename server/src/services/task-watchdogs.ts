@@ -27,6 +27,7 @@ import {
   isTerminalWatchdogRunStatus,
   TASK_WATCHDOG_ORIGIN_KIND,
   TASK_WATCHDOG_TERMINAL_RUN_STATUSES,
+  TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY,
 } from "./task-watchdog-scope.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
@@ -85,6 +86,19 @@ export type TaskWatchdogClassifierPath = {
   issueId: string | null;
   agentId?: string | null;
   status: string;
+  // Which task-watchdog run, if any, enqueued the wake this path came from.
+  //
+  // Stamped into the wake request's payload by the route that fired it, under
+  // `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY`, and carried by the heartbeat run
+  // the wake later started through `heartbeat_runs.wakeup_request_id`. So the
+  // provenance travels with the live path itself rather than being reconstructed
+  // from a ledger, which is what lets the guard tell the run it started from one
+  // that merely happens to be running on the same issue.
+  //
+  // `null` means "nobody's watchdog" — an ordinary wake, a path started before
+  // stamping existed, or a run with no wake request behind it. That is a third
+  // party for every watchdog run, which is the conservative reading.
+  watchdogOriginRunId?: string | null;
 };
 
 export type TaskWatchdogClassifierWaitingPath = {
@@ -171,6 +185,11 @@ export type TaskWatchdogClassifierResult =
     reason: string;
     includedIssueIds: string[];
     liveIssueIds: string[];
+    // Every live path on each live issue, reduced to the watchdog run that
+    // enqueued its wake (`null` when no watchdog did). A run may only claim an
+    // issue's liveness as its own doing when *every* path on it names that run,
+    // so the list is carried whole rather than collapsed to a boolean.
+    livePathOriginRunIdsByIssueId: Record<string, Array<string | null>>;
     // Present on non-stopped states too, so a mutation guard can still diff the
     // fingerprint inputs. On these states it describes the subtree, not a
     // verdict: the subtree is *not* stopped and `fingerprint` inside it must
@@ -304,6 +323,39 @@ function toEpochMs(value: Date | string | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+// Reads the originating watchdog run id off a joined `agent_wakeup_requests`
+// row. Kept as one helper so the payload key is spelled once on the SQL side
+// and cannot drift from the key the routes stamp with.
+function watchdogWakeOriginColumn() {
+  // The key is bound as a parameter rather than inlined; the explicit `::text`
+  // keeps `->>` from being ambiguous between its text and integer overloads.
+  return sql<string | null>`${agentWakeupRequests.payload} ->> ${TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY}::text`;
+}
+
+// Every live path in the company's subtree, grouped by the issue it runs on and
+// reduced to the watchdog run that enqueued it. Paths are kept individually
+// rather than deduplicated: two runs on one issue with different provenance is
+// exactly the case the attribution check has to be able to see.
+function livePathOriginsByIssueId(
+  pathGroups: Array<TaskWatchdogClassifierPath[] | undefined>,
+  companyId: string,
+  includedIdSet: ReadonlySet<string>,
+) {
+  const origins = new Map<string, Array<string | null>>();
+  for (const paths of pathGroups) {
+    for (const path of paths ?? []) {
+      if (path.companyId !== companyId) continue;
+      const issueId = typeof path.issueId === "string" ? path.issueId : "";
+      if (issueId.length === 0 || !includedIdSet.has(issueId)) continue;
+      const existing = origins.get(issueId);
+      const origin = path.watchdogOriginRunId ?? null;
+      if (existing) existing.push(origin);
+      else origins.set(issueId, [origin]);
+    }
+  }
+  return origins;
+}
+
 function pathIssueIds(paths: TaskWatchdogClassifierPath[] | undefined, companyId: string) {
   return new Set(
     (paths ?? [])
@@ -432,6 +484,13 @@ export type TaskWatchdogAuthorizedMutation = {
   // stage), and re-deriving it here from the declared values can only ever
   // produce a guess. A guess that says "yes" attributes a third party's run to
   // this one, which is the guard failing open.
+  //
+  // Scope: this answers `pending_first_run` only, where there is no execution
+  // path in existence yet to read provenance from. It deliberately does *not*
+  // decide a `live` issue — an issue-level boolean cannot name which wake, so
+  // it cannot tell this run's wake from a third party's later one on the same
+  // issue. There the provenance travels with the path itself; see
+  // `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY` and `unattributedLiveIssueIds`.
   startsWork?: boolean;
 };
 
@@ -703,31 +762,68 @@ function declaredStepsCanStartWork(mutations: TaskWatchdogAuthorizedMutation[]) 
   return mutations.some((mutation) => mutation?.startsWork === true);
 }
 
-// Whether the reason the subtree is no longer stopped is this run's own doing.
-// A watchdog that reopens a leaf or creates a follow-up child makes the subtree
-// live or pending-first-run by design — that is the recovery working — and the
-// mandate then asks it to record what it did. Liveness nobody in this run's
-// ledger accounts for is a third party and still stops the run dead.
+// Which live issues this run cannot show it is the cause of.
 //
-// `creationExplains` separates the two verdicts this runs for. A `live` issue
-// has an actual run or a queued wake on it, and only a wake this run enqueued
-// accounts for that. A `pending_first_run` issue has neither: the classifier
-// defers on it because it is newly created and has never completed a run, so
-// what has to be accounted for is the *creation*, which the ledger records as a
-// fact and `unattributedSubtreeChanges` has already checked field by field. A
-// follow-up this run created and left unassigned wakes nobody and is still
-// exactly why the subtree reads pending.
-function unattributedLivenessIssueIds(
+// A watchdog that reopens a leaf makes the subtree live by design — that is the
+// recovery working — and the mandate then asks it to record what it did.
+// Liveness it cannot account for is a third party and still stops it dead.
+//
+// The question is causation, and a declaration cannot answer it. `startsWork`
+// says only "this run enqueued *a* wake for this issue at some point"; it names
+// neither the wake nor the run that wake started, so any later path on the same
+// issue satisfies it. If the run's wake was coalesced away, failed, or ran to
+// completion, and somebody else then starts the same issue while this run is
+// still going, an issue-level boolean reports that third party as this run's
+// own doing — the guard failing open in the place it exists to hold.
+//
+// So the provenance travels with the path instead. The route stamps the
+// originating watchdog run id into the wake payload as it fires it; the wake
+// carries it while queued, and the heartbeat run it starts inherits it through
+// `heartbeat_runs.wakeup_request_id`. Here we simply ask whether *every* path
+// on the issue names this run. One unstamped or foreign-stamped path is enough
+// to disown the issue: a leaf this run woke that somebody else also woke is a
+// contested leaf, not an attributed one.
+//
+// An unstamped path reads as a third party's, which is the conservative
+// direction — a route that wakes somebody and does not stamp it gets the
+// behaviour that predates any of this, a rejected next mutation, rather than a
+// misattributed grant.
+function unattributedLiveIssueIds(
+  runId: string | null,
+  livePathOriginRunIdsByIssueId: Record<string, Array<string | null>>,
+  liveIssueIds: string[],
+) {
+  return liveIssueIds
+    .filter((issueId) => {
+      if (!runId) return true;
+      const origins = livePathOriginRunIdsByIssueId[issueId] ?? [];
+      // No paths recorded for an issue the classifier called live means the
+      // liveness came from somewhere this cannot see; that is not causation.
+      if (origins.length === 0) return true;
+      return !origins.every((origin) => origin === runId);
+    })
+    .sort();
+}
+
+// The same question for `pending_first_run`, where it has a different answer.
+//
+// Such an issue has no run and no queued wake at all — the classifier defers on
+// it precisely because it is newly created, has never completed a run, and its
+// first path may not be visible yet. There is no path to read provenance from,
+// so what has to be accounted for is the *creation*, which the ledger records
+// as a fact and `unattributedSubtreeChanges` has already checked field by
+// field. A follow-up this run created and left unassigned wakes nobody and is
+// still exactly why the subtree reads pending.
+function unattributedPendingIssueIds(
   ledger: TaskWatchdogMutationLedger,
-  livenessIssueIds: string[],
-  creationExplains: boolean,
+  pendingIssueIds: string[],
 ) {
   const mutationsByIssueId = declaredMutationsByIssueId(ledger.mutations ?? []);
-  return livenessIssueIds
+  return pendingIssueIds
     .filter((issueId) => {
       const mutations = mutationsByIssueId.get(issueId);
       if (!mutations) return true;
-      if (creationExplains && mutations.some((mutation) => mutation?.created === true)) return false;
+      if (mutations.some((mutation) => mutation?.created === true)) return false;
       return !declaredStepsCanStartWork(mutations);
     })
     .sort();
@@ -888,11 +984,19 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
   ].filter((issueId) => includedIdSet.has(issueId));
   const uniqueLiveIssueIds = [...new Set(liveIssueIds)].sort();
   if (uniqueLiveIssueIds.length > 0) {
+    const originsByIssueId = livePathOriginsByIssueId(
+      [input.activeRuns, input.queuedWakeRequests],
+      input.watchdog.companyId,
+      includedIdSet,
+    );
     return {
       state: "live",
       reason: "At least one issue in the watched subtree has a live run, queued wake, or scheduled retry.",
       includedIssueIds: includedIds,
       liveIssueIds: uniqueLiveIssueIds,
+      livePathOriginRunIdsByIssueId: Object.fromEntries(
+        uniqueLiveIssueIds.map((issueId) => [issueId, originsByIssueId.get(issueId) ?? []]),
+      ),
       stopSnapshot: currentStopSnapshot,
       materialByIssueId,
     };
@@ -1371,8 +1475,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           agentId: heartbeatRuns.agentId,
           status: heartbeatRuns.status,
           contextSnapshot: heartbeatRuns.contextSnapshot,
+          // A run inherits its provenance from the wake that started it. The
+          // join is left so a run with no wake request behind it still reports,
+          // with a null origin — an unattributable path, which is what it is.
+          watchdogOriginRunId: watchdogWakeOriginColumn(),
         })
         .from(heartbeatRuns)
+        .leftJoin(agentWakeupRequests, eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id))
         .where(and(
           eq(heartbeatRuns.companyId, companyId),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
@@ -1387,9 +1496,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           agentId: heartbeatRuns.agentId,
           status: heartbeatRuns.status,
           issueId: issues.id,
+          watchdogOriginRunId: watchdogWakeOriginColumn(),
         })
         .from(issues)
         .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .leftJoin(agentWakeupRequests, eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id))
         .where(and(
           eq(issues.companyId, companyId),
           inArray(issues.id, subtreeIssueIds),
@@ -1402,6 +1513,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           agentId: agentWakeupRequests.agentId,
           status: agentWakeupRequests.status,
           payload: agentWakeupRequests.payload,
+          watchdogOriginRunId: watchdogWakeOriginColumn(),
         })
         .from(agentWakeupRequests)
         .where(and(
@@ -1523,12 +1635,17 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         agentId: row.agentId,
         status: row.status,
         issueId: issueIdFromRunContext(row.contextSnapshot),
-      })).concat(activeIssueRunRows),
+        watchdogOriginRunId: row.watchdogOriginRunId ?? null,
+      })).concat(activeIssueRunRows.map((row) => ({
+        ...row,
+        watchdogOriginRunId: row.watchdogOriginRunId ?? null,
+      }))),
       queuedWakeRequests: wakeRows.map((row) => ({
         companyId: row.companyId,
         agentId: row.agentId,
         status: row.status,
         issueId: issueIdFromWakePayload(row.payload),
+        watchdogOriginRunId: row.watchdogOriginRunId ?? null,
       })),
       blockers: blockerRows,
       pendingInteractions: interactionRows,
@@ -2164,9 +2281,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
     });
     const unattributedLiveness = classification.state === "live"
-      ? unattributedLivenessIssueIds(ledger, classification.liveIssueIds, false)
+      ? unattributedLiveIssueIds(
+        scope.runId ?? null,
+        classification.livePathOriginRunIdsByIssueId,
+        classification.liveIssueIds,
+      )
       : classification.state === "pending_first_run"
-      ? unattributedLivenessIssueIds(ledger, classification.pendingIssueIds, true)
+      ? unattributedPendingIssueIds(ledger, classification.pendingIssueIds)
       : [];
     if (unattributedIssueIds.length > 0 || unattributedLiveness.length > 0) {
       return {
@@ -2186,35 +2307,48 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     // and an interaction resolution is what turned the narrow grant this guard
     // exists to restore into general authority over the subtree.
     //
-    // The distinction that matters is ownership. Once the recovery has done its
-    // job the subtree has a live path again, and the issue carrying it has an
-    // owner that is not this watchdog. Closing, blocking or reassigning that
-    // issue now races a running agent — an authority the watchdog never needed
-    // and was never meant to have. The mandated audit comment is different in
-    // kind: it cannot rotate the fingerprint or change the classification, so
-    // it stays admitted, which is the whole point of the relaxation.
+    // The line is drawn by the classification, not by the target. Once the
+    // subtree has an execution path again — `live`, or `pending_first_run`
+    // where the path is queued rather than started — the recovery this run was
+    // woken for has succeeded and its remaining mandate is exactly one write:
+    // the summary comment on the watched issue, saying what it did. That
+    // comment is inert by construction (`materialLeaf` strips
+    // `latestCommentAt`, so it can neither rotate the stop fingerprint nor
+    // change the classification) and it is the whole point of the relaxation.
     //
-    // Idle leaves elsewhere in the subtree are untouched by this: the run may
-    // still finish the rest of its recovery on them. It is specifically the
-    // issue that now has its own live or imminent execution path that is off
-    // limits, and a state change that will not say what it targets is refused
-    // rather than assumed harmless.
-    if (intent !== "comment") {
-      const ownedIssueIds = classification.state === "live"
-        ? classification.liveIssueIds
-        : classification.state === "pending_first_run"
-        ? classification.pendingIssueIds
-        : [];
-      if (ownedIssueIds.length > 0 && (targetIssueId == null || ownedIssueIds.includes(targetIssueId))) {
-        return {
-          allowed: false as const,
-          reason: targetIssueId == null
-            ? "Task-watchdog runs may only add a comment once the watched subtree has a live execution path; this request did not declare which issue it writes."
-            : "Task-watchdog runs may only add a comment to an issue that now has its own live execution path; its owner is not the watchdog.",
-          classification,
-          liveOwnedIssueIds: ownedIssueIds,
-        };
-      }
+    // Everything else is refused here, and the target is not what decides it:
+    //
+    //  - A state change aimed at an idle sibling is still refused. It is not
+    //    racing that sibling's owner, but it is authority claimed against a
+    //    subtree that is already running again, and the classifier's own
+    //    verdict says this run's window has closed. If that sibling is still
+    //    stale when the subtree stops next, the watchdog is woken again with a
+    //    fresh fingerprint and the full grant.
+    //  - A *comment* on anything other than the watched issue is refused too.
+    //    A comment is only inert with respect to the fingerprint; the comment
+    //    route still enqueues `issue_commented` and mention wakes, so a comment
+    //    on a recovered leaf signals or steers the owner this run just started.
+    //    The mandate asks for a summary on the source issue and nothing else,
+    //    so that is all the exception covers.
+    //
+    // A `stopped` (at a fingerprint the ledger accounts for) or
+    // `already_reviewed` subtree has no execution path at all — `live` is
+    // decided first and returns early — so there is no owner to race and the
+    // run keeps the full grant to finish a multi-step recovery.
+    const executionPathIssueIds = classification.state === "live"
+      ? classification.liveIssueIds
+      : classification.state === "pending_first_run"
+      ? classification.pendingIssueIds
+      : [];
+    if (executionPathIssueIds.length > 0 && !(intent === "comment" && targetIssueId === scope.watchedIssueId)) {
+      return {
+        allowed: false as const,
+        reason: intent === "comment"
+          ? "Task-watchdog runs may only comment on the watched issue once the subtree has its own execution path again; a comment elsewhere wakes an owner that is not the watchdog."
+          : "Task-watchdog runs may only add their summary comment to the watched issue once the subtree has its own execution path again; state changes are no longer theirs to make.",
+        classification,
+        liveOwnedIssueIds: executionPathIssueIds,
+      };
     }
 
     // The baseline stays put. Drift is always measured from the state the run
