@@ -483,6 +483,9 @@ function noopTaskWatchdogService(): TaskWatchdogService {
         baselineMaterialByIssueId: {},
       },
     }),
+    // Nothing is ever claimed without the real service, so there is nothing to
+    // give back.
+    releaseAuditCommentGrant: async () => false,
     recordAuthorizedMutation: async (
       _scope: Parameters<TaskWatchdogService["recordAuthorizedMutation"]>[0],
       _entry: Parameters<TaskWatchdogService["recordAuthorizedMutation"]>[1],
@@ -1802,6 +1805,25 @@ function issueCommentWatchdogIntent(body: unknown): "comment" | "mutate" {
   const payload = readObject(body);
   if (payload.resume === true || payload.reopen === true || payload.interrupt === true) return "mutate";
   return typeof payload.body === "string" && isApprovalReviewComment(payload.body) ? "mutate" : "comment";
+}
+
+// The same question for `PATCH /issues/:id`, which also accepts a `comment`.
+// Whether that request is inert cannot be decided field by field here the way
+// it can on the comment route: this body can carry a status, an assignee, a
+// blocker list and a review verdict alongside the comment, and each of those is
+// a state change no matter what the comment says. So the rule is the strict
+// one — a lone `comment` and nothing else is a comment; every other shape is a
+// mutation, including a body with no comment at all.
+function issueUpdateWatchdogIntent(body: unknown): "comment" | "mutate" {
+  const payload = readObject(body);
+  const setKeys = Object.keys(payload).filter((key) => payload[key] !== undefined);
+  if (setKeys.length !== 1 || setKeys[0] !== "comment") return "mutate";
+  const comment = payload.comment;
+  if (typeof comment !== "string" || comment.trim().length === 0) return "mutate";
+  // An approval comment moves the issue through its execution policy, so it is
+  // a state change wearing a comment's clothes — the same carve-out the comment
+  // route makes.
+  return isApprovalReviewComment(comment) ? "mutate" : "comment";
 }
 
 function buildExecutionStageWakeContext(input: {
@@ -4171,9 +4193,11 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
+      const watchdogAllowed = await assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
         intent: issueCommentWatchdogIntent(req.body),
       });
+      if (watchdogAllowed) taskWatchdogGrantedCommentResponses.add(res);
+      return watchdogAllowed;
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
@@ -4244,7 +4268,17 @@ export function issueRoutes(
       /** Used only to name the task in denial copy (plan §6). */
       identifier?: string | null;
     },
-    options: { allowVisibleIssueWrite?: boolean } = {},
+    options: {
+      allowVisibleIssueWrite?: boolean;
+      // What this request is to the watchdog freshness guard. The guard's line
+      // is drawn per request, not per route: `PATCH /issues/:id` carries a
+      // `comment` field, so the mandated summary can arrive through the
+      // mutation gate as readily as through `POST /comments`, and revalidating
+      // it as a state change is what refuses it once the run's own recovery has
+      // restored the subtree. Routes that can carry a comment say so; the
+      // default stays `mutate`, which is where a caller that forgets belongs.
+      watchdogIntent?: "comment" | "mutate";
+    } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -4273,7 +4307,9 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
+      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
+        intent: options.watchdogIntent,
+      });
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:mutate");
     if (!boundaryDecision.allowed) {
@@ -4366,6 +4402,30 @@ export function issueRoutes(
 
   function isTaskWatchdogAuditComment(res: Response) {
     return taskWatchdogAuditCommentResponses.has(res);
+  }
+
+  // The comment the audit grant was claimed for actually reached the thread.
+  // The claim is provisional until this is set: admission is several checks and
+  // one insert away from the write the grant exists for, and a run that is
+  // admitted and then refused downstream would otherwise have burnt its one
+  // summary on a request that wrote nothing. Every route that can write the
+  // granted comment marks it here, immediately after the insert returns.
+  const taskWatchdogAuditCommentLanded = new WeakSet<Response>();
+
+  function noteTaskWatchdogAuditCommentLanded(res: Response) {
+    if (taskWatchdogAuditCommentResponses.has(res)) taskWatchdogAuditCommentLanded.add(res);
+  }
+
+  // Requests whose comment the watchdog scope itself authorized. The scope is a
+  // complete authorization for that write — it mediated the subtree, the
+  // freshness of the run's wake, and the intent of this very request — so a
+  // route that re-runs the generic mutation gate afterwards is not adding a
+  // check, it is asking a second, stricter question about the same comment and
+  // taking its `no`. See the closed-issue re-check in `POST /issues/:id/comments`.
+  const taskWatchdogGrantedCommentResponses = new WeakSet<Response>();
+
+  function isTaskWatchdogGrantedComment(res: Response) {
+    return taskWatchdogGrantedCommentResponses.has(res);
   }
 
   // Recording the ledger is two short queries. This bound only exists so a
@@ -4716,6 +4776,31 @@ export function issueRoutes(
     };
   }
 
+  // Hangs the other half of the provisional claim off the response: when the
+  // request that claimed the audit grant ends without having written the
+  // comment, the grant goes back. `finish` fires for every terminal outcome
+  // this route layer can produce — a downstream 403, a 409 from a later guard,
+  // the 500 an error handler turns a failed insert into — so the release does
+  // not have to enumerate them, and it cannot fire while a comment is still in
+  // flight.
+  function scheduleAuditCommentGrantRelease(
+    res: Response,
+    scope: Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>,
+  ) {
+    res.once("finish", () => {
+      if (taskWatchdogAuditCommentLanded.has(res)) return;
+      void taskWatchdogsSvc.releaseAuditCommentGrant(scope).catch((err) => {
+        // Failing to release is fail-closed — the run keeps a spent grant it
+        // never used — but it is silent from the outside, and the next summary
+        // 409s with no way to tell this apart from a genuine second attempt.
+        logger.warn(
+          { err, watchdogId: scope.watchdogId, watchedIssueId: scope.watchedIssueId, runId: scope.runId ?? null },
+          "task watchdog audit comment grant release failed",
+        );
+      });
+    });
+  }
+
   async function assertFreshTaskWatchdogSourceMutation(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
@@ -4734,7 +4819,10 @@ export function issueRoutes(
       targetIssueId: issue.id,
     });
     if (revalidated.allowed) {
-      if (revalidated.auditCommentOnly) taskWatchdogAuditCommentResponses.add(res);
+      if (revalidated.auditCommentOnly) {
+        taskWatchdogAuditCommentResponses.add(res);
+        scheduleAuditCommentGrantRelease(res, scope);
+      }
       scheduleTaskWatchdogRecord(res, scope, revalidated);
       return true;
     }
@@ -10442,7 +10530,7 @@ export function issueRoutes(
       req,
       res,
       existing,
-      { allowVisibleIssueWrite: true },
+      { allowVisibleIssueWrite: true, watchdogIntent: issueUpdateWatchdogIntent(req.body) },
     );
     if (!issueMutationAccess) return;
     const issueMutationAuthorizationReason = req.actor.type === "agent"
@@ -11498,6 +11586,7 @@ export function issueRoutes(
         authorizationReason: issueMutationAuthorizationReason,
         sourceTrust: await sourceTrustForActorWrite(issue, actor),
       });
+      noteTaskWatchdogAuditCommentLanded(res);
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
       const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
@@ -11623,7 +11712,14 @@ export function issueRoutes(
       };
       const dependencyReadinessSvc = svc as DependencyReadinessProvider;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
+      // This route carries a `comment` field, so the watchdog's one granted
+      // summary can arrive here too — and the grant is only worth giving
+      // because the comment is a record rather than a message. Same enforcement
+      // as the comment route, at the same funnel: an audit comment enqueues no
+      // wake, so it cannot steer the execution path the run just restored.
+      const watchdogAuditCommentOnly = isTaskWatchdogAuditComment(res);
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+        if (watchdogAuditCommentOnly) return;
         const wakeIssueId =
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
@@ -13862,7 +13958,18 @@ export function issueRoutes(
       req.actor.type === "agent" &&
       issue.assigneeAgentId !== null &&
       issue.assigneeAgentId !== req.actor.agentId &&
-      !crossIssueCommentOnlyGrant
+      !crossIssueCommentOnlyGrant &&
+      // A watchdog run's comment was authorized by the watchdog scope, which
+      // never produces one of the `decideIssueAccess` reasons the grant above
+      // recognises — so a closed watched issue assigned to somebody else falls
+      // through to here, and this gate revalidates the same plain comment as a
+      // state change and refuses it once the run's own recovery made the
+      // subtree live. That is the exact shape the audit grant exists for: a
+      // terminal parent whose stalled child the run just revived. The scope
+      // check already mediated the subtree, the wake's freshness and this
+      // request's intent; asking again with `mutate` is not a second check, it
+      // is a different question about a write that is already authorized.
+      !isTaskWatchdogGrantedComment(res)
     ) {
       if (!(await assertAgentIssueMutationAllowed(req, res, issue, { allowVisibleIssueWrite: true }))) return;
     }
@@ -14196,6 +14303,7 @@ export function issueRoutes(
         sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
       });
     }
+    noteTaskWatchdogAuditCommentLanded(res);
 
     await issueReferencesSvc.syncComment(comment.id);
     await externalObjectsSvc.syncCommentSafely(comment.id);

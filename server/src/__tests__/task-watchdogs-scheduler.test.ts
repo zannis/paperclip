@@ -1160,6 +1160,48 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(second.reason).toContain("already recorded what it did");
   });
 
+  // The claim has to happen on admission — that is the only place it can be one
+  // statement with its own check — but the write it pays for is several
+  // validations and one insert later, and a request refused in between wrote no
+  // summary. So the claim is provisional, and giving it back is what keeps
+  // "spent" meaning "recorded" rather than "attempted".
+  it("returns an unused audit-comment grant so the summary can still be written", async () => {
+    const { companyId, sourceId, childIds, agentId, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-AUDIT-RELEASE", { establishedChildren: ["WDOG-AUDIT-RELEASE-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
+    ])).recorded).toBe(true);
+    await seedLiveRunOn(companyId, leafId, { originRunId: runId });
+
+    const claimed = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(claimed.allowed).toBe(true);
+
+    // This request wrote nothing, so the run is still owed its summary.
+    expect(await service.releaseAuditCommentGrant({ companyId, runId })).toBe(true);
+    const retried = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(retried.allowed).toBe(true);
+    expect("auditCommentOnly" in retried ? retried.auditCommentOnly : null).toBe(true);
+
+    // Release is idempotent, so the response hook that calls it cannot hand out
+    // a grant by firing twice: the first call returns the outstanding claim,
+    // and with nothing left to return the next one reports exactly that.
+    expect(await service.releaseAuditCommentGrant({ companyId, runId })).toBe(true);
+    expect(await service.releaseAuditCommentGrant({ companyId, runId })).toBe(false);
+  });
+
   // The grant is one *summary* — a record of a recovery that has happened. A
   // comment the run posted earlier, while the subtree was still stopped and the
   // full grant applied, cannot be that record: the recovery it would describe

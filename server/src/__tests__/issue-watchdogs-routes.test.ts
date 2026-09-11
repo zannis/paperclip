@@ -962,6 +962,255 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(wakes.filter((row) => row.agentId === bystanderAgentId)).toHaveLength(0);
   });
 
+  // `POST /comments` is not the only way to write a comment. `PATCH
+  // /issues/:id` carries a `comment` field and is a documented surface for
+  // exactly this write, and it enters through the mutation gate — which
+  // revalidates a plain summary as a state change and refuses it once the run's
+  // own recovery has restored the subtree. Same mandate, same comment, so the
+  // same grant has to reach it.
+  it("records the recovery summary sent through the update route's comment field", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const bystanderAgentId = await seedAgent(companyId, { name: "Mentioned Bystander" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    const wake = await waitForIssueWake(companyId, watchedChildId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: watchedChildId },
+    });
+
+    // The summary, through the update route. Before the grant reached this
+    // surface the freshness guard saw `intent: "mutate"` and answered 409.
+    const summary = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({
+        comment: `Reassigned the stalled leaf. cc [@Mentioned Bystander](${buildAgentMentionHref(bystanderAgentId)})`,
+      });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(200);
+    const watchdogComments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(eq(issueComments.issueId, watchedRootId), eq(issueComments.createdByRunId, runId)));
+    expect(watchdogComments).toHaveLength(1);
+
+    // And it is admitted on the same terms as on the comment route: a record,
+    // not a message. The board's control comment on the revived leaf proves the
+    // mention path is live for this company and gives the assertion a row to
+    // wait for rather than a timeout to trust.
+    const control = await request(createApp(companyId))
+      .post(`/api/issues/${watchedChildId}/comments`)
+      .send({ body: `Board checking in. cc [@Mentioned Bystander](${buildAgentMentionHref(bystanderAgentId)})` });
+    expect(control.status, JSON.stringify(control.body)).toBe(201);
+    await waitForIssueCommentWake(companyId, control.body.id);
+    const wakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes.filter((row) => (row.payload as Record<string, unknown> | null)?.commentId === watchdogComments[0]!.id))
+      .toHaveLength(0);
+    // Nothing reached the agent the summary mentioned; the only wake it has is
+    // the control's.
+    expect(wakes.filter((row) => row.agentId === bystanderAgentId)).toHaveLength(1);
+
+    // Still one record: the update route spends the same grant the comment
+    // route does, not a second one of its own.
+    const second = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ comment: "And another thing." });
+    expect(second.status, JSON.stringify(second.body)).toBe(409);
+  });
+
+  // The headline recovery lands on a subtree whose root is already terminal —
+  // a finished parent with a stalled child under it — and such a parent is
+  // usually assigned to the agent that finished it. The comment route runs a
+  // second, closed-issue-specific authorization for that shape, and the
+  // watchdog scope does not produce any of the access reasons its cross-issue
+  // grant recognises. So the summary passed the guard that exists for it and
+  // was then refused by a gate that asked whether a plain comment was a state
+  // mutation — after the first check had already spent the one grant.
+  it("records the recovery summary on a closed watched root assigned to another agent", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const ownerAgentId = await seedAgent(companyId, { name: "Parent Owner" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    // Terminal parent, owned by somebody else, with a stalled child under it.
+    const watchedRootId = await seedIssue(companyId, {
+      title: "Finished parent",
+      status: "done",
+      assigneeAgentId: ownerAgentId,
+    });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    const wake = await waitForIssueWake(companyId, watchedChildId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: watchedChildId },
+    });
+
+    const summary = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Revived the stalled child of this finished parent." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(201);
+
+    // The terminal parent stays terminal: the summary is a record, so it
+    // neither reopens the issue it lands on nor wakes the agent that owns it.
+    const [rootAfter] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, watchedRootId));
+    expect(rootAfter?.status).toBe("done");
+    const control = await request(createApp(companyId))
+      .post(`/api/issues/${watchedChildId}/comments`)
+      .send({ body: "Board checking in." });
+    expect(control.status, JSON.stringify(control.body)).toBe(201);
+    await waitForIssueCommentWake(companyId, control.body.id);
+    const wakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes.filter((row) => (row.payload as Record<string, unknown> | null)?.commentId === summary.body.id))
+      .toHaveLength(0);
+  });
+
+  // The grant is claimed on admission, which is where the check and the claim
+  // can be one statement — but admission is several validations and one insert
+  // short of the write the grant exists for. A request refused in that window
+  // wrote no summary, so it must not have spent the one the run is owed.
+  // `presentation` is the reachable instance: the request schema accepts it,
+  // and the route rejects it for agents *after* the guard has run.
+  it("does not spend the audit grant on a summary the route then refuses", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, { title: "Stalled leaf", status: "todo" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    const wake = await waitForIssueWake(companyId, watchedRootId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: watchedRootId },
+    });
+
+    // Admitted by the guard, then refused by the structured-field check that
+    // runs after it. Nothing was written.
+    const refused = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Restarted this leaf and handed it back.", presentation: null });
+    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    expect(await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, watchedRootId))).toHaveLength(0);
+
+    // So the run still has its summary to write.
+    const summary = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Restarted this leaf and handed it back." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(201);
+
+    // And exactly one: releasing an unused claim is not a second grant.
+    const second = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "And another thing." });
+    expect(second.status, JSON.stringify(second.body)).toBe(409);
+    const watchdogComments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(eq(issueComments.issueId, watchedRootId), eq(issueComments.createdByRunId, runId)));
+    expect(watchdogComments).toHaveLength(1);
+  });
+
   // The negative control for the one above, and the defect it closes: the
   // watchdog really did wake the leaf, but the path running on it now is not
   // the one it started. An issue-level "this run woke that issue" boolean
