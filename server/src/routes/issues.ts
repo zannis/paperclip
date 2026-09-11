@@ -11069,13 +11069,20 @@ export function issueRoutes(
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       ...(watchdogWritePrecondition ? { expectedCurrentLeaf: watchdogWritePrecondition } : {}),
       // The audit exception establishes that this request writes no issue
-      // fields, and the service derives one below that check: an issue with no
-      // goal of its own is backfilled with the company fallback on every
-      // update, empty patch included. That is a server-authored state change on
-      // a write admitted only as a record, so it is turned off rather than
-      // refused — there is no patch to drop, and refusing would cost the run
-      // the summary the mandate requires.
-      ...(isTaskWatchdogAuditComment(res) ? { preserveGoalId: true } : {}),
+      // fields, and the service derives more below that check: an issue with no
+      // goal of its own is backfilled with the company fallback, and one with a
+      // null `projectId` and a workspace reference is attached to that
+      // workspace's project — both on every update, empty patch included. Those
+      // are server-authored state changes on a write admitted only as a record,
+      // so they are turned off rather than refused: there is no patch to drop,
+      // and refusing would cost the run the summary the mandate requires.
+      //
+      // The update itself is still made, rather than skipped for having nothing
+      // to write. It is what carries `expectedCurrentLeaf` — the summary is
+      // conditional on the subtree the guard admitted it against, and that
+      // condition is a clause on this statement's `where`. Skipping the write
+      // would take the precondition with it.
+      ...(isTaskWatchdogAuditComment(res) ? { suppressServerDerivedFields: true } : {}),
     };
     const shouldCollectCompletionPublication =
       actor.actorType === "user" && existing.status !== "done" && updateFields.status === "done";

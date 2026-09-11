@@ -325,6 +325,34 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     return id;
   }
 
+  // A live workspace reference on an issue, which is all the service's project
+  // derivation reads. Deliberately `active` rather than archived: a closed
+  // workspace also drags the route's reopen lifecycle in, and the derivation
+  // under test does not need it.
+  async function attachExecutionWorkspace(input: {
+    companyId: string;
+    projectId: string;
+    issueId: string;
+  }) {
+    const id = randomUUID();
+    await db.insert(executionWorkspaces).values({
+      id,
+      companyId: input.companyId,
+      projectId: input.projectId,
+      sourceIssueId: input.issueId,
+      mode: "isolated_workspace",
+      strategyType: "project_primary",
+      name: "task-workspace",
+      status: "active",
+      cwd: `/nonexistent/${id}`,
+    });
+    await db
+      .update(issues)
+      .set({ executionWorkspaceId: id })
+      .where(eq(issues.id, input.issueId));
+    return id;
+  }
+
   // The archived isolated workspace a terminal issue is still linked to, in the
   // state the reaper leaves behind: `archived`, closed, and with its worktree
   // gone from disk. A rebuild of this row fails deterministically — the route's
@@ -1713,6 +1741,79 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .from(issues)
       .where(eq(issues.id, watchedChildId));
     expect(childAfter?.goalId).toBe(defaultGoalId);
+  });
+
+  // The goal was not the only field the service derives below the audit check.
+  // An issue whose own `projectId` is null but which references a workspace is
+  // backfilled with that workspace's project on every update, empty patch
+  // included — so the record-only summary picks the watched root's project
+  // placement for it. The two together are the case for suppressing whatever
+  // the update derives rather than the derivations found so far, which is what
+  // this asserts: the summary lands and the row is byte-identical.
+  it("does not derive a project from the update route's audit summary", async () => {
+    const companyId = await seedCompany();
+    const projectId = await seedProject(companyId);
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    // A legacy or imported row: it carries a workspace reference the derivation
+    // reads, and no project of its own for it to agree with.
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root", projectId: null });
+    await attachExecutionWorkspace({ companyId, projectId, issueId: watchedRootId });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    await restoreLivePath({ app, companyId, leafIssueId: watchedChildId, workerAgentId });
+
+    const [rootBefore] = await db.select().from(issues).where(eq(issues.id, watchedRootId));
+    const summary = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ comment: "Reassigned the stalled leaf." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(200);
+    const [rootAfter] = await db.select().from(issues).where(eq(issues.id, watchedRootId));
+    expect(rootAfter?.projectId).toBeNull();
+    // Same whole-row comparison as the goal case, for the same reason: the
+    // claim is that the update derived *nothing*, not that it stopped deriving
+    // the two fields a review happened to name.
+    const columnsChanged = Object.keys(rootBefore ?? {}).filter(
+      (key) =>
+        key !== "updatedAt" &&
+        JSON.stringify((rootBefore as Record<string, unknown>)[key])
+          !== JSON.stringify((rootAfter as Record<string, unknown>)[key]),
+    );
+    expect(columnsChanged).toEqual([]);
+
+    // The derivation is live on an ordinary update of an identically shaped
+    // row. Without this control the assertion above would also pass if the
+    // workspace reference simply never reached the derivation.
+    const controlIssueId = await seedIssue(companyId, { title: "Ordinary issue", projectId: null });
+    await attachExecutionWorkspace({ companyId, projectId, issueId: controlIssueId });
+    const boardUpdate = await request(createApp(companyId))
+      .patch(`/api/issues/${controlIssueId}`)
+      .send({ title: "Ordinary issue, renamed" });
+    expect(boardUpdate.status, JSON.stringify(boardUpdate.body)).toBe(200);
+    const [controlAfter] = await db
+      .select({ projectId: issues.projectId })
+      .from(issues)
+      .where(eq(issues.id, controlIssueId));
+    expect(controlAfter?.projectId).toBe(projectId);
   });
 
   // Admission is several validations and one insert short of the write the

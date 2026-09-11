@@ -7813,11 +7813,15 @@ export function issueService(db: Db) {
         actorUserId?: string | null;
         expectedCurrentLeaf?: IssueUpdatePrecondition | null;
         /**
-         * Suppress the fallback-goal derivation below, so this update writes no
-         * goal the caller did not ask for. For a caller whose authority is
-         * bounded to writing a record rather than changing state.
+         * Persist nothing this update derived on its own, so it writes only the
+         * fields the caller named. For a caller whose authority is bounded to
+         * writing a record rather than changing state: such a caller names no
+         * fields at all, which makes every field on the patch server-authored
+         * and the write inert apart from its `updatedAt` bump. Enforced against
+         * the finished patch rather than derivation by derivation — see the
+         * reduction below.
          */
-        preserveGoalId?: boolean;
+        suppressServerDerivedFields?: boolean;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -7840,7 +7844,7 @@ export function issueService(db: Db) {
         actorAgentId,
         actorUserId,
         expectedCurrentLeaf,
-        preserveGoalId,
+        suppressServerDerivedFields,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -8032,30 +8036,57 @@ export function issueService(db: Db) {
         ]);
         // The goal is re-derived on every update, not only on one that names a
         // goal or a project: an issue carrying no goal of its own is backfilled
-        // with the current fallback. That makes it a *server-authored* state
-        // change available to an otherwise empty patch, which is precisely what
-        // a caller holding a record-only grant must not be able to perform, so
-        // such a caller opts out and the issue keeps the goal it had.
-        if (!preserveGoalId) {
-          const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
-          const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
-            getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
-            getProjectDefaultGoalId(
-              tx,
-              existing.companyId,
-              issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
-            ),
-          ]);
+        // with the current fallback.
+        const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
+        const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
+          getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
+          getProjectDefaultGoalId(
+            tx,
+            existing.companyId,
+            issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
+          ),
+        ]);
 
-          patch.goalId = resolveNextIssueGoalId({
-            currentProjectId: existing.projectId,
-            currentGoalId: existing.goalId,
-            currentProjectGoalId,
-            projectId: issueData.projectId,
-            goalId: issueData.goalId,
-            projectGoalId: nextProjectGoalId,
-            defaultGoalId: defaultCompanyGoal?.id ?? null,
-          });
+        patch.goalId = resolveNextIssueGoalId({
+          currentProjectId: existing.projectId,
+          currentGoalId: existing.goalId,
+          currentProjectGoalId,
+          projectId: issueData.projectId,
+          goalId: issueData.goalId,
+          projectGoalId: nextProjectGoalId,
+          defaultGoalId: defaultCompanyGoal?.id ?? null,
+        });
+        // Several fields above may now be on the patch without the caller ever
+        // having named one: that fallback goal, the project behind a workspace
+        // reference the issue already carried, and whatever derivation is added
+        // to this function next. Each is a *server-authored* state change
+        // available to an otherwise empty patch, which is exactly what a caller
+        // holding a record-only grant must not be able to perform.
+        //
+        // So the bound is applied to the finished patch, once, rather than at
+        // each derivation. Turning the derivations off one at a time is what
+        // left the project derivation running after the goal one was fixed, and
+        // it makes every future derivation a new hole. Reducing the patch here
+        // costs those derivations' reads for a caller whose result is discarded —
+        // three indexed lookups on a path taken once per grant — and buys an
+        // invariant that holds without anyone having to remember it.
+        if (suppressServerDerivedFields) {
+          const namedByCaller = Object.keys(issueData).filter(
+            (key) => (issueData as Record<string, unknown>)[key] !== undefined,
+          );
+          if (namedByCaller.length > 0) {
+            // Not a case to handle but a caller out of contract: honouring the
+            // named fields would exceed the bound, and dropping them would make
+            // the write mean something other than what was asked. The routes
+            // that hold such a grant refuse the request before reaching here.
+            throw unprocessable(
+              "An update that must write no server-derived fields cannot write issue fields either",
+              { issueId: id, fields: namedByCaller.sort() },
+            );
+          }
+          for (const key of Object.keys(patch)) {
+            if (key !== "updatedAt") delete (patch as Record<string, unknown>)[key];
+          }
         }
         const updated = await tx
           .update(issues)
