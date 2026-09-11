@@ -2162,6 +2162,64 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   // Note what is *not* here any more: nothing re-reads the subtree after a
   // mutation to work out what the run did. The run says what it wrote, from its
   // own `RETURNING` row, and that claim is checked here before the next write.
+  // The exception that survives a recovered subtree is a grant of *one inert
+  // write*: the summary saying what this run did. Two things are load-bearing
+  // in that sentence and neither is checked by "is the target the watched
+  // issue", so they are checked here.
+  //
+  //  - *Inert.* The comment route enqueues an `issue_commented` wake to the
+  //    target's assignee and a mention wake per @-mention in the body. That is
+  //    harmless when the watched issue is the idle root of a subtree whose
+  //    execution path runs somewhere below it — but a watched subtree can be a
+  //    single leaf, and then the watched issue *is* the issue this run just
+  //    restarted. The comment lands in the live owner's inbox, which is the
+  //    exact steering the target check refuses for every other recovered leaf.
+  //    Restricting the exception by target never covered this, because here the
+  //    target and the live path are the same issue.
+  //  - *One.* Nothing consumed the exception: it held for every later request
+  //    with `intent: "comment"`, for the lifetime of the run. A looping or
+  //    compromised watchdog could post unboundedly many comments — each one
+  //    @-mentioning whoever it liked — and every one of them passed
+  //    revalidation and enqueued more execution work, off a mandate that asked
+  //    for a single summary. The grant is spent by the run's first comment on
+  //    the watched issue.
+  //
+  // Spending it is measured against `issue_comments`, not the run's mutation
+  // ledger: a comment declares no material write, so the route records no
+  // ledger entry for it and there is nothing there to count. Deleted comments
+  // count too — a run that could delete its own summary to earn another one
+  // still has the unlimited grant this closes. A run that already commented on
+  // the watched issue while the subtree was stopped has likewise said its piece
+  // under the *full* grant, and does not get a second write here.
+  async function auditCommentDenial(
+    scope: { companyId: string; watchedIssueId: string; runId?: string | null },
+    executionPathIssueIds: string[],
+  ) {
+    if (executionPathIssueIds.includes(scope.watchedIssueId)) {
+      return "Task-watchdog runs may not comment on the watched issue once the watched issue itself has an execution path; the comment would wake the owner this run just started rather than record what it did.";
+    }
+    // No run id is no way to bound the grant to one write, so it is refused
+    // rather than guessed at — the same fail-closed posture as the rest of this
+    // guard.
+    if (!scope.runId) {
+      return "Task-watchdog run context is missing the run id required to bound the summary comment to a single write.";
+    }
+    const prior = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(
+        eq(issueComments.companyId, scope.companyId),
+        eq(issueComments.issueId, scope.watchedIssueId),
+        eq(issueComments.createdByRunId, scope.runId),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (prior) {
+      return "Task-watchdog runs get one summary comment on the watched issue once the subtree has its own execution path again; this run has already recorded what it did.";
+    }
+    return null;
+  }
+
   async function revalidateMutationScope(scope: {
     kind: "watchdog";
     watchdogId: string;
@@ -2330,6 +2388,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     //    on a recovered leaf signals or steers the owner this run just started.
     //    The mandate asks for a summary on the source issue and nothing else,
     //    so that is all the exception covers.
+    //  - A comment on the watched issue is refused when the watched issue is
+    //    *itself* on the execution path, and is refused a second time. See
+    //    `auditCommentDenial` — both are the same inertness argument applied to
+    //    the one target the bullet above lets through.
     //
     // A `stopped` (at a fingerprint the ledger accounts for) or
     // `already_reviewed` subtree has no execution path at all — `live` is
@@ -2340,15 +2402,26 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       : classification.state === "pending_first_run"
       ? classification.pendingIssueIds
       : [];
-    if (executionPathIssueIds.length > 0 && !(intent === "comment" && targetIssueId === scope.watchedIssueId)) {
-      return {
-        allowed: false as const,
-        reason: intent === "comment"
-          ? "Task-watchdog runs may only comment on the watched issue once the subtree has its own execution path again; a comment elsewhere wakes an owner that is not the watchdog."
-          : "Task-watchdog runs may only add their summary comment to the watched issue once the subtree has its own execution path again; state changes are no longer theirs to make.",
-        classification,
-        liveOwnedIssueIds: executionPathIssueIds,
-      };
+    if (executionPathIssueIds.length > 0) {
+      if (!(intent === "comment" && targetIssueId === scope.watchedIssueId)) {
+        return {
+          allowed: false as const,
+          reason: intent === "comment"
+            ? "Task-watchdog runs may only comment on the watched issue once the subtree has its own execution path again; a comment elsewhere wakes an owner that is not the watchdog."
+            : "Task-watchdog runs may only add their summary comment to the watched issue once the subtree has its own execution path again; state changes are no longer theirs to make.",
+          classification,
+          liveOwnedIssueIds: executionPathIssueIds,
+        };
+      }
+      const denial = await auditCommentDenial(scope, executionPathIssueIds);
+      if (denial) {
+        return {
+          allowed: false as const,
+          reason: denial,
+          classification,
+          liveOwnedIssueIds: executionPathIssueIds,
+        };
+      }
     }
 
     // The baseline stays put. Drift is always measured from the state the run

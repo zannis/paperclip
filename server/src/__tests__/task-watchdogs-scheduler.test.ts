@@ -1115,6 +1115,107 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     })).allowed).toBe(false);
   });
 
+  // The mandate is one summary comment, and the comment route enqueues an
+  // `issue_commented` wake to the watched issue's assignee plus a mention wake
+  // per @-mention in the body. An exception that re-admits every later comment
+  // is therefore not a record of one recovery, it is an open channel for
+  // producing execution work — so it has to be spent by the write it exists
+  // for.
+  it("spends the audit-comment grant on the run's first comment on the watched issue", async () => {
+    const { companyId, sourceId, childIds, agentId, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-AUDIT-ONCE", { establishedChildren: ["WDOG-AUDIT-ONCE-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
+    ])).recorded).toBe(true);
+    await seedLiveRunOn(companyId, leafId, { originRunId: runId });
+
+    // The summary the mandate asks for still lands.
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    })).allowed).toBe(true);
+
+    const [summary] = await db.insert(issueComments).values({
+      companyId,
+      issueId: sourceId,
+      authorAgentId: agentId,
+      authorType: "agent",
+      createdByRunId: runId,
+      body: "Recovery summary: reassigned the stale leaf and woke its owner.",
+    }).returning();
+
+    // And the second one does not. The run has said what it did; every further
+    // comment is a wake it was never granted.
+    const second = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(second.classification?.state).toBe("live");
+    expect(second.allowed).toBe(false);
+    expect(second.reason).toContain("already recorded what it did");
+
+    // Deleting the summary does not buy another one. The grant is spent by
+    // having commented, not by the comment still being there to read — a run
+    // that could delete its way back to a fresh grant has an unlimited one.
+    await db.update(issueComments)
+      .set({ deletedAt: new Date(), deletedByType: "agent", deletedByAgentId: agentId })
+      .where(eq(issueComments.id, summary!.id));
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    })).allowed).toBe(false);
+  });
+
+  // A watched subtree can be a single leaf, and then the issue this run just
+  // restarted *is* the issue the summary goes on. The exception is justified by
+  // the comment being inert with respect to the execution path; here it is the
+  // opposite — it lands straight in the inbox of the owner the run started.
+  it("refuses the audit comment when the watched issue is itself the live path", async () => {
+    const { companyId, sourceId, agentId, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-AUDIT-LIVE-ROOT", {
+        // A single-leaf subtree: the watched issue is the only issue in it, so
+        // it has to be a stale leaf rather than the terminal parent the other
+        // fixtures use.
+        beforePin: async (seeded) => {
+          await db.update(issues).set({ status: "todo" }).where(eq(issues.id, seeded.sourceId));
+        },
+      });
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, sourceId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: sourceId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
+    ])).recorded).toBe(true);
+
+    // The recovery worked: the watched issue has an owner and a live path, and
+    // that path is this run's own doing, so nothing above this check stops it.
+    await seedLiveRunOn(companyId, sourceId, { originRunId: runId });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(revalidated.classification?.state).toBe("live");
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds ?? [] : [],
+    ).toEqual([]);
+    expect(revalidated.allowed).toBe(false);
+    expect(revalidated.reason).toContain("watched issue itself has an execution path");
+    expect(
+      "liveOwnedIssueIds" in revalidated ? revalidated.liveOwnedIssueIds : null,
+    ).toEqual([sourceId]);
+  });
+
   // The wake this run fired failed, was coalesced away, or simply finished —
   // and somebody else then started the same leaf while this run is still going.
   // An issue-level `startsWork` reports that third party as this run's own
