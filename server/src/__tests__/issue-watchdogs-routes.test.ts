@@ -752,6 +752,114 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(comment.status, JSON.stringify(comment.body)).toBe(201);
   });
 
+  // The live variant of the step above. The mandate's headline recovery is
+  // restoring a live execution path — reassigning a stalled leaf to an agent
+  // that will pick it up — and that is precisely the action which takes the
+  // subtree out of `stopped` altogether, so there is no fingerprint left to
+  // re-pin to. Rejecting the mandated summary on `state` would lose the audit
+  // trail on the one path the mandate cares about most.
+  it("lets a watchdog run comment on the watched source issue after its own action restored a live path", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    // Stalled: a real leaf with nobody on it, which is why the watchdog woke.
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    // The sanctioned recovery: hand the stalled leaf to an agent that will run
+    // it. `issueAssignmentWakeupFires` holds here (assignee set, status not
+    // backlog), so the route declares `startsWork` next to the wake it enqueued.
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    // The wake lands and the leaf is now genuinely being worked. The subtree is
+    // `live`, and no stop fingerprint exists for the run to hold.
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: watchedChildId },
+    });
+
+    const comment = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Reassigned the stalled leaf to a live agent." });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+  });
+
+  // The negative control for the grant above: liveness this run's ledger does
+  // not account for is a competing actor, and the watchdog has no business
+  // writing to a subtree somebody else just took over.
+  it("still rejects the watchdog's comment when a different actor made the subtree live", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Outraced Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Assigned Worker" });
+    const otherAgentId = await seedAgent(companyId, { name: "Third Party" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    // Somebody else starts work on the watched root itself. Nothing this run
+    // declared explains a run there.
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: otherAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: watchedRootId },
+    });
+
+    const comment = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Reassigned the stalled leaf to a live agent." });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(409);
+  });
+
   // WDOG-005. The guard reads the subtree and the route writes it, and between
   // those two statements somebody else can write the same leaf. The mutation
   // ledger cannot see that: it diffs the final state against baseline+declared,
