@@ -2164,57 +2164,79 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   // own `RETURNING` row, and that claim is checked here before the next write.
   // The exception that survives a recovered subtree is a grant of *one inert
   // write*: the summary saying what this run did. Two things are load-bearing
-  // in that sentence and neither is checked by "is the target the watched
-  // issue", so they are checked here.
+  // in that sentence and neither follows from "is the target the watched
+  // issue", so neither is inferred here.
   //
   //  - *Inert.* The comment route enqueues an `issue_commented` wake to the
-  //    target's assignee and a mention wake per @-mention in the body. That is
-  //    harmless when the watched issue is the idle root of a subtree whose
-  //    execution path runs somewhere below it — but a watched subtree can be a
-  //    single leaf, and then the watched issue *is* the issue this run just
-  //    restarted. The comment lands in the live owner's inbox, which is the
-  //    exact steering the target check refuses for every other recovered leaf.
-  //    Restricting the exception by target never covered this, because here the
-  //    target and the live path are the same issue.
+  //    target's assignee and a mention wake per @-mention in the body, so a
+  //    permitted comment can start work no matter which issue it lands on: it
+  //    can mention arbitrary agents, and it can wake an assigned watched root
+  //    while the live path is a child. Inertness therefore cannot be deduced
+  //    from the target — it is *imposed*. `auditCommentOnly` on the verdict
+  //    tells the route this comment is admitted as a record only, and the
+  //    comment route enqueues no wake at all for it. With the wakes gone, the
+  //    single-leaf subtree — where the watched issue *is* the issue this run
+  //    just restarted — records its summary like any other, instead of losing
+  //    the audit trail this guard exists to keep.
   //  - *One.* Nothing consumed the exception: it held for every later request
   //    with `intent: "comment"`, for the lifetime of the run. A looping or
-  //    compromised watchdog could post unboundedly many comments — each one
-  //    @-mentioning whoever it liked — and every one of them passed
-  //    revalidation and enqueued more execution work, off a mandate that asked
-  //    for a single summary. The grant is spent by the run's first comment on
-  //    the watched issue.
+  //    compromised watchdog could post unboundedly many comments off a mandate
+  //    that asked for a single summary. The grant is now claimed, by the
+  //    request the guard admits under it.
   //
-  // Spending it is measured against `issue_comments`, not the run's mutation
-  // ledger: a comment declares no material write, so the route records no
-  // ledger entry for it and there is nothing there to count. Deleted comments
-  // count too — a run that could delete its own summary to earn another one
-  // still has the unlimited grant this closes. A run that already commented on
-  // the watched issue while the subtree was stopped has likewise said its piece
-  // under the *full* grant, and does not get a second write here.
-  async function auditCommentDenial(
-    scope: { companyId: string; watchedIssueId: string; runId?: string | null },
-    executionPathIssueIds: string[],
-  ) {
-    if (executionPathIssueIds.includes(scope.watchedIssueId)) {
-      return "Task-watchdog runs may not comment on the watched issue once the watched issue itself has an execution path; the comment would wake the owner this run just started rather than record what it did.";
-    }
+  // The claim is a marker on the run's own context, not a count of comments on
+  // the issue. Counting comments answered the wrong question twice over: a
+  // comment the run posted *before* the recovery, while the subtree was still
+  // stopped and the full grant applied, cannot be a summary of a recovery that
+  // had not happened yet, and reading a row that a concurrent request has not
+  // written yet lets every racer see an unspent grant. Marking the run instead
+  // fixes both — the marker exists only on this path, and one UPDATE reads and
+  // writes it.
+  //
+  // Spending it on admission rather than on the comment landing is deliberate:
+  // a request that is admitted and then fails downstream has burnt the grant
+  // and the run gets no second summary. That is the fail-closed direction, and
+  // the same posture as the rest of this guard.
+  async function claimAuditCommentGrant(scope: { companyId: string; runId?: string | null }) {
     // No run id is no way to bound the grant to one write, so it is refused
-    // rather than guessed at — the same fail-closed posture as the rest of this
-    // guard.
+    // rather than guessed at.
     if (!scope.runId) {
       return "Task-watchdog run context is missing the run id required to bound the summary comment to a single write.";
     }
-    const prior = await db
-      .select({ id: issueComments.id })
-      .from(issueComments)
+    // Written to whichever of the two places the scope resolver reads the run's
+    // watchdog context from, decided inside the statement rather than from an
+    // earlier read: a path chosen by a separate SELECT is a second thing
+    // concurrent requests could disagree about.
+    const spentPath = sql`case
+      when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'taskWatchdog') = 'object'
+        then array['taskWatchdog', 'auditCommentSpentAt']
+      else array['auditCommentSpentAt']
+    end`;
+    // One statement tests the marker and writes it, so the check and the claim
+    // cannot be pulled apart. Concurrent requests serialise on the run row; the
+    // loser re-evaluates this `where` against the winner's committed row, finds
+    // the marker set, and updates nothing. `returning` is the verdict.
+    const claimed = await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: sql`jsonb_set(
+          case
+            when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+              then ${heartbeatRuns.contextSnapshot}
+            else '{}'::jsonb
+          end,
+          ${spentPath},
+          to_jsonb(now()),
+          true
+        )`,
+      })
       .where(and(
-        eq(issueComments.companyId, scope.companyId),
-        eq(issueComments.issueId, scope.watchedIssueId),
-        eq(issueComments.createdByRunId, scope.runId),
+        eq(heartbeatRuns.id, scope.runId),
+        eq(heartbeatRuns.companyId, scope.companyId),
+        sql`(${heartbeatRuns.contextSnapshot} #>> (${spentPath})) is null`,
       ))
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (prior) {
+      .returning({ id: heartbeatRuns.id });
+    if (claimed.length === 0) {
       return "Task-watchdog runs get one summary comment on the watched issue once the subtree has its own execution path again; this run has already recorded what it did.";
     }
     return null;
@@ -2298,6 +2320,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
       return {
         allowed: true as const,
+        auditCommentOnly: false,
         classification,
         ledgerBaseline: {
           baseline: classification.stopSnapshot,
@@ -2388,10 +2411,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     //    on a recovered leaf signals or steers the owner this run just started.
     //    The mandate asks for a summary on the source issue and nothing else,
     //    so that is all the exception covers.
-    //  - A comment on the watched issue is refused when the watched issue is
-    //    *itself* on the execution path, and is refused a second time. See
-    //    `auditCommentDenial` — both are the same inertness argument applied to
-    //    the one target the bullet above lets through.
+    //  - A comment on the watched issue is admitted once, as a record and not
+    //    as a message: the verdict carries `auditCommentOnly`, and the comment
+    //    route fires no wake for it. That is what lets the single-leaf subtree
+    //    — watched issue and live path being the same issue — keep its audit
+    //    trail. See `claimAuditCommentGrant`.
     //
     // A `stopped` (at a fingerprint the ledger accounts for) or
     // `already_reviewed` subtree has no execution path at all — `live` is
@@ -2402,6 +2426,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       : classification.state === "pending_first_run"
       ? classification.pendingIssueIds
       : [];
+    let auditCommentOnly = false;
     if (executionPathIssueIds.length > 0) {
       if (!(intent === "comment" && targetIssueId === scope.watchedIssueId)) {
         return {
@@ -2413,7 +2438,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           liveOwnedIssueIds: executionPathIssueIds,
         };
       }
-      const denial = await auditCommentDenial(scope, executionPathIssueIds);
+      const denial = await claimAuditCommentGrant(scope);
       if (denial) {
         return {
           allowed: false as const,
@@ -2422,6 +2447,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           liveOwnedIssueIds: executionPathIssueIds,
         };
       }
+      auditCommentOnly = true;
     }
 
     // The baseline stays put. Drift is always measured from the state the run
@@ -2429,6 +2455,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     // away from its wake one attributable step at a time.
     return {
       allowed: true as const,
+      auditCommentOnly,
       classification,
       ledgerBaseline: {
         baseline: ledger.baseline,

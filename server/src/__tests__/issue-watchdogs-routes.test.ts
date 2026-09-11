@@ -25,6 +25,7 @@ import {
   issues,
   principalPermissionGrants,
 } from "@paperclipai/db";
+import { buildAgentMentionHref } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -182,6 +183,27 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       if (row) return row;
       if (Date.now() >= deadline) {
         throw new Error(`No wake request landed for issue ${issueId} within ${timeoutMs}ms`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  // The wake a specific comment fired. Same detached tail as above; keyed by
+  // the comment so a wake left over from an earlier step cannot be mistaken for
+  // the one being waited on.
+  async function waitForIssueCommentWake(companyId: string, commentId: string, timeoutMs = 5_000) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const [row] = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(and(
+          eq(agentWakeupRequests.companyId, companyId),
+          sql`${agentWakeupRequests.payload}->>'commentId' = ${commentId}`,
+        ));
+      if (row) return row;
+      if (Date.now() >= deadline) {
+        throw new Error(`No wake request landed for comment ${commentId} within ${timeoutMs}ms`);
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -846,6 +868,98 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .post(`/api/issues/${watchedRootId}/comments`)
       .send({ body: "Reassigned the stalled leaf to a live agent." });
     expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+  });
+
+  // What the grant above is actually worth is decided here. A watched subtree
+  // can be a single leaf, and then the issue the summary goes on is the issue
+  // the recovery just restarted: the comment route would wake its owner, and
+  // any agent the body mentions. Refusing the comment loses the audit trail on
+  // the recovery the mandate cares about most, so the record is kept and the
+  // steering is removed — the granted comment fires no wake at all.
+  it("records the single-leaf recovery summary without waking the path it restarted", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const bystanderAgentId = await seedAgent(companyId, { name: "Mentioned Bystander" });
+    // The whole watched subtree: one stalled leaf, which is also the watched
+    // issue. Watchdog-origin children are not part of it.
+    const watchedRootId = await seedIssue(companyId, { title: "Stalled leaf", status: "todo" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const revived = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ assigneeAgentId: workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+
+    const wake = await waitForIssueWake(companyId, watchedRootId);
+    expect((wake.payload as Record<string, unknown> | null)?._paperclipWatchdogOriginRunId).toBe(runId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: watchedRootId },
+    });
+
+    // The summary lands, mentions and all — the audit trail is the point.
+    const summary = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({
+        body: `Restarted this leaf and handed it back. cc [@Mentioned Bystander](${buildAgentMentionHref(bystanderAgentId)})`,
+      });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(201);
+
+    // The run gets one record, not a channel: a second comment is refused, and
+    // nothing of it reaches the thread. Which guard says no first is not fixed
+    // here — a recovered subtree keeps moving under the run, so the staleness
+    // check can reach this request before the spent grant does. That the grant
+    // itself is what refuses a second summary is pinned in the service tests.
+    const second = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "And another thing." });
+    expect(second.status, JSON.stringify(second.body)).toBe(409);
+    const watchdogComments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(eq(issueComments.issueId, watchedRootId), eq(issueComments.createdByRunId, runId)));
+    expect(watchdogComments).toHaveLength(1);
+
+    // A board comment on the same issue does wake its assignee, which both
+    // proves the wake path is live for this issue and gives the assertion below
+    // a row to wait for instead of a timeout to trust.
+    const control = await request(createApp(companyId))
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Board checking in." });
+    expect(control.status, JSON.stringify(control.body)).toBe(201);
+    await waitForIssueCommentWake(companyId, control.body.id);
+
+    // Nothing was enqueued off the watchdog's summary: not to the owner it just
+    // started, and not to the agent it mentioned.
+    const wakes = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.companyId, companyId));
+    expect(wakes.filter((row) => (row.payload as Record<string, unknown> | null)?.commentId === summary.body.id))
+      .toHaveLength(0);
+    expect(wakes.filter((row) => row.agentId === bystanderAgentId)).toHaveLength(0);
   });
 
   // The negative control for the one above, and the defect it closes: the

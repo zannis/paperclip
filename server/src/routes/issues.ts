@@ -457,6 +457,7 @@ function noopTaskWatchdogService(): TaskWatchdogService {
     }),
     revalidateMutationScope: async () => ({
       allowed: true,
+      auditCommentOnly: false,
       classification: {
         state: "stopped",
         reason: "Task watchdog service unavailable in this route context.",
@@ -4353,6 +4354,20 @@ export function issueRoutes(
   };
   const pendingTaskWatchdogRecords = new WeakMap<Response, PendingTaskWatchdogRecord>();
 
+  // Requests the watchdog freshness guard admitted *only* as an audit record.
+  // Once a watchdog run's own recovery has restored the subtree's execution
+  // path, the single comment it may still write on the watched issue is granted
+  // on the premise that it is inert. The premise does not hold by itself — the
+  // comment route wakes the target's assignee and every @-mentioned agent — so
+  // the guard states the condition here and the route enforces it: a comment in
+  // this set enqueues no wake. Without that, the granted comment could start
+  // work on the very path the run just restarted, or steer agents outside it.
+  const taskWatchdogAuditCommentResponses = new WeakSet<Response>();
+
+  function isTaskWatchdogAuditComment(res: Response) {
+    return taskWatchdogAuditCommentResponses.has(res);
+  }
+
   // Recording the ledger is two short queries. This bound only exists so a
   // stuck database cannot hold a response open indefinitely; hitting it
   // degrades to exactly the behaviour of not recording at all, which the guard
@@ -4719,6 +4734,7 @@ export function issueRoutes(
       targetIssueId: issue.id,
     });
     if (revalidated.allowed) {
+      if (revalidated.auditCommentOnly) taskWatchdogAuditCommentResponses.add(res);
       scheduleTaskWatchdogRecord(res, scope, revalidated);
       return true;
     }
@@ -14278,7 +14294,15 @@ export function issueRoutes(
     void (async () => {
       type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
+      // The watchdog guard admits exactly one comment on the watched issue once
+      // the run's own recovery has restored the subtree's execution path, and
+      // it admits it as a record of what the run did — not as a message to
+      // anyone. Enforced at the funnel rather than at the two call sites below,
+      // so the grant stays inert no matter which wake this route learns to fire
+      // next: an audit comment produces none of them.
+      const watchdogAuditCommentOnly = isTaskWatchdogAuditComment(res);
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+        if (watchdogAuditCommentOnly) return;
         const wakeIssueId =
           wakeup.payload && typeof wakeup.payload === "object" && typeof wakeup.payload.issueId === "string"
             ? wakeup.payload.issueId
