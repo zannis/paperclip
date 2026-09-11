@@ -14,6 +14,8 @@ import {
   createDb,
   documentRevisions,
   documents,
+  executionWorkspaces,
+  goals,
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
@@ -24,6 +26,8 @@ import {
   issueWatchdogs,
   issues,
   principalPermissionGrants,
+  projects,
+  workspaceOperations,
 } from "@paperclipai/db";
 import { buildAgentMentionHref } from "@paperclipai/shared";
 import {
@@ -130,7 +134,11 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await db.delete(agentRuntimeState);
     await db.delete(issueRelations);
     await db.delete(issueWatchdogs);
+    await db.delete(workspaceOperations);
+    await db.delete(executionWorkspaces);
     await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(goals);
     await db.delete(documents);
     await db.delete(agents);
     await db.delete(companySkills);
@@ -299,6 +307,106 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       createdAt: overrides.createdAt ?? new Date(Date.now() - 60 * 60 * 1000),
     });
     return id;
+  }
+
+  async function seedProject(companyId: string, name = "Watched project") {
+    const id = randomUUID();
+    await db.insert(projects).values({ id, companyId, name });
+    return id;
+  }
+
+  // A company-level root goal, which is what `getDefaultCompanyGoal` resolves
+  // to. It is the fallback `resolveNextIssueGoalId` writes onto an issue whose
+  // own `goalId` is null, and therefore the only goal derivation an otherwise
+  // empty update can perform.
+  async function seedDefaultCompanyGoal(companyId: string) {
+    const id = randomUUID();
+    await db.insert(goals).values({ id, companyId, title: "Company goal", level: "company", status: "active" });
+    return id;
+  }
+
+  // The archived isolated workspace a terminal issue is still linked to, in the
+  // state the reaper leaves behind: `archived`, closed, and with its worktree
+  // gone from disk. A rebuild of this row fails deterministically — the route's
+  // reopen path resolves no base checkout and `ensurePersistedExecutionWorkspaceAvailable`
+  // finds no directory at `cwd` — so a request that enters the reopen lifecycle
+  // is refused with 503 rather than quietly rebuilding a worktree in the test's
+  // environment.
+  async function seedArchivedIsolatedWorkspace(input: {
+    companyId: string;
+    projectId: string;
+    issueId: string;
+  }) {
+    const id = randomUUID();
+    await db.insert(executionWorkspaces).values({
+      id,
+      companyId: input.companyId,
+      projectId: input.projectId,
+      sourceIssueId: input.issueId,
+      mode: "isolated_workspace",
+      strategyType: "project_primary",
+      name: "archived-task-workspace",
+      status: "archived",
+      cwd: `/nonexistent/${id}`,
+      closedAt: new Date(),
+      cleanupEligibleAt: new Date(),
+    });
+    await db
+      .update(issues)
+      .set({ executionWorkspaceId: id })
+      .where(eq(issues.id, input.issueId));
+    return id;
+  }
+
+  // Stands up the live execution path a watchdog run's own recovery produced:
+  // the run reassigns the stalled leaf, and the wake that lands is claimed by a
+  // running heartbeat for the new owner. This is the state that takes the
+  // subtree out of `stopped` and leaves the run with nothing but its audit
+  // grant.
+  async function restoreLivePath(input: {
+    app: ReturnType<typeof createApp>;
+    companyId: string;
+    leafIssueId: string;
+    workerAgentId: string;
+  }) {
+    const revived = await request(input.app)
+      .patch(`/api/issues/${input.leafIssueId}`)
+      .send({ assigneeAgentId: input.workerAgentId });
+    expect(revived.status, JSON.stringify(revived.body)).toBe(200);
+    const wake = await waitForIssueWake(input.companyId, input.leafIssueId);
+    await db.update(agentWakeupRequests)
+      .set({ status: "claimed", claimedAt: new Date() })
+      .where(eq(agentWakeupRequests.id, wake.id));
+    await db.insert(heartbeatRuns).values({
+      companyId: input.companyId,
+      agentId: input.workerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: input.leafIssueId },
+    });
+  }
+
+  async function readExecutionWorkspace(workspaceId: string) {
+    const [row] = await db
+      .select({
+        status: executionWorkspaces.status,
+        closedAt: executionWorkspaces.closedAt,
+        cleanupReason: executionWorkspaces.cleanupReason,
+      })
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, workspaceId));
+    return row ?? null;
+  }
+
+  async function readAuditCommentSpentAt(runId: string) {
+    const [row] = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    const context = (row?.contextSnapshot ?? {}) as Record<string, unknown>;
+    const watchdog = context.taskWatchdog as Record<string, unknown> | undefined;
+    return (watchdog?.auditCommentSpentAt ?? context.auditCommentSpentAt ?? null) as string | null;
   }
 
   async function seedWatchdogRun(input: {
@@ -1345,6 +1453,266 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .where(eq(agentWakeupRequests.companyId, companyId));
     expect(wakes.filter((row) => (row.payload as Record<string, unknown> | null)?.commentId === summary.body.id))
       .toHaveLength(0);
+  });
+
+  // Suppressing the wake is not the whole of inertness. A terminal issue keeps
+  // its isolated workspace link, and both write surfaces rebuild and republish
+  // that workspace as active before they insert anything — so the exact case
+  // the grant exists for, a summary on a terminal watched root whose child the
+  // run just revived, ran the workspace lifecycle on the way in. Two outcomes,
+  // both wrong: the rebuild fails and the mandated summary is refused 503
+  // having written nothing, or it succeeds and a comment-only grant has
+  // published an active worktree and armed a cleanup fence.
+  it("records the recovery summary without reopening the watched root's archived workspace", async () => {
+    const companyId = await seedCompany();
+    const projectId = await seedProject(companyId);
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const ownerAgentId = await seedAgent(companyId, { name: "Parent Owner" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, {
+      title: "Finished parent",
+      status: "done",
+      projectId,
+      assigneeAgentId: ownerAgentId,
+    });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      projectId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const workspaceId = await seedArchivedIsolatedWorkspace({
+      companyId,
+      projectId,
+      issueId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    await restoreLivePath({ app, companyId, leafIssueId: watchedChildId, workerAgentId });
+
+    const summary = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "Revived the stalled child of this finished parent." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(201);
+    const watchdogComments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(eq(issueComments.issueId, watchedRootId), eq(issueComments.createdByRunId, runId)));
+    expect(watchdogComments).toHaveLength(1);
+
+    // The workspace row is exactly as the reaper left it. `cleanupReason` is the
+    // tell for the failed-rebuild branch and `status`/`closedAt` for the
+    // published one, so an untouched row rules out both: the reopen was never
+    // attempted, not merely unsuccessful.
+    const workspaceAfter = await readExecutionWorkspace(workspaceId);
+    expect(workspaceAfter?.status).toBe("archived");
+    expect(workspaceAfter?.closedAt).not.toBeNull();
+    expect(workspaceAfter?.cleanupReason).toBeNull();
+  });
+
+  // The same lifecycle sits on the update route, after its own audit-exception
+  // check has already decided the request writes no issue fields. "Writes no
+  // fields" was never the same statement as "has no effects".
+  it("records the update-route recovery summary without reopening the archived workspace", async () => {
+    const companyId = await seedCompany();
+    const projectId = await seedProject(companyId);
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const ownerAgentId = await seedAgent(companyId, { name: "Parent Owner" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, {
+      title: "Finished parent",
+      status: "done",
+      projectId,
+      assigneeAgentId: ownerAgentId,
+    });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      projectId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const workspaceId = await seedArchivedIsolatedWorkspace({
+      companyId,
+      projectId,
+      issueId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    await restoreLivePath({ app, companyId, leafIssueId: watchedChildId, workerAgentId });
+
+    const summary = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ comment: "Revived the stalled child of this finished parent." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(200);
+    const watchdogComments = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(eq(issueComments.issueId, watchedRootId), eq(issueComments.createdByRunId, runId)));
+    expect(watchdogComments).toHaveLength(1);
+
+    const workspaceAfter = await readExecutionWorkspace(workspaceId);
+    expect(workspaceAfter?.status).toBe("archived");
+    expect(workspaceAfter?.closedAt).not.toBeNull();
+    expect(workspaceAfter?.cleanupReason).toBeNull();
+  });
+
+  // The comment insert dedupes on (run, author, body) so a retried request
+  // cannot double-post. A watchdog run reaches that path legitimately: it
+  // comments once while the subtree is still stopped, and the summary it owes
+  // afterwards can repeat that wording. The shortcut returns the older row
+  // before `afterInsert` runs, so the request reports success having written no
+  // post-recovery record and left the grant unspent — free to be spent on some
+  // other body instead.
+  it("records the recovery summary even when the run already posted the same text pre-recovery", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, { title: "Stalled leaf", status: "todo" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const summaryBody = "Restarted this leaf and handed it back.";
+    // Posted while the subtree is still stopped, so it is admitted on the
+    // original fingerprint fast path and spends no grant.
+    const preRecovery = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: summaryBody });
+    expect(preRecovery.status, JSON.stringify(preRecovery.body)).toBe(201);
+    expect(await readAuditCommentSpentAt(runId)).toBeNull();
+
+    await restoreLivePath({ app, companyId, leafIssueId: watchedRootId, workerAgentId });
+
+    const summary = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: summaryBody });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(201);
+    // A distinct row, not the pre-recovery one handed back.
+    expect(summary.body.id).not.toBe(preRecovery.body.id);
+    const posted = await db
+      .select({ id: issueComments.id })
+      .from(issueComments)
+      .where(and(
+        eq(issueComments.issueId, watchedRootId),
+        eq(issueComments.createdByRunId, runId),
+        eq(issueComments.body, summaryBody),
+      ));
+    expect(posted).toHaveLength(2);
+    // And the grant it was given is now spent, so it cannot be redirected onto
+    // a different body.
+    expect(await readAuditCommentSpentAt(runId)).not.toBeNull();
+    const second = await request(app)
+      .post(`/api/issues/${watchedRootId}/comments`)
+      .send({ body: "And another thing." });
+    expect(second.status, JSON.stringify(second.body)).toBe(409);
+  });
+
+  // The update route's audit exception refuses the request whole if the body or
+  // the execution-policy transition leaves anything in `updateFields`. The
+  // service derives one more field below that check: an issue with no goal of
+  // its own is backfilled with the company's fallback goal on *every* update,
+  // including one whose patch is empty. So the inert record still moved issue
+  // state.
+  it("does not derive a fallback goal from the update route's audit summary", async () => {
+    const companyId = await seedCompany();
+    const defaultGoalId = await seedDefaultCompanyGoal(companyId);
+    const watchdogAgentId = await seedAgent(companyId, { name: "Reviving Watchdog" });
+    const workerAgentId = await seedAgent(companyId, { name: "Revived Worker" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root", goalId: null });
+    const watchedChildId = await seedIssue(companyId, {
+      title: "Stalled leaf",
+      parentId: watchedRootId,
+      status: "todo",
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({ companyId, watchdogAgentId, watchedIssueId: watchedRootId, watchdogIssueId });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    await restoreLivePath({ app, companyId, leafIssueId: watchedChildId, workerAgentId });
+
+    const [rootBefore] = await db.select().from(issues).where(eq(issues.id, watchedRootId));
+    const summary = await request(app)
+      .patch(`/api/issues/${watchedRootId}`)
+      .send({ comment: "Reassigned the stalled leaf." });
+    expect(summary.status, JSON.stringify(summary.body)).toBe(200);
+    const [rootAfter] = await db.select().from(issues).where(eq(issues.id, watchedRootId));
+    expect(rootAfter?.goalId).toBeNull();
+    // Measured rather than read off the code: every other column is compared
+    // too, so a derived field added to the update path lands here instead of in
+    // the next review. `updatedAt` is excluded because the plain comment insert
+    // bumps it on its own — recording comment activity is what it is for.
+    const columnsChanged = Object.keys(rootBefore ?? {}).filter(
+      (key) =>
+        key !== "updatedAt" &&
+        JSON.stringify((rootBefore as Record<string, unknown>)[key])
+          !== JSON.stringify((rootAfter as Record<string, unknown>)[key]),
+    );
+    expect(columnsChanged).toEqual([]);
+
+    // The derivation is live for this company on an ordinary update — without
+    // this control the assertion above would also pass if no fallback goal
+    // existed to derive.
+    const boardUpdate = await request(createApp(companyId))
+      .patch(`/api/issues/${watchedChildId}`)
+      .send({ title: "Stalled leaf, renamed" });
+    expect(boardUpdate.status, JSON.stringify(boardUpdate.body)).toBe(200);
+    const [childAfter] = await db
+      .select({ goalId: issues.goalId })
+      .from(issues)
+      .where(eq(issues.id, watchedChildId));
+    expect(childAfter?.goalId).toBe(defaultGoalId);
   });
 
   // Admission is several validations and one insert short of the write the

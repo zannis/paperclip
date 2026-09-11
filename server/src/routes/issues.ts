@@ -11068,6 +11068,14 @@ export function issueRoutes(
       actorAgentId: actor.agentId ?? null,
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       ...(watchdogWritePrecondition ? { expectedCurrentLeaf: watchdogWritePrecondition } : {}),
+      // The audit exception establishes that this request writes no issue
+      // fields, and the service derives one below that check: an issue with no
+      // goal of its own is backfilled with the company fallback on every
+      // update, empty patch included. That is a server-authored state change on
+      // a write admitted only as a record, so it is turned off rather than
+      // refused — there is no patch to drop, and refusing would cost the run
+      // the summary the mandate requires.
+      ...(isTaskWatchdogAuditComment(res) ? { preserveGoalId: true } : {}),
     };
     const shouldCollectCompletionPublication =
       actor.actorType === "user" && existing.status !== "done" && updateFields.status === "done";
@@ -11152,9 +11160,17 @@ export function issueRoutes(
     // and policy gate passes, and just before the update persists. A rejected
     // update must not rebuild and republish the workspace as active, because the
     // issue stays terminal and the reaper then skips the leaked workspace.
+    //
+    // Excluded for an audit comment for the same reason as on the comment
+    // route, and the guard above is why it is safe to say so here: the audit
+    // exception has already established that this request writes no issue
+    // fields, so it cannot move the issue out of its terminal state and no
+    // resumed run will come looking for the worktree. "Writes no fields" is not
+    // the same statement as "has no effects", which is exactly why this needs
+    // saying rather than following from the check above.
     let reopenedWorkspace: Pick<ExecutionWorkspace, "id"> | null = null;
     let reopenedGeneration: number | null = null;
-    if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate)) {
+    if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate) && !isTaskWatchdogAuditComment(res)) {
       const reopenOutcome = await reopenClosedIssueExecutionWorkspaceOrRespond(
         req,
         res,
@@ -14107,9 +14123,22 @@ export function issueRoutes(
     // blocker, and run-cap gate passes. A rejected comment must not rebuild and
     // republish the workspace as active, because the issue stays terminal and the
     // reaper then skips the leaked workspace.
+    //
+    // An audit comment is not in that lifecycle at all. The reopen exists
+    // because a comment can resume the work, and the resumed run needs its
+    // workspace back — but this one provably cannot resume anything: `resume`,
+    // `reopen` and `interrupt` make the request's intent `mutate`, so no audit
+    // grant is issued for them, and `shouldImplicitlyMoveCommentedIssueToTodo`
+    // returns false for an agent actor. So the issue stays terminal and nothing
+    // downstream will look for the worktree. Running the lifecycle anyway is
+    // wrong in both directions: a rebuild that fails refuses the mandated
+    // summary 503 with nothing written, and one that succeeds has a
+    // comment-only grant publishing an active worktree and arming a cleanup
+    // fence. Same reasoning as the wake suppression below — the record is
+    // admitted as a record, and this is one more thing a record must not do.
     let reopenedWorkspace: Pick<ExecutionWorkspace, "id"> | null = null;
     let reopenedGeneration: number | null = null;
-    if (closedExecutionWorkspace) {
+    if (closedExecutionWorkspace && !isTaskWatchdogAuditComment(res)) {
       const reopenOutcome = await reopenClosedIssueExecutionWorkspaceOrRespond(
         req,
         res,

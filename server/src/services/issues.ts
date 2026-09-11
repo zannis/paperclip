@@ -7812,6 +7812,12 @@ export function issueService(db: Db) {
         actorAgentId?: string | null;
         actorUserId?: string | null;
         expectedCurrentLeaf?: IssueUpdatePrecondition | null;
+        /**
+         * Suppress the fallback-goal derivation below, so this update writes no
+         * goal the caller did not ask for. For a caller whose authority is
+         * bounded to writing a record rather than changing state.
+         */
+        preserveGoalId?: boolean;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -7834,6 +7840,7 @@ export function issueService(db: Db) {
         actorAgentId,
         actorUserId,
         expectedCurrentLeaf,
+        preserveGoalId,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -8023,25 +8030,33 @@ export function issueService(db: Db) {
             ? getIssueRelationSummaryMap(existing.companyId, [id], tx)
             : Promise.resolve(new Map<string, IssueRelationSummaryMap>()),
         ]);
-        const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
-        const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
-          getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
-          getProjectDefaultGoalId(
-            tx,
-            existing.companyId,
-            issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
-          ),
-        ]);
+        // The goal is re-derived on every update, not only on one that names a
+        // goal or a project: an issue carrying no goal of its own is backfilled
+        // with the current fallback. That makes it a *server-authored* state
+        // change available to an otherwise empty patch, which is precisely what
+        // a caller holding a record-only grant must not be able to perform, so
+        // such a caller opts out and the issue keeps the goal it had.
+        if (!preserveGoalId) {
+          const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
+          const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
+            getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
+            getProjectDefaultGoalId(
+              tx,
+              existing.companyId,
+              issueData.projectId !== undefined ? issueData.projectId : existing.projectId,
+            ),
+          ]);
 
-        patch.goalId = resolveNextIssueGoalId({
-          currentProjectId: existing.projectId,
-          currentGoalId: existing.goalId,
-          currentProjectGoalId,
-          projectId: issueData.projectId,
-          goalId: issueData.goalId,
-          projectGoalId: nextProjectGoalId,
-          defaultGoalId: defaultCompanyGoal?.id ?? null,
-        });
+          patch.goalId = resolveNextIssueGoalId({
+            currentProjectId: existing.projectId,
+            currentGoalId: existing.goalId,
+            currentProjectGoalId,
+            projectId: issueData.projectId,
+            goalId: issueData.goalId,
+            projectGoalId: nextProjectGoalId,
+            defaultGoalId: defaultCompanyGoal?.id ?? null,
+          });
+        }
         const updated = await tx
           .update(issues)
           .set(patch)
@@ -9129,7 +9144,23 @@ export function issueService(db: Db) {
               )
             : (options?.metadata ?? null),
         );
-      if (createdByRunId) {
+      // Replay suppression: a run that re-sends the same comment gets the row it
+      // already wrote instead of a duplicate. It is only sound while the insert
+      // is the whole of the write. `afterInsert` is a claim that commits with
+      // the row and cannot be reproduced by handing an older row back — the
+      // task-watchdog audit grant is the instance, and it is the case where the
+      // shortcut is actively wrong rather than merely incomplete: the run
+      // comments once while the watched subtree is still stopped, and the
+      // summary it owes after its own recovery can legitimately repeat that
+      // wording. Matching it returns a pre-recovery row as success, so the
+      // mandated post-recovery record is never written and the grant it was
+      // meant to pay for stays unspent and redirectable onto another body.
+      //
+      // Inserting instead cannot double-post. The grant is read as unspent at
+      // admission, so an existing same-body row is necessarily the earlier one;
+      // a racer that committed in between loses the compare-and-set inside
+      // `afterInsert`, which rolls this insert back with it.
+      if (createdByRunId && !options?.afterInsert) {
         const existing = await dbOrTx
           .select()
           .from(issueComments)
