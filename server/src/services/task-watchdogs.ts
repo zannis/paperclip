@@ -22,14 +22,18 @@ import { logActivity } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { isPlainRecord, TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
+import {
+  isPlainRecord,
+  isTerminalWatchdogRunStatus,
+  TASK_WATCHDOG_ORIGIN_KIND,
+  TASK_WATCHDOG_TERMINAL_RUN_STATUSES,
+} from "./task-watchdog-scope.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
 const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
-const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
 // Grace window after an issue is created/assigned during which its first
 // assignment run/wake may have been enqueued but is not yet visible to a
 // watchdog evaluation (the eval can race the issue's own assignment run).
@@ -2047,6 +2051,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     companyId: string;
     watchedIssueId: string;
     stopFingerprint: string | null;
+    runId?: string | null;
     mutationLedger?: unknown;
   }) {
     if (!scope.stopFingerprint) {
@@ -2054,6 +2059,27 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         allowed: false as const,
         reason: "Task-watchdog run context is missing the stopped fingerprint required for mutation revalidation.",
       };
+    }
+
+    // Re-asserted here and not only in the scope resolver. `issueWatchdogs`
+    // going inactive is the only expiry the rest of this function knows about,
+    // and a watchdog does not go inactive when a run ends — so without this the
+    // guard's own answer would still be "fresh" for a run that is over. The
+    // resolver checks the same thing a moment earlier; this closes the window
+    // between the two, and covers every caller that builds a scope by other
+    // means.
+    if (scope.runId) {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, scope.runId))
+        .then((rows) => rows[0] ?? null);
+      if (!run || isTerminalWatchdogRunStatus(run.status)) {
+        return {
+          allowed: false as const,
+          reason: "Task-watchdog run has already finished; its mutation scope no longer applies.",
+        };
+      }
     }
 
     const watchdog = await db

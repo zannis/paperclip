@@ -5,6 +5,24 @@ import { heartbeatRuns, issues, issueWatchdogs } from "@paperclipai/db";
 const MAX_WATCHDOG_SCOPE_ANCESTRY_DEPTH = 100;
 export const TASK_WATCHDOG_ORIGIN_KIND = "task_watchdog";
 
+// A run that has reached one of these is over. It lives here, next to the
+// resolver that has to refuse it, rather than in `task-watchdogs.ts` — that
+// module imports this one, so this is the end of the dependency edge both
+// sides can share.
+export const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = [
+  "succeeded",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "timed_out",
+] as const;
+
+export function isTerminalWatchdogRunStatus(status: string | null | undefined) {
+  return TASK_WATCHDOG_TERMINAL_RUN_STATUSES.includes(
+    status as (typeof TASK_WATCHDOG_TERMINAL_RUN_STATUSES)[number],
+  );
+}
+
 type AgentRunActor = {
   type: string;
   agentId?: string | null;
@@ -75,6 +93,7 @@ export async function resolveTaskWatchdogMutationScope(
       id: heartbeatRuns.id,
       companyId: heartbeatRuns.companyId,
       agentId: heartbeatRuns.agentId,
+      status: heartbeatRuns.status,
       contextSnapshot: heartbeatRuns.contextSnapshot,
     })
     .from(heartbeatRuns)
@@ -88,6 +107,22 @@ export async function resolveTaskWatchdogMutationScope(
     return {
       kind: "invalid",
       detail: "Task-watchdog run context does not belong to this agent.",
+    };
+  }
+
+  // The exception this scope grants is earned by a *run* — a watchdog wake that
+  // observed a stopped subtree and is now recovering it. The context row that
+  // carries the grant outlives the run, and neither the fingerprint nor the
+  // persisted watchdog's `active` status expires with it: a watchdog stays
+  // active for as long as it is configured, so a succeeded, failed or cancelled
+  // run whose identity is replayed would otherwise keep its mutation grant over
+  // the watched subtree indefinitely, long after the subtree acquired a live
+  // owner of its own. The run's own status is the only thing here that ends,
+  // so it is what the grant is bound to.
+  if (isTerminalWatchdogRunStatus(run.status)) {
+    return {
+      kind: "invalid",
+      detail: "Task-watchdog run has already finished; its mutation scope no longer applies.",
     };
   }
 

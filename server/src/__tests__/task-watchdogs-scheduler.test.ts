@@ -788,6 +788,37 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([otherLeafId]);
   });
 
+  // The mutation grant is earned by a run, and has to end with it. Everything
+  // else the guard consults outlives the run: the context row carrying the
+  // fingerprint and the ledger is just a column, and `issueWatchdogs.status`
+  // stays `active` for as long as the watchdog is configured. So without the
+  // run's own status nothing here expires, and replaying a finished run's
+  // identity keeps its authority over the watched subtree indefinitely.
+  it("refuses the mutation scope once the watchdog run that earned it has finished", async () => {
+    const { companyId, agentId, runId, service, resolveScope } =
+      await seedWokenWatchdogRun("WDOG-TERMINAL-RUN", { establishedChildren: ["WDOG-TERMINAL-RUN-A"] });
+    const actor = { type: "agent", agentId, companyId, runId };
+
+    // Control: while the run is live the scope resolves and the guard admits it.
+    const liveScope = await resolveScope();
+    expect((await service.revalidateMutationScope(liveScope)).allowed).toBe(true);
+
+    for (const terminalStatus of ["succeeded", "failed", "cancelled", "interrupted", "timed_out"]) {
+      await db.update(heartbeatRuns).set({ status: terminalStatus }).where(eq(heartbeatRuns.id, runId));
+
+      const scope = await resolveTaskWatchdogMutationScope(db, actor);
+      expect(scope.kind, `status ${terminalStatus} should not resolve a watchdog scope`).toBe("invalid");
+      expect(scope.kind === "invalid" ? scope.detail : "").toContain("already finished");
+
+      // And the guard refuses the same scope object independently, so a scope
+      // resolved while the run was still live cannot be carried across the
+      // moment it ends.
+      const revalidated = await service.revalidateMutationScope({ ...liveScope, runId });
+      expect(revalidated.allowed, `status ${terminalStatus} should not revalidate`).toBe(false);
+      expect(revalidated.reason).toContain("already finished");
+    }
+  });
+
   // WDOG-001. The run and a board user write the *same* leaf in the same
   // window. Exempting a leaf from the diff just because the run was authorized
   // to touch it folds the board user's edit into what the run is allowed to
