@@ -75,10 +75,15 @@ vi.mock("../services/index.js", async () => {
       const service = actual.taskWatchdogService(...args);
       return {
         ...service,
+        // Forwards every argument. The second one carries the request's intent
+        // and the issue it writes, and dropping it here would hand the real
+        // service a state change it cannot attribute — the wrapper would be
+        // testing itself rather than the route.
         revalidateMutationScope: async (
           scope: Parameters<typeof service.revalidateMutationScope>[0],
+          opts?: Parameters<typeof service.revalidateMutationScope>[1],
         ) => {
-          const result = await service.revalidateMutationScope(scope);
+          const result = await service.revalidateMutationScope(scope, opts);
           const race = raceAfterRevalidate.current;
           if (race) {
             raceAfterRevalidate.current = null;

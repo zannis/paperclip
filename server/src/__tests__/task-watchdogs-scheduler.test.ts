@@ -899,9 +899,31 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       },
     ])).recorded).toBe(true);
 
-    const duringGrace = await service.revalidateMutationScope(await resolveScope());
+    // The run must still be able to say what it did — the summary comment is
+    // the whole point of the relaxation, and it is inert.
+    const duringGrace = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
     expect(duringGrace.classification?.state).toBe("pending_first_run");
     expect(duringGrace.allowed).toBe(true);
+
+    // But the child's own assignment wake is already queued, so it has an
+    // incoming owner that is not the watchdog. Writing state to it now races
+    // that owner, and the relaxation does not stretch that far.
+    const mutateChild = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "mutate",
+      targetIssueId: childId,
+    });
+    expect(mutateChild.allowed).toBe(false);
+    expect(mutateChild.reason).toContain("may only add a comment");
+
+    // The rest of the subtree is untouched by that: the run can still finish
+    // its recovery on an issue that has no execution path of its own.
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "mutate",
+      targetIssueId: sourceId,
+    })).allowed).toBe(true);
   });
 
   it("rejects a follow-up child this run did not create", async () => {
@@ -996,10 +1018,40 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       contextSnapshot: { issueId: leafId },
     });
 
-    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    // The mandated audit comment still lands — a liveness this run's own ledger
+    // accounts for must not lock it out of recording what it did.
+    const revalidated = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
     expect(revalidated.classification?.state).toBe("live");
     expect(revalidated.allowed).toBe(true);
-    expect(sourceId).toBeTruthy();
+
+    // The recovery worked, which means the leaf now has a running owner. The
+    // watchdog is not it: closing, blocking or reassigning that leaf from here
+    // would race the agent it just started. Restoring the audit comment is the
+    // grant; authority over a leaf with a live owner is not.
+    const mutateLiveLeaf = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "mutate",
+      targetIssueId: leafId,
+    });
+    expect(mutateLiveLeaf.allowed).toBe(false);
+    expect(mutateLiveLeaf.reason).toContain("may only add a comment");
+    expect(
+      "liveOwnedIssueIds" in mutateLiveLeaf ? mutateLiveLeaf.liveOwnedIssueIds : null,
+    ).toEqual([leafId]);
+
+    // A state change that will not say what it writes cannot be checked against
+    // the owner, so it is refused rather than assumed harmless.
+    expect((await service.revalidateMutationScope(await resolveScope(), { intent: "mutate" })).allowed)
+      .toBe(false);
+
+    // And the narrowing is surgical: an issue in the subtree with no execution
+    // path of its own is still the run's to finish recovering.
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "mutate",
+      targetIssueId: sourceId,
+    })).allowed).toBe(true);
   });
 
   it("rejects a live path this run's ledger does not account for", async () => {
@@ -1239,7 +1291,10 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       contextSnapshot: { issueId: leafId },
     });
 
-    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    const revalidated = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: leafId,
+    });
     expect(revalidated.classification?.state).toBe("live");
     expect(
       revalidated.allowed,
@@ -1247,6 +1302,13 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
         ? JSON.stringify(revalidated.unattributedLivenessIssueIds)
         : "",
     ).toBe(true);
+
+    // The wake this run reported is now a running owner on that leaf, so the
+    // inert comment is all the run still holds there.
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "mutate",
+      targetIssueId: leafId,
+    })).allowed).toBe(false);
   });
 
   // The positive control for the two above. The same leaf, the same net
@@ -1281,7 +1343,10 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       contextSnapshot: { issueId: leafId },
     });
 
-    const revalidated = await service.revalidateMutationScope(await resolveScope());
+    const revalidated = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: leafId,
+    });
     expect(revalidated.classification?.state).toBe("live");
     expect(
       revalidated.allowed,
@@ -1289,6 +1354,13 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
         ? JSON.stringify(revalidated.unattributedLivenessIssueIds)
         : "",
     ).toBe(true);
+
+    // The wake this run reported is now a running owner on that leaf, so the
+    // inert comment is all the run still holds there.
+    expect((await service.revalidateMutationScope(await resolveScope(), {
+      intent: "mutate",
+      targetIssueId: leafId,
+    })).allowed).toBe(false);
   });
 
   // WDOG-006. Resolving an interaction is one of the four granted operations

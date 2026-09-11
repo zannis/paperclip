@@ -2053,7 +2053,26 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     stopFingerprint: string | null;
     runId?: string | null;
     mutationLedger?: unknown;
-  }) {
+  }, opts: {
+    // What the request is actually trying to do. A comment that only adds a
+    // comment is inert by construction — `materialLeaf` strips
+    // `latestCommentAt`, so it can neither rotate the stop fingerprint nor
+    // change the classification — and it is the one write the mandate still
+    // requires from a run whose own recovery already restarted the subtree.
+    // Anything else is a state change and is held to the stricter rule below.
+    //
+    // The caller decides this per *request*, not per route: the comment route
+    // also carries `resume`/`reopen`/`interrupt` and approval markers, each of
+    // which moves issue state while wearing a comment's clothes. See
+    // `issueCommentWatchdogIntent` in the issue routes.
+    intent?: "comment" | "mutate";
+    // The issue this request is about to write. Needed to tell a state change
+    // aimed at an idle leaf from one aimed at a leaf that now has an owner of
+    // its own; absent, a state change is refused rather than guessed at.
+    targetIssueId?: string | null;
+  } = {}) {
+    const intent = opts.intent ?? "mutate";
+    const targetIssueId = opts.targetIssueId ?? null;
     if (!scope.stopFingerprint) {
       return {
         allowed: false as const,
@@ -2157,6 +2176,45 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         unattributedIssueIds,
         unattributedLivenessIssueIds: unattributedLiveness,
       };
+    }
+
+    // Everything above answers one question: is the subtree still the one this
+    // run was authorized against, or has somebody else moved it? That is a
+    // freshness verdict, and on its own it is not an authorization — it says
+    // nothing about *what* the request is about to do. Handing the same
+    // `allowed: true` to a summary comment, a status PATCH, a child creation
+    // and an interaction resolution is what turned the narrow grant this guard
+    // exists to restore into general authority over the subtree.
+    //
+    // The distinction that matters is ownership. Once the recovery has done its
+    // job the subtree has a live path again, and the issue carrying it has an
+    // owner that is not this watchdog. Closing, blocking or reassigning that
+    // issue now races a running agent — an authority the watchdog never needed
+    // and was never meant to have. The mandated audit comment is different in
+    // kind: it cannot rotate the fingerprint or change the classification, so
+    // it stays admitted, which is the whole point of the relaxation.
+    //
+    // Idle leaves elsewhere in the subtree are untouched by this: the run may
+    // still finish the rest of its recovery on them. It is specifically the
+    // issue that now has its own live or imminent execution path that is off
+    // limits, and a state change that will not say what it targets is refused
+    // rather than assumed harmless.
+    if (intent !== "comment") {
+      const ownedIssueIds = classification.state === "live"
+        ? classification.liveIssueIds
+        : classification.state === "pending_first_run"
+        ? classification.pendingIssueIds
+        : [];
+      if (ownedIssueIds.length > 0 && (targetIssueId == null || ownedIssueIds.includes(targetIssueId))) {
+        return {
+          allowed: false as const,
+          reason: targetIssueId == null
+            ? "Task-watchdog runs may only add a comment once the watched subtree has a live execution path; this request did not declare which issue it writes."
+            : "Task-watchdog runs may only add a comment to an issue that now has its own live execution path; its owner is not the watchdog.",
+          classification,
+          liveOwnedIssueIds: ownedIssueIds,
+        };
+      }
     }
 
     // The baseline stays put. Drift is always measured from the state the run

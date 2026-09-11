@@ -1784,6 +1784,24 @@ function isApprovalReviewComment(body: string) {
   );
 }
 
+// Whether a comment request can only add a comment. The comment route is not a
+// read-only surface: `resume`/`reopen` move a terminal or blocked issue back to
+// `todo`, `interrupt` cancels the issue's live run, and an approval-marker body
+// drives an execution-policy decision through
+// `applyIssueExecutionPolicyTransition`. Each of those is a state change
+// wearing a comment's clothes.
+//
+// This matters to the task-watchdog freshness guard specifically: its
+// live-subtree relaxation exists only because a plain comment provably cannot
+// change the watched subtree's classification or rotate its stop fingerprint.
+// A request carrying any of these is therefore classified as a mutation, and
+// takes the strict check, exactly like a status PATCH.
+function issueCommentWatchdogIntent(body: unknown): "comment" | "mutate" {
+  const payload = readObject(body);
+  if (payload.resume === true || payload.reopen === true || payload.interrupt === true) return "mutate";
+  return typeof payload.body === "string" && isApprovalReviewComment(payload.body) ? "mutate" : "comment";
+}
+
 function buildExecutionStageWakeContext(input: {
   state: ParsedExecutionState;
   wakeRole: ExecutionStageWakeContext["wakeRole"];
@@ -4142,7 +4160,9 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
+      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
+        intent: issueCommentWatchdogIntent(req.body),
+      });
     }
     const boundaryDecision = await decideIssueAccess(req, issue, "issue:comment");
     if (!boundaryDecision.allowed) {
@@ -4647,11 +4667,19 @@ export function issueRoutes(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
     issue: { id: string },
+    // A request that only adds a comment is inert and stays admitted once the
+    // run's own recovery has restored a live path; every state change is held
+    // to the stricter rule. Defaulting to `mutate` keeps a caller that forgets
+    // to say on the safe side of that line.
+    opts: { intent?: "comment" | "mutate" } = {},
   ) {
     if (scope.kind !== "watchdog") return true;
     if (scope.watchdogIssueId && issue.id === scope.watchdogIssueId) return true;
 
-    const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
+    const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope, {
+      intent: opts.intent ?? "mutate",
+      targetIssueId: issue.id,
+    });
     if (revalidated.allowed) {
       scheduleTaskWatchdogRecord(res, scope, revalidated);
       return true;
@@ -4802,7 +4830,13 @@ export function issueRoutes(
           message: scopeResult.detail,
         });
       }
-      const revalidated = await taskWatchdogsSvc.revalidateMutationScope(watchdogScope);
+      // Resolving an interaction is a state change, not a comment: it closes a
+      // waiting path and can queue the continuation wake that starts the issue's
+      // own owner. It takes the strict rule.
+      const revalidated = await taskWatchdogsSvc.revalidateMutationScope(watchdogScope, {
+        intent: "mutate",
+        targetIssueId: issue.id,
+      });
       if (!revalidated.allowed) {
         return denyIssueThreadInteractionResolution(res, {
           status: 403,
@@ -4960,7 +4994,11 @@ export function issueRoutes(
               message: "Suggested-task creation is outside the current watchdog scope",
             });
           }
-          const revalidated = await taskWatchdogsSvc.revalidateMutationScope(watchdogScope);
+          // Creating a child under `parent` is a state change against `parent`.
+          const revalidated = await taskWatchdogsSvc.revalidateMutationScope(watchdogScope, {
+            intent: "mutate",
+            targetIssueId: parent.id,
+          });
           if (!revalidated.allowed) {
             return denyIssueThreadInteractionResolution(res, {
               status: 403,

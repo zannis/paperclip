@@ -2246,6 +2246,109 @@ describe("agent issue mutation checkout ownership", () => {
       expect(order).toEqual(["record", "response"]);
     });
 
+    // `intent: "comment"` is a claim about what the request can *do*, not about
+    // which route it arrived on. The comment route is not a read-only surface:
+    // `resume`/`reopen` move a terminal or blocked issue back to `todo`,
+    // `interrupt` cancels the live run, and an approval-marker body drives an
+    // execution-policy decision. Those are state changes wearing a comment's
+    // clothes, so they take the strict check the same way a status PATCH does.
+    it.each([
+      ["resume", { body: "Picking this back up.", resume: true }],
+      ["reopen", { body: "Picking this back up.", reopen: true }],
+      ["interrupt", { body: "Standing this down.", interrupt: true }],
+      ["an approval marker", { body: "## Review: APPROVED\n\nShip it." }],
+    ])("takes the strict mutate check for a comment carrying %s", async (_label, payload) => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      mockTaskWatchdogService.revalidateMutationScope.mockClear();
+      await request(app).post(`/api/issues/${issueId}/comments`).send(payload);
+
+      // The comment gate is the first thing the route consults, and it is the
+      // one whose verdict this request rides in on.
+      expect(mockTaskWatchdogService.revalidateMutationScope.mock.calls[0]?.[1])
+        .toEqual({ intent: "mutate", targetIssueId: issueId });
+    });
+
+    it("takes the inert comment check for a comment that only adds a comment", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      mockTaskWatchdogService.revalidateMutationScope.mockClear();
+      await request(app)
+        .post(`/api/issues/${issueId}/comments`)
+        .send({ body: "Reassigned the stalled leaf; its owner is running." });
+
+      expect(mockTaskWatchdogService.revalidateMutationScope.mock.calls[0]?.[1])
+        .toEqual({ intent: "comment", targetIssueId: issueId });
+    });
+
+    // The regression this guards: the relaxation that admits a watchdog run
+    // once its own recovery restored a live path is issued on the premise that
+    // a comment cannot change the watched subtree. A `resume` on the comment
+    // route breaks that premise, so it must not ride in on it — it has to fail
+    // the strict check like any other state change.
+    it("does not let the live-subtree comment relaxation carry a resume through the comment route", async () => {
+      // A default-open company: `issue:mutate` resolves to the visible-write
+      // decision, which is what lets `assertExplicitResumeIntentAllowed` admit
+      // a follow-up on another agent's issue. That is the shape in which the
+      // comment route's `resume` actually reaches `svc.update`.
+      mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+        allowed: true,
+        action: input.action,
+        reason: input.action === "issue:mutate" ? "allow_visible_issue_write" : "allow_explicit_grant",
+        explanation: "Default-open write boundary.",
+      }));
+      // `blocked` with no unresolved blockers is the state a comment-route
+      // `resume` moves back to `todo` without ever consulting the mutation
+      // gate — only the comment gate stands between the request and the write.
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "blocked", assigneeAgentId: ownerAgentId }));
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...makeIssue({ assigneeAgentId: ownerAgentId }),
+        ...patch,
+      }));
+      // Exactly what the service now answers on a live subtree: the inert
+      // comment is admitted, every state change against the owned issue is not.
+      //
+      // Note the condition is `!== "mutate"` rather than `=== "comment"`, and
+      // that is deliberate: it reproduces the behaviour this test is guarding
+      // against. A route that does not say what its request does gets the
+      // permissive answer, which is exactly how a `resume` used to reach
+      // `svc.update` on the strength of arriving at the comment endpoint. Ask
+      // for `=== "comment"` instead and the test passes without the fix.
+      mockTaskWatchdogService.revalidateMutationScope.mockImplementation(
+        async (_scope: unknown, opts?: { intent?: string }) =>
+          opts?.intent !== "mutate"
+            ? {
+              allowed: true,
+              classification: { state: "live", liveIssueIds: [issueId], stopSnapshot },
+              ledgerBaseline,
+            }
+            : {
+              allowed: false,
+              reason:
+                "Task-watchdog runs may only add a comment to an issue that now has its own live execution path; its owner is not the watchdog.",
+              classification: { state: "live", liveIssueIds: [issueId], stopSnapshot },
+              liveOwnedIssueIds: [issueId],
+            },
+      );
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app)
+        .post(`/api/issues/${issueId}/comments`)
+        .send({ body: "Reassigned the stalled leaf.", resume: true });
+
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(mockIssueService.addComment).not.toHaveBeenCalled();
+    });
+
     it("declares the values its own update returned, not a re-read of the issue", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }));
