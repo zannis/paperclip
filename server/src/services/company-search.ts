@@ -38,7 +38,7 @@ import {
 } from "@paperclipai/shared";
 import { companyArtifactsService } from "./company-artifacts.js";
 import { companySearchExtractService } from "./company-search-extract.js";
-import { visibleIssueCondition } from "./issue-visibility.js";
+import { surfaceIssueCondition } from "./issue-visibility.js";
 import { parseTaskSearch, taskSearchCtes, taskSearchScore, taskSearchFieldMatch, taskSearchTermMatch } from "./task-search.js";
 
 const SNIPPET_MAX_CHARS = 240;
@@ -718,7 +718,7 @@ export function companySearchService(db: Db) {
         }
 
         const resultRows = await db.execute(sql`
-          ${taskSearchCtes(companyId, taskSearch, scope !== "issues", and(...issueFilters))}
+          ${taskSearchCtes(companyId, taskSearch, scope !== "issues", and(surfaceIssueCondition(), ...issueFilters))}
           ${sql.join(branches, sql` UNION ALL `)}
         `) as unknown as Array<SearchAggregateRow & Omit<IssueSearchRow, "commentSnippet" | "commentId" | "documentSnippet" | "documentTitle" | "documentKey">>;
 
@@ -907,7 +907,7 @@ export function companySearchService(db: Db) {
         const artifactIssueFilters = issueFilterConditions(companyId, filters);
         const artifactIssueConditions = [
           eq(issues.companyId, companyId),
-          visibleIssueCondition(),
+          surfaceIssueCondition(),
           ...artifactIssueFilters,
         ];
         const documentArtifactConditions = [
