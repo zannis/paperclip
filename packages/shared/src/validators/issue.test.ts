@@ -397,6 +397,13 @@ describe("issue validators", () => {
     }).workMode).toBe("skill_test");
   });
 
+  it("accepts the internal operation surface classification", () => {
+    expect(createIssueSchema.parse({ title: "Review wave", surfaceVisibility: "internal_operation" }))
+      .toMatchObject({ surfaceVisibility: "internal_operation" });
+    expect(createIssueSchema.safeParse({ title: "Review wave", surfaceVisibility: "hidden" }).success)
+      .toBe(false);
+  });
+
   it("validates blocked inbox attention payloads and requires redacted secret fields", () => {
     const parsed = issueBlockedInboxAttentionSchema.parse({
       kind: "blocked",

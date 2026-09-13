@@ -56,7 +56,7 @@ import {
   BLOCKER_ATTENTION_MAX_NODES,
   issueService,
 } from "./issues.js";
-import { visibleIssueCondition } from "./issue-visibility.js";
+import { surfaceIssueCondition } from "./issue-visibility.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isProspectiveBlockedTransition } from "./routable-blocked.js";
 import { evaluateAgentInvokability, type AgentOrgRow } from "./agent-invokability.js";
@@ -846,7 +846,7 @@ async function issueSummaryMap(db: Db, companyId: string, issueIds: Array<string
       eq(issues.projectWorkspaceId, projectWorkspaces.id),
       eq(projectWorkspaces.companyId, companyId),
     ))
-    .where(and(eq(issues.companyId, companyId), inArray(issues.id, ids), visibleIssueCondition()));
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, ids), surfaceIssueCondition()));
   return new Map(rows.map((row) => [row.id, {
     id: row.id,
     companyId: row.companyId,
@@ -939,7 +939,7 @@ async function blockingIssueMap(db: Db, companyId: string, blockedIssueIds: Arra
       eq(issues.companyId, companyId),
       eq(issueRelations.type, "blocks"),
       inArray(issueRelations.relatedIssueId, ids),
-      isNull(issues.hiddenAt),
+      surfaceIssueCondition(),
     ))
     .orderBy(asc(issueRelations.relatedIssueId), asc(issueRelations.createdAt), asc(issueRelations.id));
   const map = new Map<string, BlockingIssueSummary>();
@@ -982,7 +982,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
           eq(issueRelations.type, "blocks"),
           inArray(issueRelations.issueId, chunk),
           eq(issues.companyId, companyId),
-          isNull(issues.hiddenAt),
+          surfaceIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
         ));
       const childRowsPromise: Promise<BlockedWorkEdge[]> = includeChildren
@@ -995,7 +995,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
           .where(and(
             eq(issues.companyId, companyId),
             inArray(issues.parentId, chunk),
-            isNull(issues.hiddenAt),
+            surfaceIssueCondition(),
             notInArray(issues.status, ["done", "cancelled"]),
           ))
         : Promise.resolve([]);
@@ -1472,7 +1472,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         .where(and(
           eq(issues.companyId, companyId),
           eq(issues.originKind, PRODUCTIVITY_REVIEW_ORIGIN_KIND),
-          isNull(issues.hiddenAt),
+          surfaceIssueCondition(),
           isNotNull(issues.assigneeUserId),
           notInArray(issues.status, [...PRODUCTIVITY_REVIEW_TERMINAL_STATUSES]),
         ))
@@ -1647,7 +1647,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           updatedAt: issues.updatedAt,
         })
         .from(issues)
-        .where(and(eq(issues.companyId, companyId), eq(issues.status, "in_review"), visibleIssueCondition()))
+        .where(and(eq(issues.companyId, companyId), eq(issues.status, "in_review"), surfaceIssueCondition()))
         .orderBy(desc(issues.updatedAt), desc(issues.id));
       const reviewIssueIds = reviewRows.map((row) => row.id);
       const pendingReviewApprovalRows = reviewIssueIds.length === 0

@@ -38,7 +38,7 @@ import {
 } from "@paperclipai/shared";
 import { companyArtifactsService } from "./company-artifacts.js";
 import { companySearchExtractService } from "./company-search-extract.js";
-import { visibleIssueCondition } from "./issue-visibility.js";
+import { surfaceIssueCondition } from "./issue-visibility.js";
 
 const MIN_TOKEN_LENGTH = 2;
 const MIN_FUZZY_QUERY_LENGTH = 4;
@@ -928,7 +928,7 @@ export function companySearchService(db: Db) {
               ${coverageSql} AS token_coverage
             FROM issues
             WHERE issues.company_id = ${companyId}
-              AND ${visibleIssueCondition()}
+              AND ${surfaceIssueCondition()}
               ${matchedWhere}
           )
           ${sql.join(branches, sql` UNION ALL `)}
@@ -1120,7 +1120,7 @@ export function companySearchService(db: Db) {
         const artifactIssueFilters = issueFilterConditions(companyId, filters);
         const artifactIssueConditions = [
           eq(issues.companyId, companyId),
-          visibleIssueCondition(),
+          surfaceIssueCondition(),
           ...artifactIssueFilters,
         ];
         const documentArtifactConditions = [

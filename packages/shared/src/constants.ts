@@ -355,6 +355,7 @@ export const TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND = "task_watchdog_product_bug"
 // Marks the single onboarding "first task" so surfaces can special-case it
 // (e.g. suppress the seeded-description bubble and rely on a seeded greeting).
 export const ONBOARDING_FIRST_TASK_ORIGIN_KIND = "onboarding_first_task";
+export const INTERNAL_OPERATION_ORIGIN_KIND = "internal_operation";
 
 export const ISSUE_ORIGIN_KINDS = [
   "manual",
@@ -366,13 +367,14 @@ export const ISSUE_ORIGIN_KINDS = [
   "task_watchdog",
   TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND,
   ONBOARDING_FIRST_TASK_ORIGIN_KIND,
+  INTERNAL_OPERATION_ORIGIN_KIND,
 ] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;
 export type IssueOriginKind = BuiltInIssueOriginKind | PluginIssueOriginKind;
 export const ISSUE_WATCHDOG_DISCOVERY_KINDS = ["product_bug", "platform_bug"] as const;
 export type IssueWatchdogDiscoveryKind = (typeof ISSUE_WATCHDOG_DISCOVERY_KINDS)[number];
-export const ISSUE_SURFACE_VISIBILITIES = ["default", "plugin_operation"] as const;
+export const ISSUE_SURFACE_VISIBILITIES = ["default", "plugin_operation", "internal_operation"] as const;
 export type IssueSurfaceVisibility = (typeof ISSUE_SURFACE_VISIBILITIES)[number];
 
 export const ISSUE_RECOVERY_ACTION_KINDS = [
