@@ -30,6 +30,7 @@ import {
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
   recoveryService,
 } from "../services/recovery/service.js";
+import { heartbeatService } from "../services/heartbeat.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
