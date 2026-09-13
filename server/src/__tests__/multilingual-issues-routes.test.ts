@@ -131,6 +131,36 @@ describeEmbeddedPostgres("multilingual issue routes", () => {
     });
   });
 
+  it("creates internal operations that remain executable by id but stay off normal lists and search", async () => {
+    const createRes = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        title: "Flow review wave",
+        status: "todo",
+        priority: "high",
+        surfaceVisibility: "internal_operation",
+      });
+
+    expect(createRes.status, JSON.stringify(createRes.body)).toBe(201);
+    expect(createRes.body.originKind).toBe("internal_operation");
+
+    const direct = await request(app).get(`/api/issues/${createRes.body.id}`);
+    expect(direct.status).toBe(200);
+
+    const listed = await request(app).get(`/api/companies/${companyId}/issues`);
+    expect(listed.body.map((issue: { id: string }) => issue.id)).not.toContain(createRes.body.id);
+
+    const operational = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ includeInternalOperations: "true" });
+    expect(operational.body.map((issue: { id: string }) => issue.id)).toContain(createRes.body.id);
+
+    const searched = await request(app)
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ q: "Flow review wave" });
+    expect(searched.body.map((issue: { id: string }) => issue.id)).not.toContain(createRes.body.id);
+  });
+
   it("reads the multilingual title and description unchanged", async () => {
     const getRes = await request(app).get("/api/issues/LNG-1");
     expect(getRes.status, JSON.stringify(getRes.body)).toBe(200);
