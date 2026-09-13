@@ -95,6 +95,7 @@ import {
   issueCommentPresentationSchema,
   isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
+  INTERNAL_OPERATION_ORIGIN_KIND,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
 import { isForeignKeyViolation } from "../db-errors.js";
@@ -1761,6 +1762,7 @@ export interface IssueFilters {
   includeRoutineExecutions?: boolean;
   excludeRoutineExecutions?: boolean;
   includePluginOperations?: boolean;
+  includeInternalOperations?: boolean;
   includeBlockedBy?: boolean;
   includeBlockedInboxAttention?: boolean;
   includeLiveDescendantSummary?: boolean;
@@ -3002,6 +3004,21 @@ function shouldIncludePluginOperationIssues(filters: IssueFilters | undefined) {
     filters?.originKindPrefix ||
     filters?.originId ||
     filters?.projectId,
+  );
+}
+
+function nonInternalOperationIssueCondition() {
+  return ne(issues.originKind, INTERNAL_OPERATION_ORIGIN_KIND);
+}
+
+function shouldIncludeInternalOperationIssues(
+  filters: IssueFilters | undefined,
+) {
+  return Boolean(
+    filters?.includeInternalOperations ||
+      filters?.originKind ||
+      filters?.originKindPrefix ||
+      filters?.originId,
   );
 }
 
@@ -6217,6 +6234,8 @@ async function blockedInboxIssueConditions(
   }
   if (!shouldIncludePluginOperationIssues(filters))
     conditions.push(nonPluginOperationIssueCondition());
+  if (!shouldIncludeInternalOperationIssues(filters))
+    conditions.push(nonInternalOperationIssueCondition());
   if (filters?.labelId) {
     const labeledIssueIds = await dbOrTx
       .select({ issueId: issueLabels.issueId })
@@ -7901,6 +7920,9 @@ export function issueService(db: Db) {
       if (!shouldIncludePluginOperationIssues(filters)) {
         conditions.push(nonPluginOperationIssueCondition());
       }
+      if (!shouldIncludeInternalOperationIssues(filters)) {
+        conditions.push(nonInternalOperationIssueCondition());
+      }
       if (filters?.labelId) {
         const labeledIssueIds = await db
           .select({ issueId: issueLabels.issueId })
@@ -8161,6 +8183,8 @@ export function issueService(db: Db) {
       }
       if (!shouldIncludePluginOperationIssues(filters))
         conditions.push(nonPluginOperationIssueCondition());
+      if (!shouldIncludeInternalOperationIssues(filters))
+        conditions.push(nonInternalOperationIssueCondition());
       const [row] = await db
         .select({ count: sql<number>`count(*)` })
         .from(issues)
@@ -8177,6 +8201,7 @@ export function issueService(db: Db) {
         eq(issues.companyId, companyId),
         visibleIssueCondition(),
         nonPluginOperationIssueCondition(),
+        nonInternalOperationIssueCondition(),
         unreadForUserCondition(companyId, userId),
       ];
       const statuses = parseStatusFilter(status);
