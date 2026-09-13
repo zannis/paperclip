@@ -2047,6 +2047,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     const pluginVisibleIssueId = randomUUID();
     const operationIssueId = randomUUID();
     const typedOperationIssueId = randomUUID();
+    const internalOperationIssueId = randomUUID();
     const legacyContentMachineOperationIssueId = randomUUID();
 
     await db.insert(companies).values({
@@ -2113,6 +2114,16 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
         originId: "mission-alpha:operation-2",
       },
       {
+        id: internalOperationIssueId,
+        companyId,
+        projectId,
+        title: "Flow review wave",
+        status: "todo",
+        priority: "medium",
+        assigneeAgentId: agentId,
+        originKind: "internal_operation",
+      },
+      {
         id: legacyContentMachineOperationIssueId,
         companyId,
         projectId,
@@ -2130,6 +2141,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(defaultIssueIds).toContain(pluginVisibleIssueId);
     expect(defaultIssueIds).not.toContain(operationIssueId);
     expect(defaultIssueIds).not.toContain(typedOperationIssueId);
+    expect(defaultIssueIds).not.toContain(internalOperationIssueId);
     expect(defaultIssueIds).not.toContain(legacyContentMachineOperationIssueId);
 
     const inboxIssueIds = (await svc.list(companyId, {
@@ -2140,6 +2152,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(inboxIssueIds).toContain(normalIssueId);
     expect(inboxIssueIds).not.toContain(operationIssueId);
     expect(inboxIssueIds).not.toContain(typedOperationIssueId);
+    expect(inboxIssueIds).not.toContain(internalOperationIssueId);
     expect(inboxIssueIds).not.toContain(legacyContentMachineOperationIssueId);
 
     await expect(svc.list(companyId, { originKind: "plugin:paperclip.missions:operation" }))
@@ -2156,6 +2169,12 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     expect(projectIssueIds).toContain(operationIssueId);
     expect(projectIssueIds).toContain(typedOperationIssueId);
     expect(projectIssueIds).toContain(legacyContentMachineOperationIssueId);
+    expect(projectIssueIds).not.toContain(internalOperationIssueId);
+
+    await expect(svc.getById(internalOperationIssueId))
+      .resolves.toEqual(expect.objectContaining({ id: internalOperationIssueId }));
+    await expect(svc.list(companyId, { originKind: "internal_operation" }))
+      .resolves.toEqual([expect.objectContaining({ id: internalOperationIssueId })]);
 
     const advancedIssueIds = (await svc.list(companyId, { includePluginOperations: true })).map((issue) => issue.id);
     expect(advancedIssueIds).toContain(operationIssueId);

@@ -55,7 +55,7 @@ import {
   BLOCKER_ATTENTION_MAX_NODES,
   issueService,
 } from "./issues.js";
-import { executionIssueCondition } from "./issue-visibility.js";
+import { surfaceIssueCondition } from "./issue-visibility.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isProspectiveBlockedTransition } from "./routable-blocked.js";
 import { issueReadSqlCondition, type AuthorizationActor } from "./authorization.js";
@@ -854,7 +854,7 @@ async function issueSummaryMap(
     .where(and(
       eq(issues.companyId, companyId),
       inArray(issues.id, ids),
-      executionIssueCondition(),
+      surfaceIssueCondition(),
       readCondition,
     ));
   return new Map(rows.map((row) => [row.id, {
@@ -1637,7 +1637,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         .where(and(
           eq(issues.companyId, companyId),
           eq(issues.status, "in_review"),
-          executionIssueCondition(),
+          surfaceIssueCondition(),
           readCondition,
         ))
         .orderBy(desc(issues.updatedAt), desc(issues.id));
