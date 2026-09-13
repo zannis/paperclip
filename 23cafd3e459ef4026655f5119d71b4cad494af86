@@ -1,0 +1,21 @@
+server/src/__tests__/openapi-routes.test.ts
+  s_fdd2045517bdc7::t_0513d566c4e0d7 9,130-685,687-690,692-693,695-707,720-747,750-751,753-759,763-770,773-775,777-780,903-1195,1215-1221
+server/src/routes/openapi.ts
+  s_fdd2045517bdc7::t_3653a71b26914b 864-870,873-874,887-921,934,936-938,957-958,961-963,974-986,1006-1008,1024-1027,1032-1034,1079-1100,1106-1111,1113-1115,1119-1159,8404-8419
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "23cafd3e459ef4026655f5119d71b4cad494af86",
+  "prompts": {},
+  "sessions": {
+    "s_fdd2045517bdc7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55cca4a6-b4ec-4e1f-94d8-aa11afdf4c4d",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
