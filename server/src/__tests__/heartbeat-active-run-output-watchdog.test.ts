@@ -32,6 +32,7 @@ import {
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
   recoveryService,
 } from "../services/recovery/service.js";
+import { heartbeatService } from "../services/heartbeat.js";
 
 vi.mock("../services/heartbeat-run-events.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/heartbeat-run-events.js")>();
