@@ -1,0 +1,218 @@
+server/src/__tests__/openapi-routes.test.ts
+  s_c68e1dbe3b756f::t_6d3cd3fd97db93 878-879
+  s_fdd2045517bdc7::t_0513d566c4e0d7 201-202,204,205,496,541,633,645,646,651,656,673,677-678,685-686,694-696,709,717,720-721,750
+server/src/routes/agents.ts
+  s_c68e1dbe3b756f::t_8a0b4570c4772a 7184-7186,7188,7194
+server/src/routes/openapi.ts
+  s_c68e1dbe3b756f::t_2eaffe8c33fa6f 6574-6576,6578
+  s_fdd2045517bdc7::t_3653a71b26914b 1308-1314,1317-1318,1335-1369,1382,1384-1386,1405-1406,1409-1411,1422-1434,1454-1456,1473-1476,1481-1483,1562-1583,1589-1594,1596-1598,1602-1642,11227-11242
+ui/src/api/client.test.ts
+  s_c68e1dbe3b756f::t_731ccc5827e76c 202-216
+ui/src/api/heartbeats.test.ts
+  s_c68e1dbe3b756f::t_72edbfc1c6e007 41-62
+ui/src/api/heartbeats.ts
+  s_c68e1dbe3b756f::t_dd30cc3412e045 226-231
+server/src/__tests__/heartbeat-suppressed-execution-workspace-policy.test.ts
+  s_c68e1dbe3b756f::t_fc11d738be405c 1-543
+server/src/__tests__/execution-workspace-policy.test.ts
+  s_c68e1dbe3b756f::t_04a3ba82e1bc4b 9,535-844
+server/src/services/execution-workspace-policy.ts
+  s_c68e1dbe3b756f::t_1ac5072fb1a2ba 167-377,526-528,531
+server/src/services/heartbeat.ts
+  s_c68e1dbe3b756f::t_a6d9a8ecdb9f5f 422,14513
+  s_17d62940a2a559::t_1e26ed57943321 18664
+server/src/__tests__/heartbeat-process-recovery.test.ts
+  h_f81d3033687456 1352,1354,1359-1360,6084-6085
+  s_c68e1dbe3b756f::t_db6c2b62dac032 5344,5657,5674
+server/src/__tests__/issue-recovery-actions.test.ts
+  h_f81d3033687456 616-618,672-766
+server/src/services/heartbeat-stop-metadata.ts
+  h_f81d3033687456 15-41
+server/src/services/recovery/infra-redispatch-backoff.test.ts
+  h_f81d3033687456 1-144
+server/src/services/recovery/infra-redispatch-backoff.ts
+  h_f81d3033687456 1-159
+server/src/services/recovery/service.ts
+  h_f81d3033687456 107,125-130,240,298-299,389-392,399,526,527,1056-1090,1091-1098,1108-1115,1116-1124,1129-1137,1147-1166,2585,2607,2645,2655,2686,2691,2726,2739,2756,3890-3891,3896,3908,4311,4643-4645
+  s_17d62940a2a559::t_93a1aa5a1da76b 4390-4408
+  s_17d62940a2a559::t_72a5528171280c 2572-2573,2615-2616
+  s_17d62940a2a559::t_264bfb4afbad42 952
+  s_17d62940a2a559::t_8a8d3b83898a41 1099-1107,1125-1128,1138-1146
+  s_17d62940a2a559::t_f1c9d048b79dae 3886-3887
+  s_17d62940a2a559::t_650b8cf6a4f4c0 229
+  s_17d62940a2a559::t_b939e84e358a3e 2693-2696,2714-2717,2731-2732,2761-2763
+server/src/__tests__/heartbeat-active-run-output-watchdog.test.ts
+  s_c68e1dbe3b756f::t_88a909555694d4 23-27,99-100,173-174,436-473
+server/src/__tests__/recovery-stale-issue-lock-sweep.test.ts
+  s_9a0fa3387f1322::t_0753206d99c89c 381,403,408
+  s_c68e1dbe3b756f::t_95fe6f285163c9 380
+server/src/services/local-service-supervisor.ts
+  s_9a0fa3387f1322::t_19639569dc4357 218,245-253,466,606
+packages/adapters/codex-local/src/server/codex-home.test.ts
+  h_f81d3033687456 387-404,1044-1048,1106-1111,1136
+packages/adapters/codex-local/src/server/codex-home.ts
+  h_f81d3033687456 10-16,30-31,328,744
+Dockerfile
+  h_f81d3033687456 166-199,227-228
+server/src/__tests__/adapter-auth-signal-routes.test.ts
+  s_8c64ed9ef3e931::t_85ec64f5743359 128-133
+server/src/__tests__/adapter-model-refresh-routes.test.ts
+  s_8c64ed9ef3e931::t_b1cc5aa2615614 107-112
+server/src/__tests__/agent-adapter-validation-routes.test.ts
+  s_8c64ed9ef3e931::t_c74f8c4fc64888 176-181
+server/src/__tests__/agent-device-login-routes.test.ts
+  s_8c64ed9ef3e931::t_53102bae7099aa 365-370
+server/src/__tests__/agent-permissions-routes.test.ts
+  s_8c64ed9ef3e931::t_32d99ae4e91a83 272-277
+server/src/__tests__/agent-test-environment-routes.test.ts
+  s_8c64ed9ef3e931::t_32360d35d0573c 154-159
+server/src/__tests__/artifact-review-document-routes.test.ts
+  s_8c64ed9ef3e931::t_a013e419b93b57 140-145
+server/src/__tests__/built-in-agent-routes.test.ts
+  s_8c64ed9ef3e931::t_1b841a73208ed8 87-92
+server/src/__tests__/company-branding-route.test.ts
+  s_8c64ed9ef3e931::t_d17bce71de8166 80-85
+server/src/__tests__/company-skills-routes.test.ts
+  s_8c64ed9ef3e931::t_093c5eafff50b4 201-206
+server/src/__tests__/concurrent-import-actual-guard.test.ts
+  s_8c64ed9ef3e931::t_76bb1c27f9edd4 1-130
+server/src/__tests__/costs-service.test.ts
+  s_8c64ed9ef3e931::t_08ab6c7d310fe1 133-138
+server/src/__tests__/document-annotation-routes.test.ts
+  s_8c64ed9ef3e931::t_0df31a58b5f901 161-166
+server/src/__tests__/external-object-routes.test.ts
+  s_8c64ed9ef3e931::t_5f6e1ba03942e0 103-108
+server/src/__tests__/issue-activity-events-routes.test.ts
+  s_8c64ed9ef3e931::t_55da1314dc9413 140-145
+server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+  s_8c64ed9ef3e931::t_13269dee88301a 393-398
+server/src/__tests__/issue-assigned-backlog-contract-routes.test.ts
+  s_8c64ed9ef3e931::t_689350a8221d05 118-123
+server/src/__tests__/issue-attachment-routes.test.ts
+  s_8c64ed9ef3e931::t_32f377d4a6ebc2 158-163
+server/src/__tests__/issue-closed-workspace-routes.test.ts
+  s_8c64ed9ef3e931::t_ba8483e6ac8a77 209-214
+server/src/__tests__/issue-dependency-wakeups-routes.test.ts
+  s_8c64ed9ef3e931::t_47a0d3e3b6dac1 135-140
+server/src/__tests__/issue-document-restore-routes.test.ts
+  s_8c64ed9ef3e931::t_8a6c095ca568b8 184-189
+server/src/__tests__/issue-update-comment-wakeup-routes.test.ts
+  s_8c64ed9ef3e931::t_65fd1efacffc13 207-212
+server/src/__tests__/issue-workspace-command-authz.test.ts
+  s_8c64ed9ef3e931::t_5d325945e2cb26 155-160
+server/src/__tests__/llms-routes.test.ts
+  s_8c64ed9ef3e931::t_99776623ce11fa 30-35
+server/src/__tests__/project-routes-env.test.ts
+  s_8c64ed9ef3e931::t_fc67ac4b7e0e64 90-95
+server/src/__tests__/project-workspace-managed-sandbox-routes.test.ts
+  s_8c64ed9ef3e931::t_a44e005ffe2d20 112-117
+server/src/__tests__/routine-document-annotation-routes.test.ts
+  s_8c64ed9ef3e931::t_1a6ffd025c01f6 129-134
+server/src/__tests__/routines-routes.test.ts
+  s_8c64ed9ef3e931::t_e52ca463b66197 169-174
+server/src/__tests__/summary-slot-routes.test.ts
+  s_8c64ed9ef3e931::t_68730855b28442 75-80
+server/src/__tests__/teams-catalog-routes.test.ts
+  s_8c64ed9ef3e931::t_46c15a7b5913e4 37-42
+server/src/__tests__/user-profile-routes.test.ts
+  s_8c64ed9ef3e931::t_96e9984ad1c7e6 49-54
+server/src/routes/setup-token-route.test.ts
+  s_8c64ed9ef3e931::t_b51b7662b197d2 376-383,386
+docs/api/issues.md
+  h_f81d3033687456 54-72
+server/src/__tests__/issue-create-project-inference-routes.test.ts
+  h_f81d3033687456 1-358
+server/src/__tests__/issue-project-inference.test.ts
+  h_f81d3033687456 1-75,104-196
+server/src/routes/issues.ts
+  h_f81d3033687456 279,3811-3813,3816-3817
+  s_17d62940a2a559::t_87d3556b9e0a82 3806-3810,3814-3815,11622-11629,11633,11669,11679
+server/src/services/issue-project-inference.ts
+  h_f81d3033687456 1-32,35,37-114,121,123-128,131-175,177-183,187-202,204-345
+packages/paperclip-runner/runner/crates/runner-core/tests/codex_provider.rs
+  h_f81d3033687456 1634-1658,1780-1786,1788-1822,1824
+packages/paperclip-runner/src/contracts/durable-recovery.ts
+  s_c68e1dbe3b756f::t_302b53bc791c63 40-56,98-104
+packages/paperclip-runner/src/control-plane/durable-prp-control-plane.test.ts
+  s_c68e1dbe3b756f::t_aa8f97787e9ec9 2304-2397
+packages/paperclip-runner/src/control-plane/durable-prp-control-plane.ts
+  s_c68e1dbe3b756f::t_2346b6eae868a4 683-689,2874-2878,2882-2883
+packages/paperclip-runner/src/control-plane/prp-transport-types.ts
+  s_c68e1dbe3b756f::t_4a365abf6731d5 36-42
+patches/acpx@0.12.0.patch
+  s_c68e1dbe3b756f::t_ccb1b3a56653d8 23-52,58-60,62-63,67-69,71-73,91-93,165,180,194
+patches/acpx@0.13.1.patch
+  s_8c64ed9ef3e931::t_7c7de40e0a36d2 42-69,234,307,491
+scripts/prepare-bundled-package.mjs
+  s_c68e1dbe3b756f::t_1b0c0228624600 181-187
+  s_c68e1dbe3b756f::t_5607c005624136 176-180,188-190
+  s_c68e1dbe3b756f::t_993ff4830517a2 201-208
+  s_c68e1dbe3b756f::t_e85601a840f909 4,10,25-28,37-59,200
+.github/workflows/commitperclip-review.yml
+  s_d05eab20efe3b8::t_af0ec907204be9 17-20
+packages/adapter-utils/src/server-utils.ts
+  s_17d62940a2a559::t_397a32e9b51974 14,170-176,3074-3127
+server/src/index.ts
+  s_17d62940a2a559::t_1e26ed57943321 59,105-111,1902-1950,2080
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "196f62809763489ebe014a97702663fd64fc6fb2",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_17d62940a2a559": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ed7-a01a-7c92-a8f5-4e47ee7e70d3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_8c64ed9ef3e931": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "124804bf-82be-4ca0-b1c0-2c9416f697d6",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_9a0fa3387f1322": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "69862a81-f111-4edf-8d79-53f83fff59b1",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_c68e1dbe3b756f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fb061365-06a1-4b38-82ea-edea1b52e03c",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_d05eab20efe3b8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09c82-c3e9-74d0-be4a-3c0b5243bc08",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_fdd2045517bdc7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "55cca4a6-b4ec-4e1f-94d8-aa11afdf4c4d",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
