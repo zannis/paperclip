@@ -14,6 +14,10 @@ permissions:
 
 jobs:
   review:
+    # This review depends on the upstream commitperclip App, its private key,
+    # and GitHub Dependency Review. Deployment forks retain the workflow while
+    # syncing upstream, but do not have or need that upstream-only machinery.
+    if: github.repository == 'paperclipai/paperclip'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
