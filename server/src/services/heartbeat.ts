@@ -435,7 +435,9 @@ import {
   type HeartbeatRunScratch,
 } from "./run-scratch.js";
 import {
+  applyLowTrustWorkspaceIsolation,
   buildExecutionWorkspaceAdapterConfig,
+  describeSuppressedProjectExecutionWorkspacePolicy,
   gateProjectExecutionWorkspacePolicy,
   issueExecutionWorkspaceModeForPersistedWorkspace,
   isUnrunnableWorktreeCombo,
@@ -20103,11 +20105,11 @@ export function heartbeatService(
         legacyUseProjectWorkspace:
           issueAssigneeOverrides?.useProjectWorkspace ?? null,
       });
-      const requestedExecutionWorkspaceMode =
-        trustPreset.kind === "low_trust_review" &&
-        resolvedExecutionWorkspaceMode === "shared_workspace"
-          ? "isolated_workspace"
-          : resolvedExecutionWorkspaceMode;
+      const lowTrustReview = trustPreset.kind === "low_trust_review";
+      const requestedExecutionWorkspaceMode = applyLowTrustWorkspaceIsolation(
+        resolvedExecutionWorkspaceMode,
+        lowTrustReview,
+      );
       const issueRef = issueContext
         ? {
             id: issueContext.id,
@@ -21845,7 +21847,63 @@ export function heartbeatService(
         },
       });
       const runtimeSessionParams = runtimeSessionResolution.sessionParams;
+      const suppressedProjectExecutionWorkspacePolicyWarning =
+        describeSuppressedProjectExecutionWorkspacePolicy({
+          projectPolicy: parsedProjectExecutionWorkspacePolicy,
+          issueSettings: parsedIssueExecutionWorkspaceSettings,
+          legacyUseProjectWorkspace:
+            issueAssigneeOverrides?.useProjectWorkspace ?? null,
+          agentConfig: config,
+          lowTrustReview,
+          isolatedWorkspacesEnabled,
+          resolvedWorkspace: {
+            mode: requestedExecutionWorkspaceMode,
+            source: resolvedWorkspace.source,
+            baseCwdFallback: resolvedWorkspace.baseCwdFallback,
+            restoredWorkspaceMode:
+              reusedExecutionWorkspace && reusableExistingExecutionWorkspace
+                ? issueExecutionWorkspaceModeForPersistedWorkspace(
+                    reusableExistingExecutionWorkspace.mode,
+                  )
+                : null,
+          },
+        });
+      if (suppressedProjectExecutionWorkspacePolicyWarning) {
+        logger.warn(
+          {
+            event: "project_execution_workspace_policy_suppressed",
+            companyId: agent.companyId,
+            agentId: agent.id,
+            runId: run.id,
+            issueId,
+            projectId: projectContext?.id ?? null,
+            projectDefaultMode:
+              parsedProjectExecutionWorkspacePolicy?.defaultMode ?? null,
+            projectWorkspaceStrategyType:
+              parsedProjectExecutionWorkspacePolicy?.workspaceStrategy?.type ??
+              null,
+            requestedExecutionWorkspaceMode,
+            issueExecutionWorkspaceMode:
+              parsedIssueExecutionWorkspaceSettings?.mode ?? null,
+            resolvedWorkspaceSource: resolvedWorkspace.source,
+            resolvedWorkspaceBaseCwdFallback:
+              resolvedWorkspace.baseCwdFallback,
+            restoredExecutionWorkspaceId:
+              reusedExecutionWorkspace
+                ? (reusableExistingExecutionWorkspace?.id ?? null)
+                : null,
+            restoredExecutionWorkspaceMode:
+              reusedExecutionWorkspace
+                ? (reusableExistingExecutionWorkspace?.mode ?? null)
+                : null,
+          },
+          "Project execution workspace policy is configured but not applied; isolated workspaces are disabled for this instance",
+        );
+      }
       const runtimeWorkspaceWarnings = [
+        ...(suppressedProjectExecutionWorkspacePolicyWarning
+          ? [suppressedProjectExecutionWorkspacePolicyWarning]
+          : []),
         ...resolvedWorkspace.warnings,
         ...executionWorkspace.warnings,
         ...(runtimeSessionResolution.warning
