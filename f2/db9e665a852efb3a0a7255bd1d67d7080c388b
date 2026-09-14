@@ -1,0 +1,19 @@
+server/src/__tests__/heartbeat-process-recovery.test.ts
+  s_17d62940a2a559::t_b0d7ea09403302 9995-9997,10582-10584
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f2db9e665a852efb3a0a7255bd1d67d7080c388b",
+  "prompts": {},
+  "sessions": {
+    "s_17d62940a2a559": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ed7-a01a-7c92-a8f5-4e47ee7e70d3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
