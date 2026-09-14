@@ -1,0 +1,31 @@
+server/src/__tests__/issue-comment-cancel-routes.test.ts
+  s_17d62940a2a559::t_2ee56ed8e3e807 196-201
+server/src/services/heartbeat.ts
+  s_17d62940a2a559::t_2ee56ed8e3e807 438,440,20108-20112,21850-21902,21904-21906
+server/src/__tests__/instance-settings-routes.test.ts
+  s_17d62940a2a559::t_2ee56ed8e3e807 61-66
+server/src/__tests__/agent-instructions-routes.test.ts
+  s_17d62940a2a559::t_2ee56ed8e3e807 121-126
+server/src/__tests__/issue-telemetry-routes.test.ts
+  s_17d62940a2a559::t_c1cba973f1ab4c 142-147
+server/src/__tests__/agent-skills-routes.test.ts
+  s_17d62940a2a559::t_2ee56ed8e3e807 374-379
+server/src/__tests__/invite-summary-route.test.ts
+  s_17d62940a2a559::t_c1cba973f1ab4c 48-53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9a7c5e481bf909849bc36113e206d676ad5aa21e",
+  "prompts": {},
+  "sessions": {
+    "s_17d62940a2a559": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ed7-a01a-7c92-a8f5-4e47ee7e70d3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
