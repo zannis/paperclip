@@ -60,7 +60,7 @@ import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import {
-  isPidAlive,
+  isProcessPidAlive,
   isProcessGroupAlive,
 } from "../local-service-supervisor.js";
 import { redactSensitiveText } from "../../redaction.js";
@@ -5721,7 +5721,7 @@ export function recoveryService(
     if (!hasLiveExecution) {
       if (typeof pid === "number" || typeof processGroupId === "number") {
         const processAlive =
-          (typeof pid === "number" && isPidAlive(pid)) ||
+          (typeof pid === "number" && isProcessPidAlive(pid)) ||
           (typeof processGroupId === "number" &&
             isProcessGroupAlive(processGroupId));
         processGone = !processAlive;
