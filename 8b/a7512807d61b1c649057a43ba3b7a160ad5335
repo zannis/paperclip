@@ -1,0 +1,19 @@
+.github/workflows/commitperclip-review.yml
+  s_d05eab20efe3b8::t_af0ec907204be9 17-20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "8ba7512807d61b1c649057a43ba3b7a160ad5335",
+  "prompts": {},
+  "sessions": {
+    "s_d05eab20efe3b8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09c82-c3e9-74d0-be4a-3c0b5243bc08",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
