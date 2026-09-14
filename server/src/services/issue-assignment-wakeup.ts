@@ -1,5 +1,6 @@
 import { logger } from "../middleware/logger.js";
 import type { DurableChatWakeupRequest } from "./durable-chat-wakeup.js";
+import { TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY } from "./task-watchdog-scope.js";
 
 type WakeupTriggerDetail = "manual" | "ping" | "callback" | "system";
 type WakeupSource = "timer" | "assignment" | "on_demand" | "automation";
@@ -22,6 +23,15 @@ export interface IssueAssignmentWakeupDeps {
   ) => Promise<unknown>;
 }
 
+// Whether `queueIssueAssignmentWakeup` will actually wake anybody for this
+// issue. A caller that has to record the *fact* of the wake rather than fire it
+// — the task-watchdog ledger, which tells a run the request itself started from
+// one it merely found running — needs the same answer, and must not restate the
+// condition to get it.
+export function issueAssignmentWakeupFires(issue: { assigneeAgentId: string | null; status: string }) {
+  return Boolean(issue.assigneeAgentId) && issue.status !== "backlog";
+}
+
 export function queueIssueAssignmentWakeup(input: {
   heartbeat: IssueAssignmentWakeupDeps;
   issue: { id: string; assigneeAgentId: string | null; status: string };
@@ -39,11 +49,17 @@ export function queueIssueAssignmentWakeup(input: {
   attachmentOmissionReasons?: Record<string, number> | null;
   rethrowOnError?: boolean;
   durableChatRequest?: DurableChatWakeupRequest;
+  // Set when the request firing this wake is acting under a task-watchdog
+  // mutation scope. Stamped into the payload so the live path this wake starts
+  // carries the watchdog run that caused it; see
+  // `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY`.
+  watchdogOriginRunId?: string | null;
 }) {
-  if (!input.issue.assigneeAgentId || input.issue.status === "backlog") return;
+  const assigneeAgentId = input.issue.assigneeAgentId;
+  if (!assigneeAgentId || !issueAssignmentWakeupFires(input.issue)) return;
 
   return input.heartbeat
-    .wakeup(input.issue.assigneeAgentId, {
+    .wakeup(assigneeAgentId, {
       source: "assignment",
       triggerDetail: "system",
       reason: input.reason,
@@ -52,6 +68,9 @@ export function queueIssueAssignmentWakeup(input: {
         mutation: input.mutation,
         ...(input.taskKey ? { taskKey: input.taskKey } : {}),
         ...(input.wakeCommentId ? { wakeCommentId: input.wakeCommentId } : {}),
+        ...(input.watchdogOriginRunId
+          ? { [TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY]: input.watchdogOriginRunId }
+          : {}),
       },
       requestedByActorType: input.requestedByActorType,
       requestedByActorId: input.requestedByActorId ?? null,
