@@ -13,7 +13,6 @@ import {
   resolveLegacyHotRestartIntentPath,
   writeHotRestartIntent,
 } from "./hot-restart.js";
-
 const originalInstanceId = process.env.PAPERCLIP_INSTANCE_ID;
 
 afterEach(() => {

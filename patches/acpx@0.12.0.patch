@@ -20,7 +20,34 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  		current: state.current,
  		quote: state.quote,
  		escaping: true,
-@@ -2912,8 +2912,8 @@ function promotePrefixedAuthEnvironment(env) {
+@@ -2832,6 +2832,8 @@ async function ensureCopilotAcpSupport(command) {
+ function buildClaudeCodeOptionsMeta(options, isolateUserSettings = false) {
+ 	const claudeCodeOptions = {};
+ 	if (isolateUserSettings) claudeCodeOptions.settingSources = resolveClaudeCodeSettingSources();
++	const plugins = resolveClaudeCodePlugins();
++	if (plugins) claudeCodeOptions.plugins = plugins;
+ 	if (options) assignClaudeCodeOptions(claudeCodeOptions, options);
+ 	const meta = {};
+ 	if (Object.keys(claudeCodeOptions).length > 0) meta.claudeCode = { options: claudeCodeOptions };
+@@ -2843,6 +2845,17 @@ function resolveClaudeCodeSettingSources(env = process.env) {
+ 	if (env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS?.trim() === "1") return ["user", ...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ 	return [...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ }
++function resolveClaudeCodePlugins(env = process.env, platform = process.platform) {
++	const raw = env.ACPX_CLAUDE_PLUGIN_DIRS?.trim();
++	if (!raw) return;
++	const delimiter = platform === "win32" ? ";" : ":";
++	const paths = raw.split(delimiter).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
++	if (paths.length === 0) return;
++	return paths.map((path$1) => ({
++		type: "local",
++		path: path$1
++	}));
++}
+ function assignClaudeCodeOptions(target, options) {
+ 	if (typeof options.model === "string" && options.model.trim().length > 0) target.model = options.model;
+ 	if (Array.isArray(options.allowedTools)) target.allowedTools = [...options.allowedTools];
+@@ -2912,8 +2925,8 @@ function promotePrefixedAuthEnvironment(env) {
  	}
  	return protectedKeys;
  }
