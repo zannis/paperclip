@@ -10023,7 +10023,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         status: "todo",
         runStatus: "failed",
         retryReason: "assignment_recovery",
-        runErrorCode: "process_lost",
+        // This case exercises the agent-failure retry cap. Platform process
+        // loss follows the infrastructure wait-and-redispatch path instead.
+        runErrorCode: "adapter_exit_code",
         runError: "Authorization: Bearer sk-test-recovery-secret",
       });
     const longRecoveryOwnerName = "R".repeat(161);
@@ -10052,7 +10054,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       runId,
       previousStatus: "todo",
       retryReason: "assignment_recovery",
-      cause: "process_lost",
     });
     expect(JSON.stringify(recoveryAction.evidence)).not.toContain(
       "sk-test-recovery-secret",
@@ -10609,6 +10610,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         status: "in_progress",
         runStatus: "failed",
         retryReason: "issue_continuation_needed",
+        // This case exercises the agent-failure continuation cap. Platform
+        // process loss follows the infrastructure path instead.
+        runErrorCode: "adapter_exit_code",
       });
     const heartbeat = heartbeatService(db);
 
@@ -10631,7 +10635,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       runId,
       previousStatus: "in_progress",
       retryReason: "issue_continuation_needed",
-      cause: "process_lost",
     });
 
     const comments = await db
