@@ -1,5 +1,5 @@
 import { runningProcesses } from "../../../adapters/utils.js";
-import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../../../services/local-service-supervisor.js";
+import { isProcessPidAlive, isProcessGroupAlive, terminateLocalService } from "../../../services/local-service-supervisor.js";
 import type { RunProcessController } from "../application/ports.js";
 import type { RunProcessCleanupOutcome, RunProcessMetadata } from "../application/types.js";
 
@@ -44,7 +44,7 @@ export function createProcessAdapter(): RunProcessController {
       }
 
       const wasAlive =
-        (pid !== null && isPidAlive(pid)) ||
+        (pid !== null && isProcessPidAlive(pid)) ||
         (processGroupId !== null && isProcessGroupAlive(processGroupId));
       if (!wasAlive) {
         runningProcesses.delete(input.runId);
@@ -61,7 +61,7 @@ export function createProcessAdapter(): RunProcessController {
         );
         runningProcesses.delete(input.runId);
         const stillAlive =
-          (pid !== null && isPidAlive(pid)) ||
+          (pid !== null && isProcessPidAlive(pid)) ||
           (processGroupId !== null && isProcessGroupAlive(processGroupId));
         return {
           attempted: true,
