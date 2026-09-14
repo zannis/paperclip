@@ -371,10 +371,12 @@ describe.sequential("agent skill routes", () => {
 
     // Prepare the module graph inside the setup budget after every reset. Each
     // test still constructs its own app after configuring its request-specific mocks.
-    [{ agentRoutes }, { errorHandler }] = await Promise.all([
-      vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
-      vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
-    ]);
+    // Sequential on purpose: concurrent vi.importActual() calls can drop a
+    // factory mock, because Vitest keeps one shared mock-resolution callstack.
+    [{ agentRoutes }, { errorHandler }] = [
+      await vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
+      await vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+    ];
   });
 
   it("skips runtime materialization when listing Claude skills", async () => {
