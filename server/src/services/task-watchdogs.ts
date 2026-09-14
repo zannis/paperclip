@@ -22,14 +22,19 @@ import { logActivity } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
+import {
+  isPlainRecord,
+  isTerminalWatchdogRunStatus,
+  TASK_WATCHDOG_ORIGIN_KIND,
+  TASK_WATCHDOG_TERMINAL_RUN_STATUSES,
+  TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY,
+} from "./task-watchdog-scope.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
 const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
-const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
 // Grace window after an issue is created/assigned during which its first
 // assignment run/wake may have been enqueued but is not yet visible to a
 // watchdog evaluation (the eval can race the issue's own assignment run).
@@ -81,6 +86,19 @@ export type TaskWatchdogClassifierPath = {
   issueId: string | null;
   agentId?: string | null;
   status: string;
+  // Which task-watchdog run, if any, enqueued the wake this path came from.
+  //
+  // Stamped into the wake request's payload by the route that fired it, under
+  // `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY`, and carried by the heartbeat run
+  // the wake later started through `heartbeat_runs.wakeup_request_id`. So the
+  // provenance travels with the live path itself rather than being reconstructed
+  // from a ledger, which is what lets the guard tell the run it started from one
+  // that merely happens to be running on the same issue.
+  //
+  // `null` means "nobody's watchdog" — an ordinary wake, a path started before
+  // stamping existed, or a run with no wake request behind it. That is a third
+  // party for every watchdog run, which is the conservative reading.
+  watchdogOriginRunId?: string | null;
 };
 
 export type TaskWatchdogClassifierWaitingPath = {
@@ -143,6 +161,14 @@ export type TaskWatchdogStopSnapshot = {
   waitsByIssueId: TaskWatchdogWaitsByIssueId;
 };
 
+// Every included issue in the watched subtree, terminal ones too, reduced to
+// the same fields the stop fingerprint is built from. `materialLeaves` only
+// carries the issues that were leaves at the time; this carries the rest, so a
+// later diff can still tell what an issue looked like *before* it became a
+// fingerprint input — by being reopened, or by its last live child going
+// terminal. Without it such an issue would have to be admitted unchecked.
+export type TaskWatchdogMaterialByIssueId = Record<string, TaskWatchdogMaterialLeaf>;
+
 type TaskWatchdogPendingInteractionsByIssueId = Record<string, Array<{
   id: string;
   kind: string | null;
@@ -159,12 +185,25 @@ export type TaskWatchdogClassifierResult =
     reason: string;
     includedIssueIds: string[];
     liveIssueIds: string[];
+    // Every live path on each live issue, reduced to the watchdog run that
+    // enqueued its wake (`null` when no watchdog did). A run may only claim an
+    // issue's liveness as its own doing when *every* path on it names that run,
+    // so the list is carried whole rather than collapsed to a boolean.
+    livePathOriginRunIdsByIssueId: Record<string, Array<string | null>>;
+    // Present on non-stopped states too, so a mutation guard can still diff the
+    // fingerprint inputs. On these states it describes the subtree, not a
+    // verdict: the subtree is *not* stopped and `fingerprint` inside it must
+    // never be treated as one the watchdog may pin to or review.
+    stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
   }
   | {
     state: "pending_first_run";
     reason: string;
     includedIssueIds: string[];
     pendingIssueIds: string[];
+    stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
   }
   | {
     state: "already_reviewed";
@@ -173,6 +212,7 @@ export type TaskWatchdogClassifierResult =
     stopFingerprint: string;
     stoppedLeaves: TaskWatchdogStoppedLeaf[];
     stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
     pendingInteractionsByIssueId: TaskWatchdogPendingInteractionsByIssueId;
   }
   | {
@@ -182,6 +222,7 @@ export type TaskWatchdogClassifierResult =
     stopFingerprint: string;
     stoppedLeaves: TaskWatchdogStoppedLeaf[];
     stopSnapshot: TaskWatchdogStopSnapshot;
+    materialByIssueId: TaskWatchdogMaterialByIssueId;
     pendingInteractionsByIssueId: TaskWatchdogPendingInteractionsByIssueId;
   };
 
@@ -282,6 +323,39 @@ function toEpochMs(value: Date | string | null | undefined): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+// Reads the originating watchdog run id off a joined `agent_wakeup_requests`
+// row. Kept as one helper so the payload key is spelled once on the SQL side
+// and cannot drift from the key the routes stamp with.
+function watchdogWakeOriginColumn() {
+  // The key is bound as a parameter rather than inlined; the explicit `::text`
+  // keeps `->>` from being ambiguous between its text and integer overloads.
+  return sql<string | null>`${agentWakeupRequests.payload} ->> ${TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY}::text`;
+}
+
+// Every live path in the company's subtree, grouped by the issue it runs on and
+// reduced to the watchdog run that enqueued it. Paths are kept individually
+// rather than deduplicated: two runs on one issue with different provenance is
+// exactly the case the attribution check has to be able to see.
+function livePathOriginsByIssueId(
+  pathGroups: Array<TaskWatchdogClassifierPath[] | undefined>,
+  companyId: string,
+  includedIdSet: ReadonlySet<string>,
+) {
+  const origins = new Map<string, Array<string | null>>();
+  for (const paths of pathGroups) {
+    for (const path of paths ?? []) {
+      if (path.companyId !== companyId) continue;
+      const issueId = typeof path.issueId === "string" ? path.issueId : "";
+      if (issueId.length === 0 || !includedIdSet.has(issueId)) continue;
+      const existing = origins.get(issueId);
+      const origin = path.watchdogOriginRunId ?? null;
+      if (existing) existing.push(origin);
+      else origins.set(issueId, [origin]);
+    }
+  }
+  return origins;
+}
+
 function pathIssueIds(paths: TaskWatchdogClassifierPath[] | undefined, companyId: string) {
   return new Set(
     (paths ?? [])
@@ -356,6 +430,421 @@ function canonicalJson(value: unknown): string {
       : val);
 }
 
+export const TASK_WATCHDOG_MATERIAL_LEAF_FIELDS = [
+  "status",
+  "assigneeAgentId",
+  "assigneeUserId",
+  "blockerIssueIds",
+  "pendingInteractionIds",
+  "pendingApprovalIds",
+] as const;
+
+// The leaf fields one authorized request wrote, and the value it wrote them to.
+// These come from the row the request's *own* statement returned, never from a
+// later re-read of the issue: a re-read cannot distinguish the value this run
+// wrote from a value a third party wrote over it a millisecond afterwards, and
+// folding that second value in is precisely the laundering this guards against.
+// A field the request did not write is absent, which asserts it did not change.
+export type TaskWatchdogDeclaredLeafWrite = Partial<Pick<
+  TaskWatchdogMaterialLeaf,
+  (typeof TASK_WATCHDOG_MATERIAL_LEAF_FIELDS)[number]
+>>;
+
+export type TaskWatchdogAuthorizedMutation = {
+  issueId: string;
+  declared: TaskWatchdogDeclaredLeafWrite;
+  // Set when the run created this issue during the mutation. A created issue
+  // has no baseline to diff against, so `declared` must cover every material
+  // field for it to be attributable at all.
+  created?: boolean;
+  // The parent the run created this issue *under*, taken from the creating
+  // route's own row. A creation is what explains its parent dropping out of
+  // the material leaves, and that explanation has to be pinned to the edge the
+  // run actually made: resolving the parent from the child's *current* row
+  // instead lets a third party reparent the child and have this run's ledger
+  // account for the displacement their reparenting caused.
+  parentId?: string | null;
+  // Interactions this request resolved. Declared as a *delta* rather than as an
+  // absolute `pendingInteractionIds`, deliberately: the resulting list is only
+  // knowable from a fresh read, and a fresh read is exactly how a third party's
+  // concurrently-created interaction would get folded into what this run is
+  // allowed to call its own. Removing named ids from the baseline cannot launder
+  // anything — an interaction somebody else added is still an id the run never
+  // accounted for, and still stops it dead.
+  resolvedInteractionIds?: string[];
+  // Set by a route that actually enqueued a wake for this issue as part of the
+  // request — the assignment/status/comment wakeups the update and comment
+  // routes queue, the continuation wakeup an interaction resolution queues, the
+  // assignment wakeup a creation queues.
+  //
+  // It is a *fact about this request*, not a property of the values it wrote,
+  // and that distinction is the whole point: which writes wake anybody is the
+  // route's decision, taken from state the guard cannot see (the interaction's
+  // continuation policy and resolution outcome, the actor type, the execution
+  // stage), and re-deriving it here from the declared values can only ever
+  // produce a guess. A guess that says "yes" attributes a third party's run to
+  // this one, which is the guard failing open.
+  //
+  // Scope: this answers `pending_first_run` only, where there is no execution
+  // path in existence yet to read provenance from. It deliberately does *not*
+  // decide a `live` issue — an issue-level boolean cannot name which wake, so
+  // it cannot tell this run's wake from a third party's later one on the same
+  // issue. There the provenance travels with the path itself; see
+  // `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY` and `unattributedLiveIssueIds`.
+  startsWork?: boolean;
+};
+
+// What a watchdog run has been authorized to do to the watched subtree so far,
+// carried in the run's own context. `baseline` is the subtree as it stood when
+// the run was last validated against the fingerprint it is pinned to, and
+// `mutations` is every leaf write admitted since. Together they say exactly
+// what the subtree should look like now if nobody but this run has touched it.
+export type TaskWatchdogMutationLedger = {
+  version: 1;
+  baseline: TaskWatchdogStopSnapshot;
+  baselineMaterialByIssueId: TaskWatchdogMaterialByIssueId;
+  mutations: TaskWatchdogAuthorizedMutation[];
+};
+
+export type TaskWatchdogLedgerBaseline = {
+  baseline: TaskWatchdogStopSnapshot;
+  baselineMaterialByIssueId: TaskWatchdogMaterialByIssueId;
+};
+
+const EMPTY_RESOLVED_INTERACTION_IDS: ReadonlySet<string> = new Set<string>();
+
+type TaskWatchdogMergedDeclaration = {
+  declared: TaskWatchdogDeclaredLeafWrite;
+  created: boolean;
+  createdUnderParentId: string | null;
+  resolvedInteractionIds: Set<string>;
+};
+
+function mergeDeclaredWrites(mutations: TaskWatchdogAuthorizedMutation[]) {
+  const merged = new Map<string, TaskWatchdogMergedDeclaration>();
+  for (const mutation of mutations) {
+    if (!mutation || typeof mutation.issueId !== "string") continue;
+    const current = merged.get(mutation.issueId)
+      ?? {
+        declared: {},
+        created: false,
+        createdUnderParentId: null,
+        resolvedInteractionIds: new Set<string>(),
+      };
+    for (const interactionId of mutation.resolvedInteractionIds ?? []) {
+      if (typeof interactionId === "string") current.resolvedInteractionIds.add(interactionId);
+    }
+    // Later writes in the same run supersede earlier ones on the same field.
+    merged.set(mutation.issueId, {
+      declared: { ...current.declared, ...(mutation.declared ?? {}) },
+      created: current.created || mutation.created === true,
+      createdUnderParentId: typeof mutation.parentId === "string"
+        ? mutation.parentId
+        : current.createdUnderParentId,
+      resolvedInteractionIds: current.resolvedInteractionIds,
+    });
+  }
+  return merged;
+}
+
+// Every mutation this run declared against one issue, in the order the run's
+// requests made them. `mergeDeclaredWrites` collapses those into a final value,
+// which is what the drift comparison wants; causation wants the steps, because
+// a field that ends the run where it started may still have moved — and woken
+// somebody — on the way.
+function declaredMutationsByIssueId(mutations: TaskWatchdogAuthorizedMutation[]) {
+  const byIssueId = new Map<string, TaskWatchdogAuthorizedMutation[]>();
+  for (const mutation of mutations) {
+    if (!mutation || typeof mutation.issueId !== "string") continue;
+    const current = byIssueId.get(mutation.issueId);
+    if (current) current.push(mutation);
+    else byIssueId.set(mutation.issueId, [mutation]);
+  }
+  return byIssueId;
+}
+
+// A resolution takes a named interaction out of the issue's waiting paths and
+// changes nothing else about them, so the expected list is the baseline minus
+// the ids the run reported resolving. `filter` keeps the classifier's sort.
+function withoutResolvedInteractions(pendingInteractionIds: string[], resolved: ReadonlySet<string>) {
+  if (resolved.size === 0) return pendingInteractionIds;
+  return pendingInteractionIds.filter((interactionId) => !resolved.has(interactionId));
+}
+
+function declarationCoversEveryMaterialField(declared: TaskWatchdogDeclaredLeafWrite) {
+  return TASK_WATCHDOG_MATERIAL_LEAF_FIELDS.every((field) => declared[field] !== undefined);
+}
+
+// Which fingerprint inputs moved in a way this run cannot account for.
+//
+// The subtree as it stands now is compared against `baseline + declared`: every
+// leaf must hold exactly the value it had at baseline, overwritten only by the
+// fields an authorized request of this run reported writing. Anything else —
+// a field nobody declared, a declared field that ended up at a different value,
+// a leaf that appeared or vanished without a declaration explaining it — is
+// somebody else's change, and the run must not be allowed to keep mutating a
+// subtree that moved underneath it.
+//
+// The comparison is deliberately scoped to the fingerprint's own inputs (the
+// material leaves and the waiting paths). A change to a watched issue that the
+// fingerprint does not cover never blocked a watchdog run before and must not
+// start to.
+export function unattributedSubtreeChanges(input: {
+  ledger: TaskWatchdogMutationLedger;
+  next: TaskWatchdogStopSnapshot;
+  nextMaterialByIssueId: TaskWatchdogMaterialByIssueId;
+  parentByIssueId: Map<string, string | null>;
+}): string[] {
+  const declaredByIssueId = mergeDeclaredWrites(input.ledger.mutations ?? []);
+  const baselineMaterial = input.ledger.baselineMaterialByIssueId ?? {};
+  const baselineLeafIds = new Set(input.ledger.baseline.materialLeaves.map((leaf) => leaf.issueId));
+  const nextLeaves = new Map(input.next.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
+  const unattributed = new Set<string>();
+  const attributableNewLeafParentIds = new Set<string>();
+  // A creation only explains the parent the run actually hung it off, and only
+  // while the child is still hanging there. The declared parent is the edge the
+  // run made; the current parent is where the child sits now. Requiring the two
+  // to agree rejects both directions of a third party moving it: reparented to
+  // some other leaf, that leaf's displacement is theirs and not attributable
+  // here, and moved away from the declared parent, the creation no longer
+  // explains anything about it either.
+  const attributeCreatedChildToItsParent = (
+    issueId: string,
+    declared: TaskWatchdogMergedDeclaration,
+  ) => {
+    const declaredParentId = declared.createdUnderParentId;
+    if (declaredParentId == null) return;
+    if (input.parentByIssueId.get(issueId) !== declaredParentId) return;
+    attributableNewLeafParentIds.add(declaredParentId);
+  };
+
+  for (const [issueId, leaf] of nextLeaves) {
+    const declared = declaredByIssueId.get(issueId);
+    const before = baselineMaterial[issueId] ?? null;
+    if (before) {
+      const expected = { ...before, ...(declared?.declared ?? {}), issueId };
+      if (declared?.resolvedInteractionIds.size) {
+        expected.pendingInteractionIds = withoutResolvedInteractions(
+          expected.pendingInteractionIds,
+          declared.resolvedInteractionIds,
+        );
+      }
+      if (canonicalJson(expected) !== canonicalJson(leaf)) unattributed.add(issueId);
+      continue;
+    }
+    // The issue did not exist in the watched subtree at baseline, so there is
+    // nothing to diff it against. Only a request that reported creating it, and
+    // reported every field it created it with, can account for it.
+    if (!declared?.created || !declarationCoversEveryMaterialField(declared.declared)) {
+      unattributed.add(issueId);
+      continue;
+    }
+    if (canonicalJson({ ...declared.declared, issueId }) !== canonicalJson(leaf)) {
+      unattributed.add(issueId);
+      continue;
+    }
+    attributeCreatedChildToItsParent(issueId, declared);
+  }
+
+  // A created issue displaces the leaf it hangs off whether or not it is still
+  // a material leaf itself: it may have gained a child of its own, or the run
+  // may have closed it, and either takes it out of `materialLeaves` while
+  // leaving the displacement it caused just as real. Attributing only from the
+  // current leaf set left the run rejected for a leaf its own creation removed.
+  for (const [issueId, declared] of declaredByIssueId) {
+    if (!declared.created || nextLeaves.has(issueId) || unattributed.has(issueId)) continue;
+    // Same bar as a created leaf: a half-described creation could be carrying
+    // somebody else's edit, and cannot speak for anything.
+    if (!declarationCoversEveryMaterialField(declared.declared)) continue;
+    // Leaving the leaf set does not take the issue out of the subtree, and it
+    // is the only way a subtree issue escapes every comparison in this
+    // function: a created child has no baseline entry to be diffed against
+    // above, and `waitsByIssueId` carries non-terminal issues only, so a third
+    // party closing the run's own follow-up child would otherwise go entirely
+    // unnoticed — while the same closure on a child that existed at baseline is
+    // caught by the leaf-loss loop below. Held to the same bar as a created
+    // leaf: the state it is in now must be the state the run created it in.
+    const current = input.nextMaterialByIssueId[issueId];
+    if (!current || canonicalJson({ ...declared.declared, issueId }) !== canonicalJson(current)) {
+      unattributed.add(issueId);
+    }
+    // The drift above is the child's own and is reported as the child's. It
+    // does not take the parent's explanation away: the creation is still why
+    // the parent stopped being a leaf, whoever changed the child afterwards.
+    //
+    // An issue the run created and that is no longer under the parent the run
+    // created it under cannot be why a leaf there is missing — the agreement
+    // check inside the helper covers both that and its leaving the subtree
+    // entirely, since neither leaves the declared parent in `parentByIssueId`.
+    attributeCreatedChildToItsParent(issueId, declared);
+  }
+
+  // A leaf leaves the fingerprint when it goes terminal or gains a child. Both
+  // have to be explained: the run declared a terminal status for it, or the run
+  // created the child that displaced it. The two are not interchangeable — a
+  // created child says nothing about a leaf somebody else closed — so a leaf
+  // that went terminal is only ever explained by the run declaring that.
+  for (const issueId of baselineLeafIds) {
+    if (nextLeaves.has(issueId)) continue;
+    const declaredStatus = declaredByIssueId.get(issueId)?.declared.status;
+    const wentTerminalOnPurpose = declaredStatus != null && isTerminalIssueStatus(declaredStatus);
+    const stillOpen = !isTerminalIssueStatus(input.nextMaterialByIssueId[issueId]?.status ?? "done");
+    if (wentTerminalOnPurpose || (stillOpen && attributableNewLeafParentIds.has(issueId))) continue;
+    unattributed.add(issueId);
+  }
+
+  // Waiting paths are a fingerprint input in their own right and are tracked
+  // for non-terminal issues whether or not they are leaves, so they get the
+  // same baseline-plus-declared treatment.
+  const waitIssueIds = new Set([
+    ...Object.keys(input.ledger.baseline.waitsByIssueId),
+    ...Object.keys(input.next.waitsByIssueId),
+  ]);
+  for (const issueId of waitIssueIds) {
+    if (unattributed.has(issueId)) continue;
+    const declaration = declaredByIssueId.get(issueId);
+    const declared = declaration?.declared ?? {};
+    const before = baselineMaterial[issueId] ?? null;
+    const baselineWaits = input.ledger.baseline.waitsByIssueId[issueId] ?? null;
+    const pendingInteractionIds = withoutResolvedInteractions(
+      declared.pendingInteractionIds
+        ?? before?.pendingInteractionIds
+        ?? baselineWaits?.pendingInteractionIds
+        ?? [],
+      declaration?.resolvedInteractionIds ?? EMPTY_RESOLVED_INTERACTION_IDS,
+    );
+    const pendingApprovalIds = declared.pendingApprovalIds
+      ?? before?.pendingApprovalIds
+      ?? baselineWaits?.pendingApprovalIds
+      ?? [];
+    const status = declared.status ?? before?.status ?? null;
+    const expected = (status != null && isTerminalIssueStatus(status))
+        || (pendingInteractionIds.length === 0 && pendingApprovalIds.length === 0)
+      ? null
+      : { pendingInteractionIds, pendingApprovalIds };
+    if (canonicalJson(expected) !== canonicalJson(input.next.waitsByIssueId[issueId] ?? null)) {
+      unattributed.add(issueId);
+    }
+  }
+
+  return [...unattributed].sort();
+}
+
+// Whether this run is why a run is now live on that issue.
+//
+// Ledger membership alone is too coarse to answer this: a run that only touched
+// some field which leaves the issue idle has not started anything, so a run
+// appearing on it afterwards is somebody else's and must not be waved through
+// on the strength of the issue merely being "known".
+//
+// Neither is the declared *value* enough, and that is the sharper trap, because
+// reasoning about values gets close enough to look right. Which writes actually
+// start work is not a function of the leaf fields at all — it is a decision the
+// routes take, from state that never reaches this ledger: an interaction's
+// continuation policy and its resolution outcome (`wake_assignee`,
+// `wake_assignee_on_accept` only on an accepted or answered verdict, a rejected
+// plan confirmation, a lost review path), the actor type, the execution stage,
+// and, for status, a specific enumerated set of transitions rather than "the
+// value moved" (`statusChangedFromBacklog`, `statusChangedFromBlockedToTodo`,
+// `statusChangedFromClosedToTodo`, `userResumedFromReviewToTodo`). A `todo ->
+// in_progress` PATCH is a real change to a non-terminal status and wakes
+// nobody; an interaction resolved under a policy that does not wake wakes
+// nobody either. Re-deriving any of that from the declaration produces a guess,
+// and a guess that says "yes" hands a third party's run to this run's ledger as
+// its own — the guard failing open in exactly the place it is supposed to hold.
+//
+// So the routes say it instead. `startsWork` is set by the request that
+// actually enqueued the wake, next to the enqueue itself, and this asks nothing
+// else. A route that wakes somebody and does not declare it is conservative,
+// not unsafe: the liveness reads as a third party's and the run's next mutation
+// is rejected, which is the behaviour that predates any of this.
+function declaredStepsCanStartWork(mutations: TaskWatchdogAuthorizedMutation[]) {
+  return mutations.some((mutation) => mutation?.startsWork === true);
+}
+
+// Which live issues this run cannot show it is the cause of.
+//
+// A watchdog that reopens a leaf makes the subtree live by design — that is the
+// recovery working — and the mandate then asks it to record what it did.
+// Liveness it cannot account for is a third party and still stops it dead.
+//
+// The question is causation, and a declaration cannot answer it. `startsWork`
+// says only "this run enqueued *a* wake for this issue at some point"; it names
+// neither the wake nor the run that wake started, so any later path on the same
+// issue satisfies it. If the run's wake was coalesced away, failed, or ran to
+// completion, and somebody else then starts the same issue while this run is
+// still going, an issue-level boolean reports that third party as this run's
+// own doing — the guard failing open in the place it exists to hold.
+//
+// So the provenance travels with the path instead. The route stamps the
+// originating watchdog run id into the wake payload as it fires it; the wake
+// carries it while queued, and the heartbeat run it starts inherits it through
+// `heartbeat_runs.wakeup_request_id`. Here we simply ask whether *every* path
+// on the issue names this run. One unstamped or foreign-stamped path is enough
+// to disown the issue: a leaf this run woke that somebody else also woke is a
+// contested leaf, not an attributed one.
+//
+// An unstamped path reads as a third party's, which is the conservative
+// direction — a route that wakes somebody and does not stamp it gets the
+// behaviour that predates any of this, a rejected next mutation, rather than a
+// misattributed grant.
+function unattributedLiveIssueIds(
+  runId: string | null,
+  livePathOriginRunIdsByIssueId: Record<string, Array<string | null>>,
+  liveIssueIds: string[],
+) {
+  return liveIssueIds
+    .filter((issueId) => {
+      if (!runId) return true;
+      const origins = livePathOriginRunIdsByIssueId[issueId] ?? [];
+      // No paths recorded for an issue the classifier called live means the
+      // liveness came from somewhere this cannot see; that is not causation.
+      if (origins.length === 0) return true;
+      return !origins.every((origin) => origin === runId);
+    })
+    .sort();
+}
+
+// The same question for `pending_first_run`, where it has a different answer.
+//
+// Such an issue has no run and no queued wake at all — the classifier defers on
+// it precisely because it is newly created, has never completed a run, and its
+// first path may not be visible yet. There is no path to read provenance from,
+// so what has to be accounted for is the *creation*, which the ledger records
+// as a fact and `unattributedSubtreeChanges` has already checked field by
+// field. A follow-up this run created and left unassigned wakes nobody and is
+// still exactly why the subtree reads pending.
+function unattributedPendingIssueIds(
+  ledger: TaskWatchdogMutationLedger,
+  pendingIssueIds: string[],
+) {
+  const mutationsByIssueId = declaredMutationsByIssueId(ledger.mutations ?? []);
+  return pendingIssueIds
+    .filter((issueId) => {
+      const mutations = mutationsByIssueId.get(issueId);
+      if (!mutations) return true;
+      if (mutations.some((mutation) => mutation?.created === true)) return false;
+      return !declaredStepsCanStartWork(mutations);
+    })
+    .sort();
+}
+
+function parseMutationLedger(value: unknown): TaskWatchdogMutationLedger | null {
+  if (!isPlainRecord(value)) return null;
+  const candidate = value as Partial<TaskWatchdogMutationLedger>;
+  if (candidate.version !== 1) return null;
+  const baseline = parseStopSnapshot(candidate.baseline);
+  if (!baseline) return null;
+  if (!isPlainRecord(candidate.baselineMaterialByIssueId)) return null;
+  if (!Array.isArray(candidate.mutations)) return null;
+  return {
+    version: 1,
+    baseline,
+    baselineMaterialByIssueId: candidate.baselineMaterialByIssueId as TaskWatchdogMaterialByIssueId,
+    mutations: candidate.mutations as TaskWatchdogAuthorizedMutation[],
+  };
+}
+
 function isShrinkOfReviewedSnapshot(
   current: TaskWatchdogStopSnapshot,
   reviewed: TaskWatchdogStopSnapshot | null | undefined,
@@ -408,49 +897,6 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
 
   const includedIds = included.map((issue) => issue.id);
   const includedIdSet = new Set(includedIds);
-  const liveIssueIds = [
-    ...pathIssueIds(input.activeRuns, input.watchdog.companyId),
-    ...pathIssueIds(input.queuedWakeRequests, input.watchdog.companyId),
-  ].filter((issueId) => includedIdSet.has(issueId));
-  const uniqueLiveIssueIds = [...new Set(liveIssueIds)].sort();
-  if (uniqueLiveIssueIds.length > 0) {
-    return {
-      state: "live",
-      reason: "At least one issue in the watched subtree has a live run, queued wake, or scheduled retry.",
-      includedIssueIds: includedIds,
-      liveIssueIds: uniqueLiveIssueIds,
-    };
-  }
-
-  // Pending-first-run guard: a watchdog evaluation triggered as part of issue
-  // (or watchdog) creation can read its snapshot before the issue's own
-  // assignment run/wake is committed/visible, making an actively-starting
-  // subtree look idle. Suppress the stopped verdict for non-terminal issues
-  // created within the first-run grace window that have never completed a run.
-  const evaluatedAtMs = toEpochMs(input.evaluatedAt);
-  const graceMs = input.firstRunGraceMs ?? 0;
-  if (evaluatedAtMs != null && graceMs > 0) {
-    const completedRunIssueIds = new Set(input.completedRunIssueIds ?? []);
-    const pendingIssueIds = included
-      .filter((issue) => {
-        if (isTerminalIssueStatus(issue.status)) return false;
-        if (completedRunIssueIds.has(issue.id)) return false;
-        const createdAtMs = toEpochMs(issue.createdAt);
-        if (createdAtMs == null) return false;
-        return evaluatedAtMs - createdAtMs < graceMs;
-      })
-      .map((issue) => issue.id)
-      .sort();
-    if (pendingIssueIds.length > 0) {
-      return {
-        state: "pending_first_run",
-        reason:
-          "A watched issue was created within the first-run grace window and has not yet completed a run; deferring evaluation until its first assignment run/wake is observable.",
-        includedIssueIds: includedIds,
-        pendingIssueIds,
-      };
-    }
-  }
 
   const includedChildrenByParentId = new Map<string, string[]>();
   for (const issue of included) {
@@ -516,6 +962,77 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
     materialLeaves,
     waitsByIssueId,
   };
+  const materialByIssueId: TaskWatchdogMaterialByIssueId = Object.fromEntries(included
+    .map((issue) => [issue.id, {
+      issueId: issue.id,
+      status: issue.status,
+      assigneeAgentId: issue.assigneeAgentId,
+      assigneeUserId: issue.assigneeUserId,
+      blockerIssueIds: [...new Set(blockersByIssueId.get(issue.id) ?? [])].sort(),
+      pendingInteractionIds: waitingPathIds(input.pendingInteractions, input.watchdog.companyId, issue.id),
+      pendingApprovalIds: waitingPathIds(input.pendingApprovals, input.watchdog.companyId, issue.id),
+    }] as const));
+
+  // The live and pending-first-run verdicts are decided *after* the fingerprint
+  // inputs are built, not before, so that both carry `stopSnapshot` /
+  // `materialByIssueId`. A watchdog run that has already taken a sanctioned
+  // action needs to diff those inputs even when its own action left the subtree
+  // non-stopped; nothing about the verdicts themselves changed.
+  const liveIssueIds = [
+    ...pathIssueIds(input.activeRuns, input.watchdog.companyId),
+    ...pathIssueIds(input.queuedWakeRequests, input.watchdog.companyId),
+  ].filter((issueId) => includedIdSet.has(issueId));
+  const uniqueLiveIssueIds = [...new Set(liveIssueIds)].sort();
+  if (uniqueLiveIssueIds.length > 0) {
+    const originsByIssueId = livePathOriginsByIssueId(
+      [input.activeRuns, input.queuedWakeRequests],
+      input.watchdog.companyId,
+      includedIdSet,
+    );
+    return {
+      state: "live",
+      reason: "At least one issue in the watched subtree has a live run, queued wake, or scheduled retry.",
+      includedIssueIds: includedIds,
+      liveIssueIds: uniqueLiveIssueIds,
+      livePathOriginRunIdsByIssueId: Object.fromEntries(
+        uniqueLiveIssueIds.map((issueId) => [issueId, originsByIssueId.get(issueId) ?? []]),
+      ),
+      stopSnapshot: currentStopSnapshot,
+      materialByIssueId,
+    };
+  }
+
+  // Pending-first-run guard: a watchdog evaluation triggered as part of issue
+  // (or watchdog) creation can read its snapshot before the issue's own
+  // assignment run/wake is committed/visible, making an actively-starting
+  // subtree look idle. Suppress the stopped verdict for non-terminal issues
+  // created within the first-run grace window that have never completed a run.
+  const evaluatedAtMs = toEpochMs(input.evaluatedAt);
+  const graceMs = input.firstRunGraceMs ?? 0;
+  if (evaluatedAtMs != null && graceMs > 0) {
+    const completedRunIssueIds = new Set(input.completedRunIssueIds ?? []);
+    const pendingIssueIds = included
+      .filter((issue) => {
+        if (isTerminalIssueStatus(issue.status)) return false;
+        if (completedRunIssueIds.has(issue.id)) return false;
+        const createdAtMs = toEpochMs(issue.createdAt);
+        if (createdAtMs == null) return false;
+        return evaluatedAtMs - createdAtMs < graceMs;
+      })
+      .map((issue) => issue.id)
+      .sort();
+    if (pendingIssueIds.length > 0) {
+      return {
+        state: "pending_first_run",
+        reason:
+          "A watched issue was created within the first-run grace window and has not yet completed a run; deferring evaluation until its first assignment run/wake is observable.",
+        includedIssueIds: includedIds,
+        pendingIssueIds,
+        stopSnapshot: currentStopSnapshot,
+        materialByIssueId,
+      };
+    }
+  }
 
   if (
     input.watchdog.lastReviewedFingerprint === stopFingerprint ||
@@ -528,6 +1045,7 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
       stopFingerprint,
       stoppedLeaves: leaves,
       stopSnapshot: currentStopSnapshot,
+      materialByIssueId,
       pendingInteractionsByIssueId,
     };
   }
@@ -539,6 +1057,7 @@ export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput):
     stopFingerprint,
     stoppedLeaves: leaves,
     stopSnapshot: currentStopSnapshot,
+    materialByIssueId,
     pendingInteractionsByIssueId,
   };
 }
@@ -956,8 +1475,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           agentId: heartbeatRuns.agentId,
           status: heartbeatRuns.status,
           contextSnapshot: heartbeatRuns.contextSnapshot,
+          // A run inherits its provenance from the wake that started it. The
+          // join is left so a run with no wake request behind it still reports,
+          // with a null origin — an unattributable path, which is what it is.
+          watchdogOriginRunId: watchdogWakeOriginColumn(),
         })
         .from(heartbeatRuns)
+        .leftJoin(agentWakeupRequests, eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id))
         .where(and(
           eq(heartbeatRuns.companyId, companyId),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
@@ -972,9 +1496,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           agentId: heartbeatRuns.agentId,
           status: heartbeatRuns.status,
           issueId: issues.id,
+          watchdogOriginRunId: watchdogWakeOriginColumn(),
         })
         .from(issues)
         .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .leftJoin(agentWakeupRequests, eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id))
         .where(and(
           eq(issues.companyId, companyId),
           inArray(issues.id, subtreeIssueIds),
@@ -987,6 +1513,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           agentId: agentWakeupRequests.agentId,
           status: agentWakeupRequests.status,
           payload: agentWakeupRequests.payload,
+          watchdogOriginRunId: watchdogWakeOriginColumn(),
         })
         .from(agentWakeupRequests)
         .where(and(
@@ -1108,12 +1635,17 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         agentId: row.agentId,
         status: row.status,
         issueId: issueIdFromRunContext(row.contextSnapshot),
-      })).concat(activeIssueRunRows),
+        watchdogOriginRunId: row.watchdogOriginRunId ?? null,
+      })).concat(activeIssueRunRows.map((row) => ({
+        ...row,
+        watchdogOriginRunId: row.watchdogOriginRunId ?? null,
+      }))),
       queuedWakeRequests: wakeRows.map((row) => ({
         companyId: row.companyId,
         agentId: row.agentId,
         status: row.status,
         issueId: issueIdFromWakePayload(row.payload),
+        watchdogOriginRunId: row.watchdogOriginRunId ?? null,
       })),
       blockers: blockerRows,
       pendingInteractions: interactionRows,
@@ -1611,18 +2143,205 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       ));
   }
 
+  // The freshness guard every watched-subtree mutation passes through, and the
+  // only place drift is adjudicated. It runs *before* the route mutates
+  // anything, so a subtree that moved underneath this run is rejected while
+  // rejecting it still means something: nothing has been written yet.
+  //
+  // Three ways in:
+  //
+  //  1. The subtree still hashes to the fingerprint the run's wake pinned. The
+  //     original fast path, unchanged.
+  //  2. The fingerprint moved, but the run holds a mutation ledger and every
+  //     fingerprint input that moved is `baseline + what this run declared it
+  //     wrote`. That is the run's own sanctioned action catching up with it —
+  //     the lockout this issue is about — and it is admitted.
+  //  3. Anything else, including a subtree that is no longer stopped for
+  //     reasons this run's ledger does not account for. Rejected, as before.
+  //
+  // Note what is *not* here any more: nothing re-reads the subtree after a
+  // mutation to work out what the run did. The run says what it wrote, from its
+  // own `RETURNING` row, and that claim is checked here before the next write.
+  // The exception that survives a recovered subtree is a grant of *one inert
+  // write*: the summary saying what this run did. Two things are load-bearing
+  // in that sentence and neither follows from "is the target the watched
+  // issue", so neither is inferred here.
+  //
+  //  - *Inert.* The comment route enqueues an `issue_commented` wake to the
+  //    target's assignee and a mention wake per @-mention in the body, so a
+  //    permitted comment can start work no matter which issue it lands on: it
+  //    can mention arbitrary agents, and it can wake an assigned watched root
+  //    while the live path is a child. Inertness therefore cannot be deduced
+  //    from the target — it is *imposed*. `auditCommentOnly` on the verdict
+  //    tells the route this comment is admitted as a record only, and the
+  //    comment route enqueues no wake at all for it. With the wakes gone, the
+  //    single-leaf subtree — where the watched issue *is* the issue this run
+  //    just restarted — records its summary like any other, instead of losing
+  //    the audit trail this guard exists to keep.
+  //  - *One.* Nothing consumed the exception: it held for every later request
+  //    with `intent: "comment"`, for the lifetime of the run. A looping or
+  //    compromised watchdog could post unboundedly many comments off a mandate
+  //    that asked for a single summary. The grant is now claimed, by the
+  //    request the guard admits under it.
+  //
+  // The claim is a marker on the run's own context, not a count of comments on
+  // the issue. Counting comments answered the wrong question twice over: a
+  // comment the run posted *before* the recovery, while the subtree was still
+  // stopped and the full grant applied, cannot be a summary of a recovery that
+  // had not happened yet, and reading a row that a concurrent request has not
+  // written yet lets every racer see an unspent grant. Marking the run instead
+  // fixes both — the marker exists only on this path, and one UPDATE reads and
+  // writes it.
+  //
+  // Admission is not the write the grant exists for, and burning it on a
+  // request that never wrote anything loses the audit trail just as completely
+  // as refusing it. The request shape validated after this guard
+  // (`presentation`/`metadata` are 403 for agents), the cross-issue run cap,
+  // and any database error between here and the insert all reach that state. So
+  // the claim does not happen here: admission only *reads* whether the summary
+  // is still owed, and the statement that spends it runs in the transaction
+  // that inserts the comment. Anything that stops the comment from committing —
+  // a downstream refusal, a client that hangs up, a worker killed mid-request,
+  // the database outage that failed the insert in the first place — rolls the
+  // claim back with it, so there is no out-of-band undo to get right and no
+  // failure mode where the marker outlives the comment it was supposed to pay
+  // for. See `auditCommentGrantDenial` and `claimAuditCommentGrant`.
+
+  // Written to whichever of the two places the scope resolver reads the run's
+  // watchdog context from, decided inside the statement rather than from an
+  // earlier read: a path chosen by a separate SELECT is a second thing
+  // concurrent requests could disagree about.
+  function auditCommentSpentPath() {
+    return sql`case
+      when jsonb_typeof(${heartbeatRuns.contextSnapshot} -> 'taskWatchdog') = 'object'
+        then array['taskWatchdog', 'auditCommentSpentAt']
+      else array['auditCommentSpentAt']
+    end`;
+  }
+
+  const AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL =
+    "Task-watchdog run context is missing the run id required to bound the summary comment to a single write.";
+  const AUDIT_COMMENT_GRANT_SPENT_DENIAL =
+    "Task-watchdog runs get one summary comment on the watched issue once the subtree has its own execution path again; this run has already recorded what it did.";
+
+  // The admission-time half: is the run's one summary still owed? Deliberately
+  // a read and nothing else. It can be raced — two requests can both see an
+  // unspent grant — and that is fine, because the claim below is what actually
+  // bounds the grant and it is a single conditional statement inside the
+  // comment's own transaction. What this read buys is refusing a run that has
+  // already recorded its summary at the door, with the same copy and the same
+  // freshness details as every other verdict this guard returns, instead of
+  // letting it travel as far as the insert to be told no.
+  async function auditCommentGrantDenial(scope: { companyId: string; runId?: string | null }) {
+    // No run id is no way to bound the grant to one write, so it is refused
+    // rather than guessed at.
+    if (!scope.runId) return AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL;
+    const spentPath = auditCommentSpentPath();
+    const row = await db
+      .select({ spentAt: sql<string | null>`(${heartbeatRuns.contextSnapshot} #>> (${spentPath}))` })
+      .from(heartbeatRuns)
+      .where(and(
+        eq(heartbeatRuns.id, scope.runId),
+        eq(heartbeatRuns.companyId, scope.companyId),
+      ))
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    // No row is no run to bound the grant against — the same refusal as no run
+    // id, rather than an admission the claim would have to take back.
+    if (!row) return AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL;
+    return row.spentAt === null ? null : AUDIT_COMMENT_GRANT_SPENT_DENIAL;
+  }
+
+  // Spends the grant, in the transaction that inserts the comment it pays for.
+  // One statement still tests the marker and writes it, so the check and the
+  // claim cannot be pulled apart and two concurrent summaries cannot both land:
+  // they serialise on the run row, and the loser's whole transaction — comment
+  // included — rolls back on the `conflict` the caller throws. Running here
+  // rather than at admission is what makes "spent" mean "recorded" instead of
+  // "attempted", with no compensating release to miss.
+  async function claimAuditCommentGrant(
+    scope: { companyId: string; runId?: string | null },
+    dbOrTx: any = db,
+  ) {
+    if (!scope.runId) return AUDIT_COMMENT_GRANT_MISSING_RUN_DENIAL;
+    const spentPath = auditCommentSpentPath();
+    const claimed = await dbOrTx
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: sql`jsonb_set(
+          case
+            when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+              then ${heartbeatRuns.contextSnapshot}
+            else '{}'::jsonb
+          end,
+          ${spentPath},
+          to_jsonb(now()),
+          true
+        )`,
+      })
+      .where(and(
+        eq(heartbeatRuns.id, scope.runId),
+        eq(heartbeatRuns.companyId, scope.companyId),
+        sql`(${heartbeatRuns.contextSnapshot} #>> (${spentPath})) is null`,
+      ))
+      .returning({ id: heartbeatRuns.id });
+    return claimed.length === 0 ? AUDIT_COMMENT_GRANT_SPENT_DENIAL : null;
+  }
+
   async function revalidateMutationScope(scope: {
     kind: "watchdog";
     watchdogId: string;
     companyId: string;
     watchedIssueId: string;
     stopFingerprint: string | null;
-  }) {
+    runId?: string | null;
+    mutationLedger?: unknown;
+  }, opts: {
+    // What the request is actually trying to do. A comment that only adds a
+    // comment is inert by construction — `materialLeaf` strips
+    // `latestCommentAt`, so it can neither rotate the stop fingerprint nor
+    // change the classification — and it is the one write the mandate still
+    // requires from a run whose own recovery already restarted the subtree.
+    // Anything else is a state change and is held to the stricter rule below.
+    //
+    // The caller decides this per *request*, not per route: the comment route
+    // also carries `resume`/`reopen`/`interrupt` and approval markers, each of
+    // which moves issue state while wearing a comment's clothes. See
+    // `issueCommentWatchdogIntent` in the issue routes.
+    intent?: "comment" | "mutate";
+    // The issue this request is about to write. Needed to tell a state change
+    // aimed at an idle leaf from one aimed at a leaf that now has an owner of
+    // its own; absent, a state change is refused rather than guessed at.
+    targetIssueId?: string | null;
+  } = {}) {
+    const intent = opts.intent ?? "mutate";
+    const targetIssueId = opts.targetIssueId ?? null;
     if (!scope.stopFingerprint) {
       return {
         allowed: false as const,
         reason: "Task-watchdog run context is missing the stopped fingerprint required for mutation revalidation.",
       };
+    }
+
+    // Re-asserted here and not only in the scope resolver. `issueWatchdogs`
+    // going inactive is the only expiry the rest of this function knows about,
+    // and a watchdog does not go inactive when a run ends — so without this the
+    // guard's own answer would still be "fresh" for a run that is over. The
+    // resolver checks the same thing a moment earlier; this closes the window
+    // between the two, and covers every caller that builds a scope by other
+    // means.
+    if (scope.runId) {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, scope.runId))
+        .then((rows) => rows[0] ?? null);
+      if (!run || isTerminalWatchdogRunStatus(run.status)) {
+        return {
+          allowed: false as const,
+          reason: "Task-watchdog run has already finished; its mutation scope no longer applies.",
+        };
+      }
     }
 
     const watchdog = await db
@@ -1645,16 +2364,259 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     const input = await collectClassifierInput(watchdog.companyId, watchdog);
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
-      return { allowed: true as const, classification };
+      return {
+        allowed: true as const,
+        auditCommentOnly: false,
+        classification,
+        ledgerBaseline: {
+          baseline: classification.stopSnapshot,
+          baselineMaterialByIssueId: classification.materialByIssueId,
+        } satisfies TaskWatchdogLedgerBaseline,
+      };
     }
 
+    const staleReason = classification.state === "stopped"
+      ? "Task-watchdog review is stale because the watched subtree stop fingerprint changed; refresh the source state before mutating it."
+      : "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.";
+
+    // A malformed or absent ledger is simply no ledger: the run has nothing on
+    // record that could account for the drift, so the guard rejects as it
+    // always did rather than trusting a shape it does not recognise.
+    const ledger = parseMutationLedger(scope.mutationLedger);
+    if (!ledger) return { allowed: false as const, reason: staleReason, classification };
+    // Every state that carries a `stopSnapshot` can be adjudicated against the
+    // ledger, and `already_reviewed` is one of them. It is reached routinely by
+    // a run's *own* first sanctioned action: closing a stale leaf makes the
+    // current snapshot a shrink of the reviewed one, which is precisely
+    // `isShrinkOfReviewedSnapshot`. Excluding it left the mandated summary
+    // comment 409ing after an ordinary recovery — the same lockout by another
+    // route. `not_applicable` genuinely carries no subtree to diff, so it stays
+    // a rejection.
+    if (
+      classification.state !== "stopped"
+      && classification.state !== "live"
+      && classification.state !== "pending_first_run"
+      && classification.state !== "already_reviewed"
+    ) {
+      return { allowed: false as const, reason: staleReason, classification };
+    }
+
+    const unattributedIssueIds = unattributedSubtreeChanges({
+      ledger,
+      next: classification.stopSnapshot,
+      nextMaterialByIssueId: classification.materialByIssueId,
+      parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
+    });
+    const unattributedLiveness = classification.state === "live"
+      ? unattributedLiveIssueIds(
+        scope.runId ?? null,
+        classification.livePathOriginRunIdsByIssueId,
+        classification.liveIssueIds,
+      )
+      : classification.state === "pending_first_run"
+      ? unattributedPendingIssueIds(ledger, classification.pendingIssueIds)
+      : [];
+    if (unattributedIssueIds.length > 0 || unattributedLiveness.length > 0) {
+      return {
+        allowed: false as const,
+        reason: staleReason,
+        classification,
+        unattributedIssueIds,
+        unattributedLivenessIssueIds: unattributedLiveness,
+      };
+    }
+
+    // Everything above answers one question: is the subtree still the one this
+    // run was authorized against, or has somebody else moved it? That is a
+    // freshness verdict, and on its own it is not an authorization — it says
+    // nothing about *what* the request is about to do. Handing the same
+    // `allowed: true` to a summary comment, a status PATCH, a child creation
+    // and an interaction resolution is what turned the narrow grant this guard
+    // exists to restore into general authority over the subtree.
+    //
+    // The line is drawn by the classification, not by the target. Once the
+    // subtree has an execution path again — `live`, or `pending_first_run`
+    // where the path is queued rather than started — the recovery this run was
+    // woken for has succeeded and its remaining mandate is exactly one write:
+    // the summary comment on the watched issue, saying what it did. That
+    // comment is inert by construction (`materialLeaf` strips
+    // `latestCommentAt`, so it can neither rotate the stop fingerprint nor
+    // change the classification) and it is the whole point of the relaxation.
+    //
+    // Everything else is refused here, and the target is not what decides it:
+    //
+    //  - A state change aimed at an idle sibling is still refused. It is not
+    //    racing that sibling's owner, but it is authority claimed against a
+    //    subtree that is already running again, and the classifier's own
+    //    verdict says this run's window has closed. If that sibling is still
+    //    stale when the subtree stops next, the watchdog is woken again with a
+    //    fresh fingerprint and the full grant.
+    //  - A *comment* on anything other than the watched issue is refused too.
+    //    A comment is only inert with respect to the fingerprint; the comment
+    //    route still enqueues `issue_commented` and mention wakes, so a comment
+    //    on a recovered leaf signals or steers the owner this run just started.
+    //    The mandate asks for a summary on the source issue and nothing else,
+    //    so that is all the exception covers.
+    //  - A comment on the watched issue is admitted once, as a record and not
+    //    as a message: the verdict carries `auditCommentOnly`, and the comment
+    //    route fires no wake for it. That is what lets the single-leaf subtree
+    //    — watched issue and live path being the same issue — keep its audit
+    //    trail. See `claimAuditCommentGrant`.
+    //
+    // A `stopped` (at a fingerprint the ledger accounts for) or
+    // `already_reviewed` subtree has no execution path at all — `live` is
+    // decided first and returns early — so there is no owner to race and the
+    // run keeps the full grant to finish a multi-step recovery.
+    const executionPathIssueIds = classification.state === "live"
+      ? classification.liveIssueIds
+      : classification.state === "pending_first_run"
+      ? classification.pendingIssueIds
+      : [];
+    let auditCommentOnly = false;
+    if (executionPathIssueIds.length > 0) {
+      if (!(intent === "comment" && targetIssueId === scope.watchedIssueId)) {
+        return {
+          allowed: false as const,
+          reason: intent === "comment"
+            ? "Task-watchdog runs may only comment on the watched issue once the subtree has its own execution path again; a comment elsewhere wakes an owner that is not the watchdog."
+            : "Task-watchdog runs may only add their summary comment to the watched issue once the subtree has its own execution path again; state changes are no longer theirs to make.",
+          classification,
+          liveOwnedIssueIds: executionPathIssueIds,
+        };
+      }
+      const denial = await auditCommentGrantDenial(scope);
+      if (denial) {
+        return {
+          allowed: false as const,
+          reason: denial,
+          classification,
+          liveOwnedIssueIds: executionPathIssueIds,
+        };
+      }
+      auditCommentOnly = true;
+    }
+
+    // The baseline stays put. Drift is always measured from the state the run
+    // was last genuinely validated against, so a run cannot walk the subtree
+    // away from its wake one attributable step at a time.
     return {
-      allowed: false as const,
-      reason: classification.state === "stopped"
-        ? "Task-watchdog review is stale because the watched subtree stop fingerprint changed; refresh the source state before mutating it."
-        : "Task-watchdog review is stale because the watched subtree now has a live, waiting, already-reviewed, or not-applicable path; refresh the source state before mutating it.",
+      allowed: true as const,
+      auditCommentOnly,
       classification,
+      ledgerBaseline: {
+        baseline: ledger.baseline,
+        baselineMaterialByIssueId: ledger.baselineMaterialByIssueId,
+      } satisfies TaskWatchdogLedgerBaseline,
     };
+  }
+
+  // Records what a watchdog run was authorized to write, in the run's own
+  // context, so the guard above can tell the run's own drift from anybody
+  // else's on the next request.
+  //
+  // This reads no subtree state at all. Everything it persists — the baseline
+  // the guard admitted this request against, and the fields the request
+  // reported writing — was already known before the mutation ran, which is what
+  // makes it immune to a third party landing a change in the same window.
+  //
+  // Failing to record is fail-closed: the run's next watched-subtree mutation
+  // sees a fingerprint it cannot account for and is rejected, exactly as it
+  // would have been before any of this existed.
+  async function recordAuthorizedMutation(
+    scope: {
+      kind: "watchdog";
+      watchdogId: string;
+      companyId: string;
+      watchedIssueId: string;
+      stopFingerprint: string | null;
+      runId: string | null;
+    },
+    entry: {
+      ledgerBaseline: TaskWatchdogLedgerBaseline | null;
+      mutations: TaskWatchdogAuthorizedMutation[];
+    },
+  ) {
+    if (!scope.runId) return { recorded: false as const, reason: "missing_run_id" };
+    if (!scope.stopFingerprint) return { recorded: false as const, reason: "missing_stop_fingerprint" };
+    if (!entry.ledgerBaseline) return { recorded: false as const, reason: "missing_ledger_baseline" };
+    if (entry.mutations.length === 0) return { recorded: false as const, reason: "no_mutations" };
+
+    const run = await db
+      .select({
+        id: heartbeatRuns.id,
+        companyId: heartbeatRuns.companyId,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, scope.runId))
+      .then((rows) => rows[0] ?? null);
+    if (!run || run.companyId !== scope.companyId) {
+      return { recorded: false as const, reason: "run_not_found" };
+    }
+
+    // `taskWatchdog` may legitimately be the literal `true`, in which case the
+    // scope resolver falls back to reading the top level of the context. Write
+    // the ledger to whichever of the two places that resolver will read.
+    const nested = isPlainRecord(parseObject(run.contextSnapshot).taskWatchdog);
+    const ledgerPath = nested
+      ? sql`array['taskWatchdog', 'mutationLedger']`
+      : sql`array['mutationLedger']`;
+    const existingLedger = nested
+      ? sql`${heartbeatRuns.contextSnapshot} #> array['taskWatchdog', 'mutationLedger']`
+      : sql`${heartbeatRuns.contextSnapshot} #> array['mutationLedger']`;
+    const freshLedger: TaskWatchdogMutationLedger = {
+      version: 1,
+      baseline: entry.ledgerBaseline.baseline,
+      baselineMaterialByIssueId: entry.ledgerBaseline.baselineMaterialByIssueId,
+      mutations: entry.mutations,
+    };
+
+    // One statement, so two concurrent requests of the same run both land:
+    // appending to the array Postgres reads inside the same update cannot lose
+    // the other's entry the way a read-modify-write would. An existing ledger
+    // keeps its baseline — drift is always measured from the state the run was
+    // last genuinely validated against, never from a later one.
+    //
+    // The `where` clause mirrors the resolver's read precedence and pins the
+    // write to the run context this request was resolved from, so a ledger is
+    // never grafted onto a run whose pin somebody moved in the meantime.
+    const currentPin = sql`coalesce(
+      ${heartbeatRuns.contextSnapshot} #>> array['taskWatchdog', 'stopFingerprint'],
+      ${heartbeatRuns.contextSnapshot} #>> array['stopFingerprint']
+    )`;
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: sql`jsonb_set(
+          case
+            when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+              then ${heartbeatRuns.contextSnapshot}
+            else '{}'::jsonb
+          end,
+          ${ledgerPath},
+          case
+            when ${existingLedger} -> 'version' = '1'::jsonb
+              then jsonb_set(
+                ${existingLedger},
+                array['mutations'],
+                coalesce(${existingLedger} -> 'mutations', '[]'::jsonb)
+                  || ${JSON.stringify(entry.mutations)}::jsonb
+              )
+            else ${JSON.stringify(freshLedger)}::jsonb
+          end,
+          true
+        )`,
+      })
+      .where(and(
+        eq(heartbeatRuns.id, run.id),
+        sql`${currentPin} is not distinct from ${scope.stopFingerprint}::text`,
+      ))
+      .returning({ id: heartbeatRuns.id });
+    if (updated.length === 0) {
+      return { recorded: false as const, reason: "run_context_changed" };
+    }
+
+    return { recorded: true as const, mutations: entry.mutations };
   }
 
   return {
@@ -1811,5 +2773,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     },
 
     revalidateMutationScope,
+    claimAuditCommentGrant,
+    recordAuthorizedMutation,
   };
 }
