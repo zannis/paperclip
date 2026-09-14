@@ -1375,14 +1375,18 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([sourceId]);
   });
 
-  // The takeover, where the declaration is genuinely spent: the run woke the
-  // leaf, the run it started reached a terminal state, and only then did
-  // somebody else start the same leaf. Attribution by issue id cannot separate
-  // those two paths — the declaration outlives the run it explains and goes on
-  // licensing whatever starts on that issue next — so the third party reads as
-  // this run's own doing. The stamp on the path does separate them.
+  // The takeover: the run declared a wake on the leaf, and a different agent is
+  // now running on it. Attribution by issue id cannot separate the two — the
+  // declaration names neither a wake nor a run, so it goes on licensing
+  // whatever starts on that issue next and hands the third party to this run's
+  // ledger as its own.
+  //
+  // The third party here is a *directly started* run: no wake request behind it
+  // at all, so its origin is null because the left join finds nothing, not
+  // because a wake payload was missing the stamp. That is the other way a path
+  // arrives unattributable, and the neighbouring cases do not cover it.
   it("rejects a third party's run on the same leaf the run reported waking", async () => {
-    const { companyId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
+    const { companyId, sourceId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
       await seedWokenWatchdogRun("WDOG-LIVE-TAKEOVER", { establishedChildren: ["WDOG-LIVE-TAKEOVER-A"] });
     const leafId = childIds[0]!;
     const scope = await resolveScope();
@@ -1395,19 +1399,6 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
     ])).recorded).toBe(true);
 
-    // The run the watchdog started, and then finished. Nothing it enqueued is
-    // live any more.
-    const [ownRun] = await db.insert(heartbeatRuns).values({
-      companyId,
-      agentId,
-      status: "running",
-      invocationSource: "assignment",
-      contextSnapshot: { issueId: leafId },
-    }).returning();
-    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, ownRun!.id));
-
-    // A different agent now picks the same leaf up. This is a third party's
-    // execution path, and the watchdog's spent declaration must not explain it.
     const thirdPartyAgentId = await seedAgent(companyId, { name: "Third Party Taker" });
     await db.insert(heartbeatRuns).values({
       companyId,
@@ -1417,9 +1408,13 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       contextSnapshot: { issueId: leafId },
     });
 
+    // Targeted at the watched issue, which is the one target the audit-comment
+    // grant would otherwise permit. Anywhere else is refused for reasons that
+    // have nothing to do with attribution, which would leave `allowed` passing
+    // under the very regression this test exists to catch.
     const revalidated = await service.revalidateMutationScope(await resolveScope(), {
       intent: "comment",
-      targetIssueId: leafId,
+      targetIssueId: sourceId,
     });
     expect(revalidated.classification?.state).toBe("live");
     expect(revalidated.allowed).toBe(false);
