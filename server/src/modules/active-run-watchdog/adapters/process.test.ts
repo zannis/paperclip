@@ -1,22 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runningProcesses } from "../../../adapters/utils.js";
-import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../../../services/local-service-supervisor.js";
+import { isProcessPidAlive, isProcessGroupAlive, terminateLocalService } from "../../../services/local-service-supervisor.js";
 import { createProcessAdapter } from "./process.js";
 
 vi.mock("../../../services/local-service-supervisor.js", () => ({
-  isPidAlive: vi.fn(),
+  isProcessPidAlive: vi.fn(),
   isProcessGroupAlive: vi.fn(),
   terminateLocalService: vi.fn(),
 }));
 
-const mockedIsPidAlive = vi.mocked(isPidAlive);
+const mockedIsProcessPidAlive = vi.mocked(isProcessPidAlive);
 const mockedIsProcessGroupAlive = vi.mocked(isProcessGroupAlive);
 const mockedTerminateLocalService = vi.mocked(terminateLocalService);
 
 describe("adapters", () => {
   describe("createProcessAdapter", () => {
     beforeEach(() => {
-      mockedIsPidAlive.mockReset();
+      mockedIsProcessPidAlive.mockReset();
       mockedIsProcessGroupAlive.mockReset();
       mockedTerminateLocalService.mockReset();
       runningProcesses.clear();
@@ -33,7 +33,7 @@ describe("adapters", () => {
       });
 
       expect(outcome).toEqual({ attempted: false, outcome: "skipped_non_local_adapter", adapterType: "hermes_gateway" });
-      expect(mockedIsPidAlive).not.toHaveBeenCalled();
+      expect(mockedIsProcessPidAlive).not.toHaveBeenCalled();
     });
 
     it("reports no_process_metadata when no pid or process group is known", async () => {
@@ -50,7 +50,7 @@ describe("adapters", () => {
     });
 
     it("reports not_running when the process is dead", async () => {
-      mockedIsPidAlive.mockReturnValue(false);
+      mockedIsProcessPidAlive.mockReturnValue(false);
       mockedIsProcessGroupAlive.mockReturnValue(false);
       const adapter = createProcessAdapter();
 
@@ -72,7 +72,7 @@ describe("adapters", () => {
     });
 
     it("reports terminated when the live process stops after termination", async () => {
-      mockedIsPidAlive.mockReturnValueOnce(true).mockReturnValueOnce(false);
+      mockedIsProcessPidAlive.mockReturnValueOnce(true).mockReturnValueOnce(false);
       mockedIsProcessGroupAlive.mockReturnValue(false);
       mockedTerminateLocalService.mockResolvedValue(undefined);
       const adapter = createProcessAdapter();
@@ -95,7 +95,7 @@ describe("adapters", () => {
     });
 
     it("reports failed when termination throws", async () => {
-      mockedIsPidAlive.mockReturnValue(true);
+      mockedIsProcessPidAlive.mockReturnValue(true);
       mockedIsProcessGroupAlive.mockReturnValue(false);
       mockedTerminateLocalService.mockRejectedValue(new Error("kill failed"));
       const adapter = createProcessAdapter();
@@ -152,7 +152,7 @@ describe("adapters", () => {
     ])(
       "reports no_process_metadata for invalid identifiers ($fallbackPid, $fallbackProcessGroupId)",
       async ({ fallbackPid, fallbackProcessGroupId }) => {
-        mockedIsPidAlive.mockReturnValue(true);
+        mockedIsProcessPidAlive.mockReturnValue(true);
         mockedIsProcessGroupAlive.mockReturnValue(false);
         mockedTerminateLocalService.mockResolvedValue(undefined);
         const adapter = createProcessAdapter();
@@ -169,7 +169,7 @@ describe("adapters", () => {
           outcome: "no_process_metadata",
           adapterType: "codex_local",
         });
-        expect(mockedIsPidAlive).not.toHaveBeenCalled();
+        expect(mockedIsProcessPidAlive).not.toHaveBeenCalled();
         expect(mockedIsProcessGroupAlive).not.toHaveBeenCalled();
         expect(mockedTerminateLocalService).not.toHaveBeenCalled();
       },
