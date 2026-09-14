@@ -45,11 +45,12 @@ function createDbStub(...selectResponses: unknown[][]) {
   };
 }
 
-function loadAppModules() {
-  return Promise.all([
-    vi.importActual<typeof import("../routes/access.js")>("../routes/access.js"),
-    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
-  ]);
+async function loadAppModules() {
+  // Sequential on purpose: concurrent vi.importActual() calls can drop a
+  // factory mock, because Vitest keeps one shared mock-resolution callstack.
+  const access = await vi.importActual<typeof import("../routes/access.js")>("../routes/access.js");
+  const middleware = await vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js");
+  return [access, middleware] as const;
 }
 
 async function createApp(
