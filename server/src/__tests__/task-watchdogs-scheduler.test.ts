@@ -1375,6 +1375,87 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([sourceId]);
   });
 
+  // The takeover, run end to end: the run declared a wake on the leaf, that
+  // wake fired and started a run, that run finished — and a different agent is
+  // now running on the same leaf. The declaration is *spent*, and a spent
+  // declaration must not license the later path.
+  //
+  // Two distinct failures are pinned here, and the third leg is what separates
+  // them. Attribution by issue id cannot tell the two paths apart at all — the
+  // declaration names neither a wake nor a run, so it goes on licensing
+  // whatever starts on that issue next and hands the third party to this run's
+  // ledger as its own. Attribution that reads provenance off the path but
+  // remembers an issue it once attributed fails only here: it admits correctly
+  // while the run's own path is live (the middle assertion) and keeps admitting
+  // after that path is over, which is the whole defect. Asserting rejection
+  // without ever creating and finishing the declared wake's own path leaves the
+  // second failure untested.
+  //
+  // The third party here is a *directly started* run: no wake request behind it
+  // at all, so its origin is null because the left join finds nothing, not
+  // because a wake payload was missing the stamp. That is the other way a path
+  // arrives unattributable, and the neighbouring cases do not cover it.
+  it("rejects a third party's run on a leaf whose declared wake is already spent", async () => {
+    const { companyId, sourceId, childIds, agentId, runId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-TAKEOVER", { establishedChildren: ["WDOG-LIVE-TAKEOVER-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
+    ])).recorded).toBe(true);
+
+    // The declared wake fires and starts the run it was declared for. While
+    // that path is live the recovery is admitted: the leaf is live because this
+    // run made it live, and that is the legitimate path the fix must keep.
+    const ownPath = await seedLiveRunOn(companyId, leafId, { originRunId: runId });
+    const duringOwnPath = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(duringOwnPath.classification?.state).toBe("live");
+    expect(
+      duringOwnPath.allowed,
+      "unattributedLivenessIssueIds" in duringOwnPath
+        ? JSON.stringify(duringOwnPath.unattributedLivenessIssueIds)
+        : "",
+    ).toBe(true);
+
+    // And then it ends. The wake is claimed and the run it started is terminal,
+    // so nothing this run caused is live on the leaf any more — the declaration
+    // has been spent on a path that is over.
+    await db.update(heartbeatRuns)
+      .set({ status: "succeeded" })
+      .where(eq(heartbeatRuns.id, ownPath.runId));
+
+    const thirdPartyAgentId = await seedAgent(companyId, { name: "Third Party Taker" });
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: thirdPartyAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    // Targeted at the watched issue, which is the one target the audit-comment
+    // grant would otherwise permit. Anywhere else is refused for reasons that
+    // have nothing to do with attribution, which would leave `allowed` passing
+    // under the very regression this test exists to catch.
+    const revalidated = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: sourceId,
+    });
+    expect(revalidated.classification?.state).toBe("live");
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
   // The wake this run fired failed, was coalesced away, or simply finished —
   // and somebody else then started the same leaf while this run is still going.
   // An issue-level `startsWork` reports that third party as this run's own
