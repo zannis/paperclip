@@ -5,6 +5,46 @@ import { heartbeatRuns, issues, issueWatchdogs } from "@paperclipai/db";
 const MAX_WATCHDOG_SCOPE_ANCESTRY_DEPTH = 100;
 export const TASK_WATCHDOG_ORIGIN_KIND = "task_watchdog";
 
+// Payload key a route stamps onto every wake it fires while acting under a
+// task-watchdog mutation scope, naming the watchdog run that caused it.
+//
+// It lives in the wake request's payload because that is the only place both
+// ends can reach. The route knows the run id synchronously, but the enqueue
+// itself completes in a detached tail after the response — long after the
+// mutation ledger has settled — so no wake id can be reported back in time for
+// the ledger to record it. The stamp travels forward with the wake instead: the
+// queued request carries it, and the heartbeat run the wake starts inherits it
+// through `heartbeat_runs.wakeup_request_id`. That is what lets the mutation
+// guard tell the live path this run caused from one that merely happens to be
+// running on the same issue.
+//
+// It sits in this module for the same reason the terminal run statuses below
+// do: this is the end of the dependency edge, reachable from the guard in
+// `task-watchdogs.ts` and from the wake helpers the routes call, with no cycle.
+//
+// Underscore-prefixed to match the other reserved wake-payload keys
+// (`_paperclipWakeContext`) and keep it out of anything treating the payload as
+// caller-supplied data.
+export const TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY = "_paperclipWatchdogOriginRunId";
+
+// A run that has reached one of these is over. It lives here, next to the
+// resolver that has to refuse it, rather than in `task-watchdogs.ts` — that
+// module imports this one, so this is the end of the dependency edge both
+// sides can share.
+export const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = [
+  "succeeded",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "timed_out",
+] as const;
+
+export function isTerminalWatchdogRunStatus(status: string | null | undefined) {
+  return TASK_WATCHDOG_TERMINAL_RUN_STATUSES.includes(
+    status as (typeof TASK_WATCHDOG_TERMINAL_RUN_STATUSES)[number],
+  );
+}
+
 type AgentRunActor = {
   type: string;
   agentId?: string | null;
@@ -28,9 +68,20 @@ export type TaskWatchdogMutationScope =
       watchedIssueId: string;
       watchdogIssueId: string | null;
       stopFingerprint: string | null;
+      // The run whose context pinned `stopFingerprint`. Carried so that a
+      // mutation this run was authorized to make can be recorded against the
+      // run, instead of locking the run out of its own subtree for the rest of
+      // the run.
+      runId: string | null;
+      // What this run has already been authorized to write to the watched
+      // subtree, as recorded by its earlier requests. The freshness guard uses
+      // it to tell the run's own drift from a third party's. Left opaque here:
+      // this module only reads it out of the run context, `task-watchdogs.ts`
+      // is what validates and interprets it.
+      mutationLedger: unknown;
     };
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -45,6 +96,7 @@ function readTaskWatchdogContext(contextSnapshot: unknown) {
   return {
     watchedIssueId: readString(taskWatchdog?.watchedIssueId) ?? readString(context?.watchedIssueId),
     stopFingerprint: readString(taskWatchdog?.stopFingerprint) ?? readString(context?.stopFingerprint),
+    mutationLedger: taskWatchdog?.mutationLedger ?? context?.mutationLedger ?? null,
   };
 }
 
@@ -63,6 +115,7 @@ export async function resolveTaskWatchdogMutationScope(
       id: heartbeatRuns.id,
       companyId: heartbeatRuns.companyId,
       agentId: heartbeatRuns.agentId,
+      status: heartbeatRuns.status,
       contextSnapshot: heartbeatRuns.contextSnapshot,
     })
     .from(heartbeatRuns)
@@ -76,6 +129,22 @@ export async function resolveTaskWatchdogMutationScope(
     return {
       kind: "invalid",
       detail: "Task-watchdog run context does not belong to this agent.",
+    };
+  }
+
+  // The exception this scope grants is earned by a *run* — a watchdog wake that
+  // observed a stopped subtree and is now recovering it. The context row that
+  // carries the grant outlives the run, and neither the fingerprint nor the
+  // persisted watchdog's `active` status expires with it: a watchdog stays
+  // active for as long as it is configured, so a succeeded, failed or cancelled
+  // run whose identity is replayed would otherwise keep its mutation grant over
+  // the watched subtree indefinitely, long after the subtree acquired a live
+  // owner of its own. The run's own status is the only thing here that ends,
+  // so it is what the grant is bound to.
+  if (isTerminalWatchdogRunStatus(run.status)) {
+    return {
+      kind: "invalid",
+      detail: "Task-watchdog run has already finished; its mutation scope no longer applies.",
     };
   }
 
@@ -118,6 +187,8 @@ export async function resolveTaskWatchdogMutationScope(
     watchedIssueId: watchdog.issueId,
     watchdogIssueId: watchdog.watchdogIssueId ?? null,
     stopFingerprint: taskWatchdog.stopFingerprint,
+    runId: run.id,
+    mutationLedger: taskWatchdog.mutationLedger,
   };
 }
 

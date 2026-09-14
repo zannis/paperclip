@@ -204,10 +204,15 @@ import {
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
+  TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY,
   resolveTaskWatchdogMutationScope,
   taskWatchdogScopeAllowsIssueMutation,
 } from "../services/task-watchdog-scope.js";
 import type {
+  TaskWatchdogAuthorizedMutation,
+  TaskWatchdogDeclaredLeafWrite,
+  TaskWatchdogLedgerBaseline,
+  TaskWatchdogMaterialByIssueId,
   TaskWatchdogServiceDeps,
   taskWatchdogService,
 } from "../services/task-watchdogs.js";
@@ -243,7 +248,10 @@ import {
   normalizeUploadAttachmentContentType,
   SVG_CONTENT_TYPE,
 } from "../attachment-types.js";
-import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import {
+  issueAssignmentWakeupFires,
+  queueIssueAssignmentWakeup,
+} from "../services/issue-assignment-wakeup.js";
 import { shouldWakeAssigneeForIssueComment } from "../services/issue-comment-wakeup.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
 import { notifySecretProposalResolution } from "../services/secret-proposal-notifications.js";
@@ -328,6 +336,7 @@ import {
   type IssueThreadInteractionResolverRestriction,
 } from "../services/issue-thread-interaction-resolution.js";
 import { resolveSelectedSuggestedTasks } from "../services/issue-thread-interactions.js";
+import type { ResolvedInteractionSourceIssueWrite } from "../services/issue-thread-interactions.js";
 import {
   crossIssueInfluenceLimitError,
   crossIssueInfluenceRunContextError,
@@ -550,6 +559,7 @@ function noopTaskWatchdogService(): TaskWatchdogService {
     }),
     revalidateMutationScope: async () => ({
       allowed: true,
+      auditCommentOnly: false,
       classification: {
         state: "stopped",
         reason: "Task watchdog service unavailable in this route context.",
@@ -562,9 +572,27 @@ function noopTaskWatchdogService(): TaskWatchdogService {
           materialLeaves: [],
           waitsByIssueId: {},
         },
+        materialByIssueId: {},
         pendingInteractionsByIssueId: {},
       },
+      ledgerBaseline: {
+        baseline: {
+          version: 2 as const,
+          fingerprint: "task_watchdog_stop:unavailable",
+          materialLeaves: [],
+          waitsByIssueId: {},
+        },
+        baselineMaterialByIssueId: {},
+      },
     }),
+    // The stub never admits a request under the audit grant, so nothing ever
+    // reaches the claim; answering "granted" keeps it from inventing a refusal
+    // for a surface it is not mediating.
+    claimAuditCommentGrant: async () => null,
+    recordAuthorizedMutation: async (
+      _scope: Parameters<TaskWatchdogService["recordAuthorizedMutation"]>[0],
+      _entry: Parameters<TaskWatchdogService["recordAuthorizedMutation"]>[1],
+    ) => ({ recorded: false as const, reason: "watchdog_service_unavailable" }),
   };
 }
 
@@ -2081,6 +2109,73 @@ function isApprovalReviewComment(body: string) {
   );
 }
 
+// Whether a comment request can only add a comment. The comment route is not a
+// read-only surface: `resume`/`reopen` move a terminal or blocked issue back to
+// `todo`, `interrupt` cancels the issue's live run, and an approval-marker body
+// drives an execution-policy decision through
+// `applyIssueExecutionPolicyTransition`. Each of those is a state change
+// wearing a comment's clothes.
+//
+// This matters to the task-watchdog freshness guard specifically: its
+// live-subtree relaxation exists only because a plain comment provably cannot
+// change the watched subtree's classification or rotate its stop fingerprint.
+// A request carrying any of these is therefore classified as a mutation, and
+// takes the strict check, exactly like a status PATCH.
+function issueCommentWatchdogIntent(body: unknown): "comment" | "mutate" {
+  const payload = readObject(body);
+  if (payload.resume === true || payload.reopen === true || payload.interrupt === true) return "mutate";
+  return typeof payload.body === "string" && isApprovalReviewComment(payload.body) ? "mutate" : "comment";
+}
+
+// Fields this route accepts and then does nothing with at the value given. A
+// key-count test reads these as state changes, which is wrong in the direction
+// that loses the audit trail: a generated client that spells its optional
+// fields out — `{comment, onBehalfOfUserId: null}` — gets the mandated summary
+// refused for a field the route discards two lines into the handler.
+// `onBehalfOfUserId` is only read when it is non-null (the spoof check tests
+// `!= null`), and `reopen`/`resume`/`interrupt` gate exclusively on `=== true`.
+// Everything else stays out of this list: `hiddenAt: null` unhides,
+// `reviewRequest: null` clears a review request, and an explicit null assignee
+// unassigns, so none of those are inert at any value.
+const ISSUE_UPDATE_INERT_FIELD_VALUES: Record<string, unknown> = {
+  onBehalfOfUserId: null,
+  reopen: false,
+  resume: false,
+  interrupt: false,
+};
+
+// The same question for `PATCH /issues/:id`, which also accepts a `comment`.
+// Whether that request is inert cannot be decided field by field here the way
+// it can on the comment route: this body can carry a status, an assignee, a
+// blocker list and a review verdict alongside the comment, and each of those is
+// a state change no matter what the comment says. So the rule stays the strict
+// one — a lone `comment` and nothing else is a comment; every other shape is a
+// mutation, including a body with no comment at all — but "nothing else" is
+// measured by effective behaviour rather than by key count, so a field the
+// route provably discards at the value supplied does not turn the summary into
+// a mutation.
+//
+// This decides admission only. Whether the request stays inert all the way to
+// the update is a separate question, and the answer is not inferred from the
+// body: this route derives its own state changes from an issue's execution
+// policy, so the granted comment is held to an emptiness check on the derived
+// patch as well. See `assertWatchdogAuditCommentDerivesNoUpdate`.
+function issueUpdateWatchdogIntent(body: unknown): "comment" | "mutate" {
+  const payload = readObject(body);
+  const setKeys = Object.keys(payload).filter((key) => (
+    payload[key] !== undefined
+    && !(key in ISSUE_UPDATE_INERT_FIELD_VALUES && payload[key] === ISSUE_UPDATE_INERT_FIELD_VALUES[key])
+  ));
+  if (setKeys.length !== 1 || setKeys[0] !== "comment") return "mutate";
+  const comment = payload.comment;
+  if (typeof comment !== "string" || comment.trim().length === 0) return "mutate";
+  // An approval comment moves the issue through its execution policy, so it is
+  // a state change wearing a comment's clothes — the same carve-out the comment
+  // route makes.
+  return isApprovalReviewComment(comment) ? "mutate" : "comment";
+}
+
+
 function buildExecutionStageWakeContext(input: {
   state: ParsedExecutionState;
   wakeRole: ExecutionStageWakeContext["wakeRole"];
@@ -2566,9 +2661,12 @@ async function queueResolvedInteractionContinuationWakeup(input: {
   workspaceRefreshReason?: string | null;
   newlyResolvedItemIds?: string[];
   idempotencyKey?: string | null;
+  // Set when the resolving request is acting under a task-watchdog mutation
+  // scope; see `TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY`.
+  watchdogOriginRunId?: string | null;
 }) {
   if (!input.issue.assigneeAgentId || isClosedIssueStatus(input.issue.status))
-    return;
+    return false;
 
   const reviewPathLost =
     input.issue.status === "in_review" &&
@@ -2607,8 +2705,8 @@ async function queueResolvedInteractionContinuationWakeup(input: {
     !rejectedPlanNeedsRevision &&
     !reviewPathLost
   )
-    return;
-  if (input.interaction.status === "expired" && !reviewPathLost) return;
+    return false;
+  if (input.interaction.status === "expired" && !reviewPathLost) return false;
   // A normal interaction continuation is itself the durable recovery path.
   // Do not contaminate that wake with the fallback "review path lost"
   // instruction merely because the just-consumed interaction now appears
@@ -2726,6 +2824,12 @@ async function queueResolvedInteractionContinuationWakeup(input: {
           : {}),
         ...(reviewPathContext ?? {}),
         mutation: "interaction",
+        // A watchdog run resolving an interaction is starting the path it is
+        // about to be held responsible for; stamp the wake so the resulting
+        // live path says which run caused it.
+        ...(input.watchdogOriginRunId
+          ? { [TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY]: input.watchdogOriginRunId }
+          : {}),
       },
       idempotencyKey:
         input.idempotencyKey ??
@@ -2768,6 +2872,11 @@ async function queueResolvedInteractionContinuationWakeup(input: {
         "failed to wake assignee on issue interaction resolution",
       ),
     );
+  // Whether the resolution actually woke the assignee. Only this function knows
+  // — it is the one holding the continuation policy, the resolution outcome and
+  // the review-path state — and a watchdog run resolving an interaction needs
+  // the answer to tell a run its own resolution started from one it did not.
+  return true;
 }
 
 function readCheckboxSelectionForWake(input: {
@@ -5181,7 +5290,11 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
+      const watchdogAllowed = await assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
+        intent: issueCommentWatchdogIntent(req.body),
+      });
+      if (watchdogAllowed) taskWatchdogGrantedCommentResponses.add(res);
+      return watchdogAllowed;
     }
     const boundaryDecision = await decideIssueAccess(
       req,
@@ -5273,7 +5386,17 @@ export function issueRoutes(
       /** Used only to name the task in denial copy (plan §6). */
       identifier?: string | null;
     },
-    options: { allowVisibleIssueWrite?: boolean } = {},
+    options: {
+      allowVisibleIssueWrite?: boolean;
+      // What this request is to the watchdog freshness guard. The guard's line
+      // is drawn per request, not per route: `PATCH /issues/:id` carries a
+      // `comment` field, so the mandated summary can arrive through the
+      // mutation gate as readily as through `POST /comments`, and revalidating
+      // it as a state change is what refuses it once the run's own recovery has
+      // restored the subtree. Routes that can carry a comment say so; the
+      // default stays `mutate`, which is where a caller that forgets belongs.
+      watchdogIntent?: "comment" | "mutate";
+    } = {},
   ) {
     if (req.actor.type !== "agent") return true;
     const actorAgentId = req.actor.agentId;
@@ -5310,7 +5433,9 @@ export function issueRoutes(
         });
         return false;
       }
-      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue);
+      return assertFreshTaskWatchdogSourceMutation(res, watchdogScope, issue, {
+        intent: options.watchdogIntent,
+      });
     }
     const boundaryDecision = await decideIssueAccess(
       req,
@@ -5406,30 +5531,497 @@ export function issueRoutes(
     return true;
   }
 
+  // What a single request has been authorized to write to the watched subtree.
+  // One request can pass more than one freshness check (creating a child
+  // validates the parent too) and can write more than one issue, so the record
+  // accumulates and is persisted once, when the response is about to go out.
+  type PendingTaskWatchdogRecord = {
+    scope: Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>;
+    ledgerBaseline: TaskWatchdogLedgerBaseline | null;
+    // What the subtree looked like at the instant the guard admitted this
+    // request, kept so the route's own write can be made conditional on it.
+    observedMaterialByIssueId: TaskWatchdogMaterialByIssueId | null;
+    mutations: TaskWatchdogAuthorizedMutation[];
+  };
+  const pendingTaskWatchdogRecords = new WeakMap<Response, PendingTaskWatchdogRecord>();
+
+  // Requests the watchdog freshness guard admitted *only* as an audit record.
+  // Once a watchdog run's own recovery has restored the subtree's execution
+  // path, the single comment it may still write on the watched issue is granted
+  // on the premise that it is inert. The premise does not hold by itself — the
+  // comment route wakes the target's assignee and every @-mentioned agent — so
+  // the guard states the condition here and the route enforces it: a comment in
+  // this set enqueues no wake. Without that, the granted comment could start
+  // work on the very path the run just restarted, or steer agents outside it.
+  //
+  // The scope is kept rather than a bare flag because the *other* half of the
+  // grant is owed here too: the one summary has to be spent, and spending it is
+  // a write against this run's row that only makes sense next to the insert it
+  // pays for. See `taskWatchdogAuditCommentClaim`.
+  const taskWatchdogAuditCommentResponses = new WeakMap<
+    Response,
+    Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>
+  >();
+
+  function isTaskWatchdogAuditComment(res: Response) {
+    return taskWatchdogAuditCommentResponses.has(res);
+  }
+
+  // Spends the audit grant in the same transaction as the comment it was given
+  // for. Admission is several validations and one insert away from that write —
+  // the agent-only `presentation`/`metadata` rejection, the cross-issue run cap,
+  // a failing insert — and a request refused in between wrote no summary, so a
+  // grant spent at admission has to be handed back out of band. Every way of
+  // doing that leaks: an aborted response emits `close` and never `finish`, a
+  // killed worker runs no callback at all, and the database outage that failed
+  // the insert fails the release too. Claiming inside the insert's transaction
+  // removes the question — either both commit or neither does.
+  //
+  // Returns `undefined` for a request the guard did not admit under the grant,
+  // so the call sites can pass it straight through.
+  function taskWatchdogAuditCommentClaim(res: Response) {
+    const scope = taskWatchdogAuditCommentResponses.get(res);
+    if (!scope) return undefined;
+    return async (tx: unknown) => {
+      const denial = await taskWatchdogsSvc.claimAuditCommentGrant(scope, tx);
+      if (!denial) return;
+      // Rolls the comment back with the claim it could not make.
+      throw conflict(denial, {
+        watchedIssueId: scope.watchedIssueId,
+        watchdogId: scope.watchdogId,
+      });
+    };
+  }
+
+  // Requests whose comment the watchdog scope itself authorized. The scope is a
+  // complete authorization for that write — it mediated the subtree, the
+  // freshness of the run's wake, and the intent of this very request — so a
+  // route that re-runs the generic mutation gate afterwards is not adding a
+  // check, it is asking a second, stricter question about the same comment and
+  // taking its `no`. See the closed-issue re-check in `POST /issues/:id/comments`.
+  const taskWatchdogGrantedCommentResponses = new WeakSet<Response>();
+
+  function isTaskWatchdogGrantedComment(res: Response) {
+    return taskWatchdogGrantedCommentResponses.has(res);
+  }
+
+  // Recording the ledger is two short queries. This bound only exists so a
+  // stuck database cannot hold a response open indefinitely; hitting it
+  // degrades to exactly the behaviour of not recording at all, which the guard
+  // fails closed on.
+  const TASK_WATCHDOG_RECORD_HOLD_MS = 5_000;
+
+  // Declares what an authorized request actually wrote to a watched leaf, so
+  // the freshness guard can recognise the resulting drift as this run's own on
+  // the next request.
+  //
+  // The values passed here must come from the row the route's *own* statement
+  // returned, never from a re-read: a re-read can only report the latest value,
+  // which may be a third party's, and recording that as ours is what lets a
+  // concurrent change be laundered into the run's authorization.
+  //
+  // A route that writes a leaf field and does not declare it is not unsafe,
+  // only conservative — the undeclared change reads as somebody else's and the
+  // run's next mutation is rejected, which is what happened before any of this
+  // existed.
+  function noteTaskWatchdogAuthorizedWrite(
+    res: Response,
+    mutation: TaskWatchdogAuthorizedMutation,
+  ) {
+    const record = pendingTaskWatchdogRecords.get(res);
+    if (!record) return;
+    record.mutations.push(mutation);
+  }
+
+  // Declares that this request enqueued a wake for the issue, which is what
+  // lets the guard tell a run the watchdog started from one it merely found.
+  // Called next to the enqueue itself rather than derived from the values
+  // written: whether a write wakes anybody is this route's decision, taken from
+  // the transition, the actor and the interaction's continuation policy, and
+  // none of that is recoverable from the leaf fields the ledger carries.
+  function noteTaskWatchdogStartedWork(res: Response, issueId: string) {
+    if (!issueId) return;
+    noteTaskWatchdogAuthorizedWrite(res, { issueId, declared: {}, startsWork: true });
+  }
+
+  // The watchdog run this request is acting under, if any.
+  //
+  // Every wake a watchdog-scoped request fires is stamped with it, so the live
+  // path that wake produces carries its own provenance and the guard can tell
+  // the run it started from one that merely happens to be running on the same
+  // issue. The ledger cannot supply that: the enqueues run in a detached tail
+  // after the response, long after the ledger has settled, so no wake id can be
+  // reported back in time. The stamp travels forward instead of the id
+  // travelling back.
+  //
+  // Absent a watchdog scope this is null and nothing is stamped — an ordinary
+  // request's wake is nobody's watchdog recovery.
+  function taskWatchdogWakeOriginRunId(res: Response) {
+    return pendingTaskWatchdogRecords.get(res)?.scope.runId ?? null;
+  }
+
+  // Adds the stamp to a wake payload about to be enqueued. Returns the payload
+  // unchanged when this request is not a watchdog's, so the common path carries
+  // no extra key.
+  function stampTaskWatchdogWakeOrigin(
+    res: Response,
+    payload: Record<string, unknown> | null | undefined,
+  ) {
+    const runId = taskWatchdogWakeOriginRunId(res);
+    if (!runId) return payload;
+    return { ...(payload ?? {}), [TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY]: runId };
+  }
+
+  function requestedBlockerIssueIds(req: Request) {
+    return Array.isArray(req.body?.blockedByIssueIds)
+      ? [...new Set(req.body.blockedByIssueIds as string[])].sort()
+      : [];
+  }
+
+  // A created issue has no baseline in the watched subtree to be diffed
+  // against, so every material field has to be declared for it to be
+  // attributable at all — an issue this run created but only half-described
+  // could still be carrying somebody else's edit.
+  //
+  // The parent comes from the created row too, and for the same reason as every
+  // other declared value: it is the edge this request made. Letting the guard
+  // resolve it later from the child's current row would hand a third party's
+  // reparenting to the ledger as this run's own displacement.
+  function noteTaskWatchdogCreatedIssue(
+    req: Request,
+    res: Response,
+    issue: {
+      id: string;
+      status: string;
+      assigneeAgentId: string | null;
+      assigneeUserId: string | null;
+      parentId?: string | null;
+    },
+    // Routes that create one issue from the request body read its blockers off
+    // that body; a route that creates several reads each child's own, which is
+    // not the same list.
+    blockerIssueIds?: string[],
+  ) {
+    noteTaskWatchdogAuthorizedWrite(res, {
+      issueId: issue.id,
+      created: true,
+      parentId: issue.parentId ?? null,
+      // Creating an assigned, non-backlog issue queues its assignment wake, and
+      // that wake is the run this creation is about to be held responsible for.
+      // Read from the same predicate the wake itself is gated on, so the two
+      // cannot drift apart.
+      ...(issueAssignmentWakeupFires(issue) ? { startsWork: true } : {}),
+      declared: {
+        status: issue.status,
+        assigneeAgentId: issue.assigneeAgentId ?? null,
+        assigneeUserId: issue.assigneeUserId ?? null,
+        blockerIssueIds: blockerIssueIds ?? requestedBlockerIssueIds(req),
+        // A just-created issue has no waiting paths of its own; anything the
+        // classifier reports on it came from somewhere else.
+        pendingInteractionIds: [],
+        pendingApprovalIds: [],
+      },
+    });
+  }
+
+  // Resolving an interaction takes it out of the issue's waiting paths, which
+  // are a fingerprint input in their own right — so without this the resolution
+  // reads as somebody else's change and locks the run out of its own summary
+  // comment, which is the defect this whole mechanism exists to fix.
+  //
+  // Only a resolution that actually landed is declared: an interaction still
+  // `pending` after the call (a verdict that does not yet complete the set) has
+  // not left the waiting paths, and claiming it had would reject the run's next
+  // mutation for a shrink that never happened.
+  //
+  // Issues the resolution created are declared the same way the create routes
+  // declare theirs. The interaction service creates them with no blockers and no
+  // waiting paths of their own, so those fields are known without a re-read.
+  //
+  // A resolution can also move the source issue itself — accepting a completion
+  // review closes it, declining one reopens it and hands it back to its
+  // assignee — and those writes are leaf fields like any other. The service
+  // reports them from its own `RETURNING` row as `sourceIssueWrite`, naming
+  // only the columns it patched; leaving them undeclared would read as somebody
+  // else's change and lock the run out of the rest of its own recovery, which
+  // is this issue's defect reached through the resolution routes.
+  function noteTaskWatchdogResolvedInteraction(
+    res: Response,
+    issue: { id: string },
+    interaction: { id: string; status: string },
+    createdIssues: readonly {
+      id: string;
+      status: string;
+      assigneeAgentId: string | null;
+      assigneeUserId?: string | null;
+      parentId?: string | null;
+    }[] = [],
+    sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null,
+  ) {
+    const declaredSourceWrite: TaskWatchdogDeclaredLeafWrite = {
+      ...(sourceIssueWrite?.status !== undefined ? { status: sourceIssueWrite.status } : {}),
+      ...(sourceIssueWrite?.assigneeAgentId !== undefined
+        ? { assigneeAgentId: sourceIssueWrite.assigneeAgentId ?? null }
+        : {}),
+      ...(sourceIssueWrite?.assigneeUserId !== undefined
+        ? { assigneeUserId: sourceIssueWrite.assigneeUserId ?? null }
+        : {}),
+    };
+    const resolved = interaction.status !== "pending";
+    if (resolved || Object.keys(declaredSourceWrite).length > 0) {
+      noteTaskWatchdogAuthorizedWrite(res, {
+        issueId: issue.id,
+        declared: declaredSourceWrite,
+        ...(resolved ? { resolvedInteractionIds: [interaction.id] } : {}),
+      });
+    }
+    for (const created of createdIssues) {
+      noteTaskWatchdogAuthorizedWrite(res, {
+        issueId: created.id,
+        created: true,
+        parentId: created.parentId ?? null,
+        ...(issueAssignmentWakeupFires(created) ? { startsWork: true } : {}),
+        declared: {
+          status: created.status,
+          assigneeAgentId: created.assigneeAgentId ?? null,
+          assigneeUserId: created.assigneeUserId ?? null,
+          blockerIssueIds: [],
+          pendingInteractionIds: [],
+          pendingApprovalIds: [],
+        },
+      });
+    }
+  }
+
+  function taskWatchdogLedgerBaselineOf(
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ) {
+    return "ledgerBaseline" in revalidated ? revalidated.ledgerBaseline ?? null : null;
+  }
+
+  function taskWatchdogObservedMaterialOf(
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ): TaskWatchdogMaterialByIssueId | null {
+    const classification = revalidated.classification;
+    if (!classification || !("materialByIssueId" in classification)) return null;
+    return classification.materialByIssueId;
+  }
+
+  // The state a watched issue was in at the instant the freshness guard admitted
+  // this request, handed to `svc.update` as a compare-and-swap precondition.
+  //
+  // Adjudicating freshness and then writing are two statements with a window
+  // between them, and the ledger cannot see into that window: it diffs the
+  // final state against `baseline + declared`, so a third-party write that
+  // lands in the window and is then overwritten by this run's own write —
+  // to the value the ledger already expects — leaves a final state that matches
+  // exactly, and the third party's change is erased with no drift recorded, on
+  // this revalidation or any later one. Conditioning the write on the values the
+  // guard actually saw closes that window: the racing write moves one of them,
+  // the UPDATE matches no row, and the run is told it is stale instead of
+  // silently clobbering somebody.
+  //
+  // Every material field this route can write is compared — status, both
+  // assignee columns and the blocker list. The blockers matter most and were
+  // the ones missing: a `blockedByIssueIds` patch replaces the whole list
+  // rather than one column, so a blocker a third party added between the
+  // guard's read and this write is not merely overwritten but deleted, and it
+  // was also the one write that could reach the issue carrying no precondition
+  // at all, since the route accepts a blockers-only patch.
+  //
+  // The two waiting-path fields are deliberately not here: this route cannot
+  // write them, so it cannot clobber them, and rejecting on an interaction
+  // somebody opened in the window would fail a write that takes nothing away
+  // from them. Drift there is still caught — by the ledger, on the run's next
+  // request. An issue the guard never observed (outside the watched subtree, or
+  // no watchdog scope at all) yields no precondition and the write is
+  // unconditional, exactly as before.
+  function taskWatchdogWritePrecondition(res: Response, issueId: string) {
+    const observed = pendingTaskWatchdogRecords.get(res)?.observedMaterialByIssueId?.[issueId];
+    if (!observed) return null;
+    return {
+      status: observed.status,
+      assigneeAgentId: observed.assigneeAgentId ?? null,
+      assigneeUserId: observed.assigneeUserId ?? null,
+      blockerIssueIds: observed.blockerIssueIds ?? [],
+    };
+  }
+
+  // The mutation itself is adjudicated in `revalidateMutationScope`, before the
+  // route writes anything. All that is left to do around the response is
+  // persist what the run was authorized to write.
+  //
+  // It has to land after the mutation commits but *before* the response reaches
+  // the client: the run's next request re-reads its ledger from the run
+  // context, so a write still in flight when the response is flushed leaves
+  // that request unable to account for its own change and being rejected by the
+  // very guard this exists to satisfy. So the response is held until the record
+  // settles rather than raced against it.
+  function scheduleTaskWatchdogRecord(
+    res: Response,
+    scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ) {
+    if (scope.kind !== "watchdog" || !scope.runId) return;
+    if (pendingTaskWatchdogRecords.has(res)) return;
+    const record: PendingTaskWatchdogRecord = {
+      scope,
+      ledgerBaseline: taskWatchdogLedgerBaselineOf(revalidated),
+      observedMaterialByIssueId: taskWatchdogObservedMaterialOf(revalidated),
+      mutations: [],
+    };
+    pendingTaskWatchdogRecords.set(res, record);
+
+    let started = false;
+    const settleRecord = async () => {
+      if (started) return;
+      started = true;
+      // Only a mutation that actually landed moved the subtree.
+      if (res.statusCode < 200 || res.statusCode >= 300) return;
+      if (record.mutations.length === 0) return;
+      const context = {
+        watchedIssueId: scope.watchedIssueId,
+        watchdogId: scope.watchdogId,
+        runId: scope.runId,
+      };
+      try {
+        const outcome = await Promise.race([
+          taskWatchdogsSvc.recordAuthorizedMutation(scope, {
+            ledgerBaseline: record.ledgerBaseline,
+            mutations: record.mutations,
+          }),
+          new Promise<{ recorded: false; reason: string }>((resolve) => {
+            const timer = setTimeout(
+              () => resolve({ recorded: false, reason: "record_timed_out" }),
+              TASK_WATCHDOG_RECORD_HOLD_MS,
+            );
+            timer.unref?.();
+          }),
+        ]);
+        // Not recording is fail-closed rather than an error, but it is not a
+        // quiet condition: the run's next watched-subtree mutation will be
+        // rejected with a 409 it cannot explain from the outside, and this line
+        // is the only place that says why. Warn, so it is findable from the
+        // 409 rather than only with debug logging already turned on.
+        if (!outcome?.recorded) {
+          logger.warn(
+            { ...context, reason: outcome?.reason ?? null },
+            "task watchdog authorized mutation was not recorded",
+          );
+        }
+      } catch (err) {
+        logger.warn({ err, ...context }, "task watchdog authorized mutation record failed");
+      }
+    };
+
+    const sendJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      void settleRecord().then(() => sendJson(body), () => sendJson(body));
+      return res;
+    }) as Response["json"];
+    // Backstop for any responder that does not go through `res.json`. Strictly
+    // no worse than today: the record still lands, just without the ordering
+    // guarantee above.
+    res.once("finish", () => {
+      void settleRecord();
+    });
+  }
+
+  function taskWatchdogStaleDetails(
+    scope: Extract<Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>, { kind: "watchdog" }>,
+    revalidated: Awaited<ReturnType<typeof taskWatchdogsSvc.revalidateMutationScope>>,
+  ) {
+    const classification = revalidated.classification;
+    const unattributedIssueIds = "unattributedIssueIds" in revalidated ? revalidated.unattributedIssueIds : undefined;
+    const unattributedLivenessIssueIds = "unattributedLivenessIssueIds" in revalidated
+      ? revalidated.unattributedLivenessIssueIds
+      : undefined;
+    return {
+      watchedIssueId: scope.watchedIssueId,
+      watchdogId: scope.watchdogId,
+      runStopFingerprint: scope.stopFingerprint,
+      currentState: classification?.state ?? null,
+      currentStopFingerprint: classification && "stopFingerprint" in classification
+        ? classification.stopFingerprint
+        : null,
+      // Which issues the run could not account for. This is the difference
+      // between "you were locked out by your own action" and "somebody else
+      // moved the subtree", and without it the two are indistinguishable from
+      // the outside.
+      ...(unattributedIssueIds?.length ? { unattributedIssueIds } : {}),
+      ...(unattributedLivenessIssueIds?.length ? { unattributedLivenessIssueIds } : {}),
+    };
+  }
+
+  // The audit grant is a grant of one *inert* write, and on `PATCH /issues/:id`
+  // inertness is not settled by the request body. This route derives its own
+  // fields from the issue's execution policy — `applyIssueExecutionPolicyTransition`
+  // clears an execution state that has no policy behind it any more, and on an
+  // `in_review` issue with a return assignee it also writes `status:
+  // "in_progress"` and that assignee — and it merges the result into the same
+  // `updateFields` the client's body produced. A lone-`comment` body therefore
+  // reaches the update with server-authored state changes attached, and
+  // suppressing the wake does not make them inert: the watched root moves under
+  // its return assignee while the child the run just revived already has a live
+  // owner.
+  //
+  // So the exception is conditional on what the request actually ends up
+  // writing. Every source of a derived field has run by the call site; if
+  // anything at all is left, this is not the write the grant covers and the
+  // request is refused whole — no comment, no update. Refusing is the honest
+  // outcome rather than silently dropping the derived patch: dropping it would
+  // make a PATCH mean something different for a watchdog than for anyone else,
+  // and the run still has `POST /issues/:id/comments`, which runs no transition,
+  // to record its summary.
+  function assertWatchdogAuditCommentDerivesNoUpdate(
+    res: Response,
+    updateFields: Record<string, unknown>,
+  ) {
+    const scope = taskWatchdogAuditCommentResponses.get(res);
+    if (!scope) return true;
+    const derivedFields = Object.keys(updateFields).filter((key) => updateFields[key] !== undefined);
+    if (derivedFields.length === 0) return true;
+    res.status(409).json({
+      error:
+        "Task-watchdog runs may only add their summary comment once the subtree has its own execution path again, and this update would change the issue as well; post the summary to the comments endpoint instead.",
+      details: {
+        watchedIssueId: scope.watchedIssueId,
+        watchdogId: scope.watchdogId,
+        derivedFields: derivedFields.sort(),
+        securityPrinciples: ["Least Privilege", "Complete Mediation", "Fail Securely"],
+      },
+    });
+    return false;
+  }
+
   async function assertFreshTaskWatchdogSourceMutation(
     res: Response,
     scope: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>,
     issue: { id: string },
+    // A request that only adds a comment is inert and stays admitted once the
+    // run's own recovery has restored a live path; every state change is held
+    // to the stricter rule. Defaulting to `mutate` keeps a caller that forgets
+    // to say on the safe side of that line.
+    opts: { intent?: "comment" | "mutate" } = {},
   ) {
     if (scope.kind !== "watchdog") return true;
     if (scope.watchdogIssueId && issue.id === scope.watchdogIssueId)
       return true;
 
-    const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
-    if (revalidated.allowed) return true;
+    const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope, {
+      intent: opts.intent ?? "mutate",
+      targetIssueId: issue.id,
+    });
+    if (revalidated.allowed) {
+      if (revalidated.auditCommentOnly) {
+        taskWatchdogAuditCommentResponses.set(res, scope);
+      }
+      scheduleTaskWatchdogRecord(res, scope, revalidated);
+      return true;
+    }
     res.status(409).json({
       error: revalidated.reason,
-      details: {
-        watchedIssueId: scope.watchedIssueId,
-        watchdogId: scope.watchdogId,
-        runStopFingerprint: scope.stopFingerprint,
-        currentState: revalidated.classification?.state ?? null,
-        currentStopFingerprint:
-          revalidated.classification &&
-          "stopFingerprint" in revalidated.classification
-            ? revalidated.classification.stopFingerprint
-            : null,
-      },
+      details: taskWatchdogStaleDetails(scope, revalidated),
     });
     return false;
   }
@@ -5594,8 +6186,13 @@ export function issueRoutes(
           message: scopeResult.detail,
         });
       }
-      const revalidated =
-        await taskWatchdogsSvc.revalidateMutationScope(watchdogScope);
+      // Resolving an interaction is a state change, not a comment: it closes a
+      // waiting path and can queue the continuation wake that starts the issue's
+      // own owner. It takes the strict rule.
+      const revalidated = await taskWatchdogsSvc.revalidateMutationScope(watchdogScope, {
+        intent: "mutate",
+        targetIssueId: issue.id,
+      });
       if (!revalidated.allowed) {
         return denyIssueThreadInteractionResolution(res, {
           status: 403,
@@ -5604,6 +6201,7 @@ export function issueRoutes(
             "This issue-thread interaction is outside the current watchdog scope",
         });
       }
+      scheduleTaskWatchdogRecord(res, watchdogScope, revalidated);
       return true;
     }
 
@@ -5801,8 +6399,11 @@ export function issueRoutes(
                 "Suggested-task creation is outside the current watchdog scope",
             });
           }
-          const revalidated =
-            await taskWatchdogsSvc.revalidateMutationScope(watchdogScope);
+          // Creating a child under `parent` is a state change against `parent`.
+          const revalidated = await taskWatchdogsSvc.revalidateMutationScope(watchdogScope, {
+            intent: "mutate",
+            targetIssueId: parent.id,
+          });
           if (!revalidated.allowed) {
             return denyIssueThreadInteractionResolution(res, {
               status: 403,
@@ -5811,6 +6412,10 @@ export function issueRoutes(
                 "Suggested-task creation is outside the current watchdog scope",
             });
           }
+          // The follow-up child is created directly under `parent`; the created
+          // rows themselves are declared once they exist, by whoever creates
+          // them, so their values are the ones this request wrote.
+          scheduleTaskWatchdogRecord(res, watchdogScope, revalidated);
         }
         await assertTaskBridgeCreateAllowed(req, issue.companyId, {
           projectId: task.projectId ?? issue.projectId,
@@ -12018,8 +12623,10 @@ export function issueRoutes(
           contextSource: "issue.create",
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         });
       }
+      noteTaskWatchdogCreatedIssue(req, res, issue);
       await queueTaskWatchdogEvaluation(issue, actor.runId);
 
       res.status(201).json({
@@ -12257,6 +12864,7 @@ export function issueRoutes(
           contextSource: "issue.child_create",
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         });
       }
       await blockWatchdogParentOnCurrentChild({
@@ -12264,6 +12872,7 @@ export function issueRoutes(
         watchdogParentIssueId: serializationContext?.watchdogParentIssueId,
         currentChildIssueId: currentSerializedChild?.id ?? issue.id,
       });
+      noteTaskWatchdogCreatedIssue(req, res, issue);
       await queueTaskWatchdogEvaluation(issue, actor.runId);
 
       res.status(201).json(issue);
@@ -12410,6 +13019,11 @@ export function issueRoutes(
         }
       }
 
+      const decompositionChildBlockerIds = new Map(normalizedChildren.map((child) => [
+        child.id as string,
+        [...new Set((child.blockedByIssueIds ?? []) as string[])].sort(),
+      ]));
+
       const result = await svc.decomposeAcceptedPlan(sourceIssue.id, {
         acceptedPlanRevisionId: req.body.acceptedPlanRevisionId,
         children: normalizedChildren,
@@ -12516,8 +13130,15 @@ export function issueRoutes(
             contextSource: "issue.accepted_plan_decomposition",
             requestedByActorType: actor.actorType,
             requestedByActorId: actor.actorId,
+            watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
           });
         }
+        // Creating through the plan-decomposition route is a watched-subtree
+        // creation like any other — it passed the same freshness guard, and each
+        // new non-terminal child rotates the fingerprint. Undeclared, they lock
+        // the run out of its own next mutation, which is the defect this ledger
+        // exists to fix reached through this route.
+        noteTaskWatchdogCreatedIssue(req, res, issue, decompositionChildBlockerIds.get(issue.id) ?? []);
         await queueTaskWatchdogEvaluation(issue, actor.runId);
       }
       await blockWatchdogParentOnCurrentChild({
@@ -12774,7 +13395,7 @@ export function issueRoutes(
         req,
         res,
         existing,
-        { allowVisibleIssueWrite: true },
+        { allowVisibleIssueWrite: true, watchdogIntent: issueUpdateWatchdogIntent(req.body) },
       );
       if (!issueMutationAccess) return;
       if (req.body.comment && !(await assertBoardCommentNotPaused(req, res, existing))) return;
@@ -13181,6 +13802,14 @@ export function issueRoutes(
       }
       Object.assign(updateFields, transition.patch);
 
+      // The transition is the last source of derived fields a lone-`comment` body
+      // can reach — `hiddenAt`, the resume-to-`todo` status and the explicit
+      // policy/assignee patches above all need a field this body does not carry,
+      // and the `reviewRequest` execution state below needs `reviewRequest` —
+      // so the audit grant's emptiness condition is decided here, before any of
+      // this request's side effects. The backstop before the persist re-reads it.
+      if (!assertWatchdogAuditCommentDerivesNoUpdate(res, updateFields)) return;
+
       const nextStatus = updateFields.status ?? existing.status;
       if (updateFields.unblockDescriptor && nextStatus !== "blocked") {
         throw unprocessable("unblockDescriptor requires blocked status");
@@ -13488,10 +14117,27 @@ export function issueRoutes(
       } = { value: null };
       const postCommitActivityPublications: ActivityPublication[] = [];
       const postCommitIssueActions: IssuePostCommitAction[] = [];
+      const watchdogWritePrecondition = taskWatchdogWritePrecondition(res, id);
       const issueUpdateData = {
         ...updateFields,
         actorAgentId: actor.agentId ?? null,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        ...(watchdogWritePrecondition ? { expectedCurrentLeaf: watchdogWritePrecondition } : {}),
+        // The audit exception establishes that this request writes no issue
+        // fields, and the service derives more below that check: an issue with no
+        // goal of its own is backfilled with the company fallback, and one with a
+        // null `projectId` and a workspace reference is attached to that
+        // workspace's project — both on every update, empty patch included. Those
+        // are server-authored state changes on a write admitted only as a record,
+        // so they are turned off rather than refused: there is no patch to drop,
+        // and refusing would cost the run the summary the mandate requires.
+        //
+        // The update itself is still made, rather than skipped for having nothing
+        // to write. It is what carries `expectedCurrentLeaf` — the summary is
+        // conditional on the subtree the guard admitted it against, and that
+        // condition is a clause on this statement's `where`. Skipping the write
+        // would take the precondition with it.
+        ...(isTaskWatchdogAuditComment(res) ? { suppressServerDerivedFields: true } : {}),
       };
       const shouldCollectCompletionPublication =
         actor.actorType === "user" &&
@@ -13588,13 +14234,26 @@ export function issueRoutes(
           postCommitActivityPublications,
         );
       };
+      // Backstop for the emptiness condition the audit grant is given on. The
+      // check above is the one that matters — it runs before this request has any
+      // effect — and this one exists so that a field added to `updateFields`
+      // between the two is caught by the guard rather than by the next review.
+      if (!assertWatchdogAuditCommentDerivesNoUpdate(res, updateFields)) return;
       // Reopen the closed isolated workspace only after every access, validation,
       // and policy gate passes, and just before the update persists. A rejected
       // update must not rebuild and republish the workspace as active, because the
       // issue stays terminal and the reaper then skips the leaked workspace.
+      //
+      // Excluded for an audit comment for the same reason as on the comment
+      // route, and the guard above is why it is safe to say so here: the audit
+      // exception has already established that this request writes no issue
+      // fields, so it cannot move the issue out of its terminal state and no
+      // resumed run will come looking for the worktree. "Writes no fields" is not
+      // the same statement as "has no effects", which is exactly why this needs
+      // saying rather than following from the check above.
       let reopenedWorkspace: Pick<ExecutionWorkspace, "id"> | null = null;
       let reopenedGeneration: number | null = null;
-      if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate)) {
+      if (closedExecutionWorkspace && (commentBody || isAgentWorkUpdate) && !isTaskWatchdogAuditComment(res)) {
         const reopenOutcome =
           await reopenClosedIssueExecutionWorkspaceOrRespond(
             req,
@@ -14271,6 +14930,7 @@ export function issueRoutes(
             authorizationReason: issueMutationAuthorizationReason,
             clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
             sourceTrust: await sourceTrustForActorWrite(issue, actor),
+            afterInsert: taskWatchdogAuditCommentClaim(res),
           },
         );
         await issueReferencesSvc.syncComment(comment.id);
@@ -14470,14 +15130,30 @@ export function issueRoutes(
           string,
           { agentId: string; wakeup: WakeupRequest }
         >();
+        // This route carries a `comment` field, so the watchdog's one granted
+        // summary can arrive here too — and the grant is only worth giving
+        // because the comment is a record rather than a message. Same enforcement
+        // as the comment route, at the same funnel: an audit comment enqueues no
+        // wake, so it cannot steer the execution path the run just restored.
+        const watchdogAuditCommentOnly = isTaskWatchdogAuditComment(res);
         const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+          if (watchdogAuditCommentOnly) return;
           const wakeIssueId =
             wakeup.payload &&
             typeof wakeup.payload === "object" &&
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : issue.id;
-          wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+          // Every wake this route fires funnels through here — assignment, status
+          // transition, comment, execution stage, dependency resolved — so the
+          // watchdog ledger learns which issues this request actually started
+          // work on, and the wake itself carries which watchdog run started it,
+          // without each of those sites having to remember to say so.
+          wakeups.set(`${agentId}:${wakeIssueId}`, {
+            agentId,
+            wakeup: { ...wakeup, payload: stampTaskWatchdogWakeOrigin(res, wakeup.payload) },
+          });
+          noteTaskWatchdogStartedWork(res, wakeIssueId);
         };
         const addDependencyResolvedWakeup = async (input: {
           agentId: string;
@@ -14920,6 +15596,41 @@ export function issueRoutes(
         }
       })();
 
+      // `issue` is the row this request's own `UPDATE ... RETURNING` produced, so
+      // these are the values this run wrote — not a re-read that a concurrent
+      // writer could already have overwritten.
+      //
+      // Every field is claimed only when the request body asked for it. The
+      // returned row reports the issue's *current* value whether or not this
+      // request set it, so declaring a field the body omitted would hand a
+      // concurrent writer's value to the ledger as the run's own — the exact
+      // laundering the declared-writes model exists to prevent. A field the
+      // request did change but did not ask for (an implicit transition, say) is
+      // simply left undeclared, which reads as somebody else's and rejects the
+      // run's next mutation: conservative, and no worse than before any of this
+      // existed.
+      noteTaskWatchdogAuthorizedWrite(res, {
+        issueId: issue.id,
+        declared: {
+          ...(req.body?.status !== undefined ? { status: issue.status } : {}),
+          // Column by column, because that is how the update writes them:
+          // `issueService.update` patches exactly the assignee columns the body
+          // named and leaves the other one where it was (it rejects the request
+          // outright rather than clearing a conflicting one). So a body that
+          // asked only to clear the user assignee can come back with an agent
+          // assignee a board user set in the meantime, and declaring the pair
+          // would hand that write to the ledger as this run's own.
+          ...(req.body?.assigneeAgentId !== undefined
+            ? { assigneeAgentId: issue.assigneeAgentId ?? null }
+            : {}),
+          ...(req.body?.assigneeUserId !== undefined
+            ? { assigneeUserId: issue.assigneeUserId ?? null }
+            : {}),
+          ...(Array.isArray(req.body?.blockedByIssueIds)
+            ? { blockerIssueIds: requestedBlockerIssueIds(req) }
+            : {}),
+        },
+      });
       await queueTaskWatchdogEvaluation(issue, actor.runId);
       const changes = issueResponse.changes ?? {};
       if (prefersMinimalIssueUpdateResponse(req)) {
@@ -15993,6 +16704,11 @@ export function issueRoutes(
         throw unprocessable(
           "Remembered permission is only supported for tool reviews",
         );
+      // A resolution can move the source issue itself, and a watchdog run has
+      // to declare that write like any other. The service reports it from its
+      // own `RETURNING` row rather than the route re-reading the issue, which
+      // could only report where the issue is *now*.
+      let sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null;
       const { interaction, createdIssues, continuationIssue } =
         await interactionSvc.acceptInteraction(issue, interactionId, req.body, {
           agentId: actor.agentId,
@@ -16001,7 +16717,14 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
           suggestedTaskEffectsAuthorized,
+        }, {
+          onSourceIssueWrite: (write) => { sourceIssueWrite = write; },
+          // The resolution's own writes to this issue are conditioned on the
+          // state the freshness guard admitted the request against, exactly as
+          // the update route's are.
+          expectedCurrentLeaf: taskWatchdogWritePrecondition(res, issue.id),
         });
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction, createdIssues, sourceIssueWrite);
       const toolAction =
         interaction.payload && typeof interaction.payload === "object"
           ? (
@@ -16226,6 +16949,7 @@ export function issueRoutes(
           contextSource: "issue.interaction.accept",
           requestedByActorType: actor.actorType,
           requestedByActorId: actor.actorId,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         });
       }
 
@@ -16238,18 +16962,22 @@ export function issueRoutes(
         interaction.status === "accepted" &&
         acceptedPlanTarget?.issueId === issue.id &&
         acceptedPlanTarget.key === "plan";
-      await queueResolvedInteractionContinuationWakeup({
+      // Only a resolution that actually woke the assignee started work here.
+      // The policy, the verdict and the review-path state that decide it live
+      // inside the helper, so its answer is taken rather than guessed at.
+      if (await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
         issue: { ...continuationWakeIssue, companyId: issue.companyId },
         interaction: continuationInteraction,
         actor,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         source: "issue.interaction.accept",
         forceFreshSession: acceptedPlanConfirmation,
         workspaceRefreshReason: acceptedPlanConfirmation
           ? "accepted_plan_confirmation"
           : null,
-      });
+      })) noteTaskWatchdogStartedWork(res, issue.id);
 
       res.json(continuationInteraction);
     },
@@ -16305,6 +17033,9 @@ export function issueRoutes(
         res.json(await interactionSvc.getById(current.id));
         return;
       }
+      // See the accept route: declining a confirmation reopens the reviewed
+      // issue and hands it back to its assignee, which is a leaf write.
+      let sourceIssueWrite: ResolvedInteractionSourceIssueWrite | null = null;
       const interaction = await interactionSvc.rejectInteraction(
         issue,
         interactionId,
@@ -16316,7 +17047,15 @@ export function issueRoutes(
           resolverPolicyRestriction:
             resolutionAuthorization.resolverPolicyRestriction,
         },
+        {
+          onSourceIssueWrite: (write) => { sourceIssueWrite = write; },
+          // The resolution's own writes to this issue are conditioned on the
+          // state the freshness guard admitted the request against, exactly as
+          // the update route's are.
+          expectedCurrentLeaf: taskWatchdogWritePrecondition(res, issue.id),
+        },
       );
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction, [], sourceIssueWrite);
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -16352,14 +17091,15 @@ export function issueRoutes(
         },
       });
 
-      await queueResolvedInteractionContinuationWakeup({
+      if (await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
         issue,
         interaction,
         actor,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         source: "issue.interaction.reject",
-      });
+      })) noteTaskWatchdogStartedWork(res, issue.id);
 
       res.json(interaction);
     },
@@ -16405,6 +17145,7 @@ export function issueRoutes(
             resolutionAuthorization.resolverPolicyRestriction,
         },
       );
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction);
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -16487,6 +17228,7 @@ export function issueRoutes(
               resolutionAuthorization.resolverPolicyRestriction,
           },
         );
+      noteTaskWatchdogResolvedInteraction(res, issue, interaction);
 
       await logActivity(db, {
         companyId: issue.companyId,
@@ -16525,19 +17267,20 @@ export function issueRoutes(
       });
 
       if (newlyResolvedItemIds.length > 0) {
-        await queueResolvedInteractionContinuationWakeup({
+        if (await queueResolvedInteractionContinuationWakeup({
           db,
           heartbeat,
           issue,
           interaction,
           actor,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
           source: "issue.interaction.verdicts",
           newlyResolvedItemIds,
           idempotencyKey: buildRequestItemVerdictsWakeIdempotencyKey({
             issueId: issue.id,
             interactionId: interaction.id,
           }),
-        });
+        })) noteTaskWatchdogStartedWork(res, issue.id);
       }
 
       res.json(interaction);
@@ -16638,14 +17381,15 @@ export function issueRoutes(
       });
 
       if (actor.agentId !== issue.assigneeAgentId) {
-        await queueResolvedInteractionContinuationWakeup({
+        if (await queueResolvedInteractionContinuationWakeup({
           db,
           heartbeat,
           issue,
           interaction,
           actor,
+          watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
           source: "issue.interaction.withdraw",
-        });
+        })) noteTaskWatchdogStartedWork(res, issue.id);
       }
       res.json(interaction);
     },
@@ -16800,14 +17544,15 @@ export function issueRoutes(
         }
       }
 
-      await queueResolvedInteractionContinuationWakeup({
+      if (await queueResolvedInteractionContinuationWakeup({
         db,
         heartbeat,
         issue,
         interaction,
         actor,
+        watchdogOriginRunId: taskWatchdogWakeOriginRunId(res),
         source: "issue.interaction.cancel",
-      });
+      })) noteTaskWatchdogStartedWork(res, issue.id);
 
       res.json(interaction);
     },
@@ -17304,7 +18049,18 @@ export function issueRoutes(
         req.actor.type === "agent" &&
         issue.assigneeAgentId !== null &&
         issue.assigneeAgentId !== req.actor.agentId &&
-        !crossIssueCommentOnlyGrant
+        !crossIssueCommentOnlyGrant &&
+        // A watchdog run's comment was authorized by the watchdog scope, which
+        // never produces one of the `decideIssueAccess` reasons the grant above
+        // recognises — so a closed watched issue assigned to somebody else falls
+        // through to here, and this gate revalidates the same plain comment as a
+        // state change and refuses it once the run's own recovery made the
+        // subtree live. That is the exact shape the audit grant exists for: a
+        // terminal parent whose stalled child the run just revived. The scope
+        // check already mediated the subtree, the wake's freshness and this
+        // request's intent; asking again with `mutate` is not a second check, it
+        // is a different question about a write that is already authorized.
+        !isTaskWatchdogGrantedComment(res)
       ) {
         if (
           !(await assertAgentIssueMutationAllowed(req, res, issue, {
@@ -17391,9 +18147,22 @@ export function issueRoutes(
       // blocker, and run-cap gate passes. A rejected comment must not rebuild and
       // republish the workspace as active, because the issue stays terminal and the
       // reaper then skips the leaked workspace.
+      //
+      // An audit comment is not in that lifecycle at all. The reopen exists
+      // because a comment can resume the work, and the resumed run needs its
+      // workspace back — but this one provably cannot resume anything: `resume`,
+      // `reopen` and `interrupt` make the request's intent `mutate`, so no audit
+      // grant is issued for them, and `shouldImplicitlyMoveCommentedIssueToTodo`
+      // returns false for an agent actor. So the issue stays terminal and nothing
+      // downstream will look for the worktree. Running the lifecycle anyway is
+      // wrong in both directions: a rebuild that fails refuses the mandated
+      // summary 503 with nothing written, and one that succeeds has a
+      // comment-only grant publishing an active worktree and arming a cleanup
+      // fence. Same reasoning as the wake suppression below — the record is
+      // admitted as a record, and this is one more thing a record must not do.
       let reopenedWorkspace: Pick<ExecutionWorkspace, "id"> | null = null;
       let reopenedGeneration: number | null = null;
-      if (closedExecutionWorkspace) {
+      if (closedExecutionWorkspace && !isTaskWatchdogAuditComment(res)) {
         const reopenOutcome =
           await reopenClosedIssueExecutionWorkspaceOrRespond(
             req,
@@ -17627,6 +18396,11 @@ export function issueRoutes(
               {
                 ...commentOptions,
                 authorizationReason: commentAuthorizationReason,
+                // Unreachable today — an approval-marker body is classified
+                // `mutate`, so this branch never carries the audit grant — but the
+                // claim belongs wherever the granted comment could be inserted,
+                // not wherever it currently is.
+                afterInsert: taskWatchdogAuditCommentClaim(res),
               },
               tx,
             );
@@ -17719,6 +18493,7 @@ export function issueRoutes(
           clientRequestId: actor.actorType === "user" ? req.body.clientRequestId : undefined,
           authorizationReason: commentAuthorizationReason,
           sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
+          afterInsert: taskWatchdogAuditCommentClaim(res),
         };
         const add = (dbOrTx: Db = db) =>
           svc.addComment(
@@ -17916,7 +18691,15 @@ export function issueRoutes(
           string,
           { agentId: string; wakeup: WakeupRequest }
         >();
+        // The watchdog guard admits exactly one comment on the watched issue once
+        // the run's own recovery has restored the subtree's execution path, and
+        // it admits it as a record of what the run did — not as a message to
+        // anyone. Enforced at the funnel rather than at the two call sites below,
+        // so the grant stays inert no matter which wake this route learns to fire
+        // next: an audit comment produces none of them.
+        const watchdogAuditCommentOnly = isTaskWatchdogAuditComment(res);
         const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
+          if (watchdogAuditCommentOnly) return;
           const wakeIssueId =
             wakeup.payload &&
             typeof wakeup.payload === "object" &&
@@ -17925,7 +18708,15 @@ export function issueRoutes(
               : currentIssue.id;
           const key = `${agentId}:${wakeIssueId}`;
           if (wakeups.has(key)) return;
-          wakeups.set(key, { agentId, wakeup });
+          // Same funnel as the update route: the wake this comment fires is the
+          // fact the watchdog guard needs, and it is only knowable here — both
+          // the declaration and the provenance stamp the resulting live path
+          // carries.
+          wakeups.set(key, {
+            agentId,
+            wakeup: { ...wakeup, payload: stampTaskWatchdogWakeOrigin(res, wakeup.payload) },
+          });
+          noteTaskWatchdogStartedWork(res, wakeIssueId);
         };
         const addDependencyResolvedWakeup = async (input: {
           agentId: string;
