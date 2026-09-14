@@ -1375,6 +1375,59 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     ).toEqual([sourceId]);
   });
 
+  // The takeover, where the declaration is genuinely spent: the run woke the
+  // leaf, the run it started reached a terminal state, and only then did
+  // somebody else start the same leaf. Attribution by issue id cannot separate
+  // those two paths — the declaration outlives the run it explains and goes on
+  // licensing whatever starts on that issue next — so the third party reads as
+  // this run's own doing. The stamp on the path does separate them.
+  it("rejects a third party's run on the same leaf the run reported waking", async () => {
+    const { companyId, childIds, agentId, service, resolveScope, admitMutation, recordMutations } =
+      await seedWokenWatchdogRun("WDOG-LIVE-TAKEOVER", { establishedChildren: ["WDOG-LIVE-TAKEOVER-A"] });
+    const leafId = childIds[0]!;
+    const scope = await resolveScope();
+    const admitted = await admitMutation(scope);
+
+    await db.update(issues)
+      .set({ assigneeAgentId: agentId, updatedAt: new Date() })
+      .where(eq(issues.id, leafId));
+    expect((await recordMutations(scope, admitted, [
+      { issueId: leafId, declared: declaredLeaf({ assigneeAgentId: agentId }), startsWork: true },
+    ])).recorded).toBe(true);
+
+    // The run the watchdog started, and then finished. Nothing it enqueued is
+    // live any more.
+    const [ownRun] = await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    }).returning();
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, ownRun!.id));
+
+    // A different agent now picks the same leaf up. This is a third party's
+    // execution path, and the watchdog's spent declaration must not explain it.
+    const thirdPartyAgentId = await seedAgent(companyId, { name: "Third Party Taker" });
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: thirdPartyAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId: leafId },
+    });
+
+    const revalidated = await service.revalidateMutationScope(await resolveScope(), {
+      intent: "comment",
+      targetIssueId: leafId,
+    });
+    expect(revalidated.classification?.state).toBe("live");
+    expect(revalidated.allowed).toBe(false);
+    expect(
+      "unattributedLivenessIssueIds" in revalidated ? revalidated.unattributedLivenessIssueIds : null,
+    ).toEqual([leafId]);
+  });
+
   // The wake this run fired failed, was coalesced away, or simply finished —
   // and somebody else then started the same leaf while this run is still going.
   // An issue-level `startsWork` reports that third party as this run's own
