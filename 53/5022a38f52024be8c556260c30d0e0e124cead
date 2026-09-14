@@ -1,0 +1,19 @@
+server/src/services/recovery/service.ts
+  s_17d62940a2a559::t_792618549bcbe3 63,5724
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "535022a38f52024be8c556260c30d0e0e124cead",
+  "prompts": {},
+  "sessions": {
+    "s_17d62940a2a559": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ed7-a01a-7c92-a8f5-4e47ee7e70d3",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
