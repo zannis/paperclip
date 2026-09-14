@@ -304,6 +304,48 @@ function assertTransition(from: string, to: string) {
   }
 }
 
+// The values a caller read before deciding to write, carried into the write so
+// the two happen as one step. A caller that adjudicated a mutation against a
+// state it read separately — the task-watchdog freshness guard is the one that
+// needs this today — otherwise has a window in which a third party can write the
+// same fields and be silently overwritten, leaving no trace that the decision
+// was made against a state that no longer existed.
+export type IssueUpdatePrecondition = {
+  status?: string;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+  // The blockers the caller read, deduplicated and sorted. Not a column on
+  // `issues` — blockers are rows in `issue_relations` and this update replaces
+  // them wholesale — so this one cannot ride in the `WHERE` clause with the
+  // rest. It is compared inside the same transaction instead, under the row
+  // lock the write already holds, which is what makes it a compare-and-swap and
+  // not a second read: `syncBlockedByIssueIds` takes that same lock before
+  // touching a relation and is the only path that writes them, so no blocker
+  // write can land between this comparison and the replacement below.
+  blockerIssueIds?: string[];
+};
+
+// Rendered as extra `WHERE` terms on the update rather than a re-read: a read
+// followed by a write is the very window being closed, and only the database
+// can compare and swap in one statement. Nullable columns compare with `IS
+// NULL`, since `= NULL` is never true and would reject every unassigned issue.
+function issueUpdatePreconditionConditions(expected: IssueUpdatePrecondition | null | undefined) {
+  if (!expected) return [];
+  const conditions: SQL[] = [];
+  if (expected.status !== undefined) conditions.push(eq(issues.status, expected.status));
+  if (expected.assigneeAgentId !== undefined) {
+    conditions.push(expected.assigneeAgentId === null
+      ? isNull(issues.assigneeAgentId)
+      : eq(issues.assigneeAgentId, expected.assigneeAgentId));
+  }
+  if (expected.assigneeUserId !== undefined) {
+    conditions.push(expected.assigneeUserId === null
+      ? isNull(issues.assigneeUserId)
+      : eq(issues.assigneeUserId, expected.assigneeUserId));
+  }
+  return conditions;
+}
+
 function applyStatusSideEffects(
   status: string | undefined,
   patch: Partial<typeof issues.$inferInsert>,
@@ -10529,6 +10571,17 @@ export function issueService(db: Db) {
         actorAgentId?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
+        expectedCurrentLeaf?: IssueUpdatePrecondition | null;
+        /**
+         * Persist nothing this update derived on its own, so it writes only the
+         * fields the caller named. For a caller whose authority is bounded to
+         * writing a record rather than changing state: such a caller names no
+         * fields at all, which makes every field on the patch server-authored
+         * and the write inert apart from its `updatedAt` bump. Enforced against
+         * the finished patch rather than derivation by derivation — see the
+         * reduction below.
+         */
+        suppressServerDerivedFields?: boolean;
       },
       dbOrTx: any = db,
       postCommitActivityPublications?: ActivityPublication[],
@@ -10574,6 +10627,8 @@ export function issueService(db: Db) {
         actorAgentId,
         actorUserId,
         companyGuard,
+        expectedCurrentLeaf,
+        suppressServerDerivedFields,
         ...issueData
       } = data;
       if (
@@ -10845,6 +10900,32 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        // The blocker half of the precondition, checked here because the row
+        // lock is held from the statement above until this transaction commits.
+        // It is checked whether or not this request writes blockers: the caller
+        // decided to make this write against the blocker list it read, and a
+        // blocker somebody else added since is the same stale-decision case the
+        // column comparisons catch — a request that goes on to replace the list
+        // would erase it outright.
+        if (expectedCurrentLeaf?.blockerIssueIds !== undefined) {
+          const currentBlockerIssueIds = await tx
+            .select({ blockerIssueId: issueRelations.issueId })
+            .from(issueRelations)
+            .where(and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.relatedIssueId, id),
+              eq(issueRelations.type, "blocks"),
+            ))
+            .then((rows: Array<{ blockerIssueId: string }>) =>
+              [...new Set(rows.map((row) => row.blockerIssueId))].sort());
+          const expectedBlockerIssueIds = [...new Set(expectedCurrentLeaf.blockerIssueIds)].sort();
+          if (currentBlockerIssueIds.join(" ") !== expectedBlockerIssueIds.join(" ")) {
+            throw conflict(
+              "Issue changed since it was read; the update was not applied.",
+              { issueId: id, expected: expectedCurrentLeaf },
+            );
+          }
+        }
         if (actorAgentId && patch.status === "done") {
           const [review] = await tx.select({ id: toolActionRequests.id }).from(toolActionRequests).where(and(eq(toolActionRequests.companyId, existing.companyId), eq(toolActionRequests.issueId, id), inArray(toolActionRequests.status, ["pending", "approved", "executing"]))).limit(1);
           if (review) throw conflict("This task is waiting for a connection review. Finish unrelated work, then yield in_review without retrying the governed call.", { code: "tool_review_pending", actionRequestId: review.id });
@@ -10858,6 +10939,9 @@ export function issueService(db: Db) {
             ? getIssueRelationSummaryMap(existing.companyId, [id], tx)
             : Promise.resolve(new Map<string, IssueRelationSummaryMap>()),
         ]);
+        // The goal is re-derived on every update, not only on one that names a
+        // goal or a project: an issue carrying no goal of its own is backfilled
+        // with the current fallback.
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -10894,12 +10978,57 @@ export function issueService(db: Db) {
                 (blockedByIssueIds !== undefined || issueData.unblockDescriptor !== undefined)))) {
           patch.statusVersion = sql`${issues.statusVersion} + 1` as unknown as number;
         }
+        // Several fields above may now be on the patch without the caller ever
+        // having named one: that fallback goal, the project behind a workspace
+        // reference the issue already carried, and whatever derivation is added
+        // to this function next. Each is a *server-authored* state change
+        // available to an otherwise empty patch, which is exactly what a caller
+        // holding a record-only grant must not be able to perform.
+        //
+        // So the bound is applied to the finished patch, once, rather than at
+        // each derivation. Turning the derivations off one at a time is what
+        // left the project derivation running after the goal one was fixed, and
+        // it makes every future derivation a new hole. Reducing the patch here
+        // costs those derivations' reads for a caller whose result is discarded —
+        // three indexed lookups on a path taken once per grant — and buys an
+        // invariant that holds without anyone having to remember it.
+        if (suppressServerDerivedFields) {
+          const namedByCaller = Object.keys(issueData).filter(
+            (key) => (issueData as Record<string, unknown>)[key] !== undefined,
+          );
+          if (namedByCaller.length > 0) {
+            // Not a case to handle but a caller out of contract: honouring the
+            // named fields would exceed the bound, and dropping them would make
+            // the write mean something other than what was asked. The routes
+            // that hold such a grant refuse the request before reaching here.
+            throw unprocessable(
+              "An update that must write no server-derived fields cannot write issue fields either",
+              { issueId: id, fields: namedByCaller.sort() },
+            );
+          }
+          for (const key of Object.keys(patch)) {
+            if (key !== "updatedAt") delete (patch as Record<string, unknown>)[key];
+          }
+        }
         const updated = await tx
           .update(issues)
           .set(patch)
-          .where(idPredicate)
+          // Both halves have to hold: the company guard the caller asked to
+          // carry into every predicate, and the precondition it read the leaf
+          // against. Dropping either one reopens the window it closes.
+          .where(and(idPredicate, ...issueUpdatePreconditionConditions(expectedCurrentLeaf)))
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
+        // With a precondition, matching no row does not mean the issue is gone —
+        // the caller read it moments ago. It means somebody else wrote it in
+        // between, which is the case the precondition exists to catch, so it has
+        // to be reported rather than folded into "not found".
+        if (!updated && expectedCurrentLeaf) {
+          throw conflict(
+            "Issue changed since it was read; the update was not applied.",
+            { issueId: id, expected: expectedCurrentLeaf },
+          );
+        }
         if (!updated) return null;
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.
@@ -12071,10 +12200,24 @@ export function issueService(db: Db) {
         sourceTrust?: typeof issueComments.$inferInsert.sourceTrust;
         createdAt?: Date | string | null;
         clientRequestId?: string;
+        // Runs inside the transaction that inserts this comment, immediately
+        // after the insert and before the commit. Throwing rolls the comment
+        // back with whatever it was doing, which is how a caller makes a write
+        // elsewhere in the database conditional on this comment actually
+        // landing — rather than doing it first and needing a compensating undo
+        // for every way the request can end without an insert. Not called on
+        // the run-replay path below, which returns an already-committed comment
+        // and inserts nothing.
+        afterInsert?: (tx: any) => Promise<void>;
       },
       dbOrTx: any = db,
     ): Promise<IssueComment> {
-      if (dbOrTx === db && (actor.runId || actor.userId)) {
+      // Union of two independent reasons to wrap this insert in a transaction:
+      // deploy serializes run- and user-authored comments against provider
+      // retries, and `afterInsert` needs a transaction it can roll the comment
+      // back with. Dropping either side of the disjunction silently removes one
+      // of those guarantees.
+      if (dbOrTx === db && (actor.runId || actor.userId || options?.afterInsert)) {
         const append = () =>
           db.transaction(async (tx) => {
             // Serialize run-authored comments on the issue so a provider retry
@@ -12248,8 +12391,24 @@ export function issueService(db: Db) {
               )
             : (options?.metadata ?? null),
         );
+      // Replay suppression: a run that re-sends the same comment gets the row it
+      // already wrote instead of a duplicate. It is only sound while the insert
+      // is the whole of the write. `afterInsert` is a claim that commits with
+      // the row and cannot be reproduced by handing an older row back — the
+      // task-watchdog audit grant is the instance, and it is the case where the
+      // shortcut is actively wrong rather than merely incomplete: the run
+      // comments once while the watched subtree is still stopped, and the
+      // summary it owes after its own recovery can legitimately repeat that
+      // wording. Matching it returns a pre-recovery row as success, so the
+      // mandated post-recovery record is never written and the grant it was
+      // meant to pay for stays unspent and redirectable onto another body.
+      //
+      // Inserting instead cannot double-post. The grant is read as unspent at
+      // admission, so an existing same-body row is necessarily the earlier one;
+      // a racer that committed in between loses the compare-and-set inside
+      // `afterInsert`, which rolls this insert back with it.
       let comment: typeof issueComments.$inferSelect | null = null;
-      if (createdByRunId) {
+      if (createdByRunId && !options?.afterInsert) {
         const existing = await dbOrTx
           .select()
           .from(issueComments)
@@ -12554,6 +12713,9 @@ export function issueService(db: Db) {
       if (authorType === "user" || actor.userId) {
         await resumeSlackConversation(dbOrTx, issue.companyId, issueId);
       }
+
+      if (options?.afterInsert) await options.afterInsert(dbOrTx);
+
       // Update issue's updatedAt so comment activity is reflected in recency sorting
       await dbOrTx
         .update(issues)
