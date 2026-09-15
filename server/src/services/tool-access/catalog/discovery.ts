@@ -5,6 +5,7 @@ import type { ActorInfo } from "../types.js";
 import { createOAuthDiscovery } from "../oauth/discovery.js";
 import { oauthConfig } from "../oauth/metadata.js";
 import { projectedConnectionHeaders } from "../connection-methods.js";
+import { buildRemoteHeaders } from "../../tool-connection-headers.js";
 import { nativeProviderCatalogFor } from "../../native-provider-catalogs.js";
 import { GOOGLE_WORKSPACE_SERVICES, googleWorkspaceServiceGranted, googleWorkspaceToolName, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted, type GoogleWorkspaceService } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "../../connection-permission-errors.js";
@@ -71,10 +72,16 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
     await assertConnectorConnectionSetupEnabled(connection);
-    let headers = credentialHeaders ?? {
-      ...projectedConnectionHeaders(connection),
-      ...(await resolveCredentialHeaders(connection, actor)),
-    };
+    const projectedHeaders = projectedConnectionHeaders(connection);
+    const headersFor = (resolvedCredentials: Record<string, string>) =>
+      buildRemoteHeaders({
+        connection,
+        projectedHeaders,
+        credentialHeaders: resolvedCredentials,
+      }).headers;
+    let headers = headersFor(
+      credentialHeaders ?? (await resolveCredentialHeaders(connection, actor)),
+    );
     if (connection.config.sourceTemplateKey === "google-workspace" && !workspaceEndpoint) {
       const grant = await vaultGrantForConnection(connection, actor);
       const scopes = googleWorkspaceGrantedScopes(grant);
@@ -212,12 +219,11 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
         resources: vercelConnectResourcesFor(connection),
       });
       vercelConnect?.evict(request);
-      headers = {
-        ...projectedConnectionHeaders(connection),
-        ...(await resolveVercelCredentialHeaders(connection, grant, {
+      headers = headersFor(
+        await resolveVercelCredentialHeaders(connection, grant, {
           forceRefresh: true,
-        })),
-      };
+        }),
+      );
       response = await sendToolsList(headers);
     }
     if (
@@ -225,12 +231,11 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       connection.authKind === "oauth" &&
       connection.credentialSource === "paperclip_vault"
     ) {
-      headers = {
-        ...projectedConnectionHeaders(connection),
-        ...(await resolveCredentialHeaders(connection, actor, {
+      headers = headersFor(
+        await resolveCredentialHeaders(connection, actor, {
           forceRefresh: true,
-        })),
-      };
+        }),
+      );
       response = await sendToolsList(headers);
       if (
         response.status === 401 &&
