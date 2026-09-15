@@ -1,0 +1,19 @@
+server/src/services/tool-access.ts
+  s_656ea0bd47b120::t_08fce2503f612f 14187-14189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7817676bf9523188905b48fe679990f838bb7488",
+  "prompts": {},
+  "sessions": {
+    "s_656ea0bd47b120": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d5a51cfa-e62d-4ff1-97f8-21625bea957d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
