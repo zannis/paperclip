@@ -14273,7 +14273,9 @@ export function toolAccessService(
           prefix: field.prefix ?? null,
         } satisfies McpConnectionCredentialRef;
         const existingCredentialRefIndex = credentialRefs.findIndex(
-          (ref) => ref.name === field.configPath,
+          (ref) =>
+            ref.name === field.configPath ||
+            (ref.placement === "header" && ref.key === field.key),
         );
         if (existingCredentialRefIndex >= 0)
           credentialRefs[existingCredentialRefIndex] = nextCredentialRef;
