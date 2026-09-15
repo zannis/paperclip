@@ -1,0 +1,22 @@
+doc/connections/CONNECTOR-PLAYBOOK.md
+  h_f81d3033687456 757-763
+server/src/__tests__/tool-access-service.test.ts
+  h_f81d3033687456 2617-2736,5620-5622,6551,6554-6556,6613,6616-6618,6624-6682,9645-9646,10292-10293,10511-10512,11011-11012,11301-11302,12085-12086,12458-12459,13927-13932,14173-14174,14461-14466
+server/src/services/tool-access.ts
+  h_f81d3033687456 192,6737-6748,6824,6847-6848,6850-6851,6859-6860,6862-6863
+server/src/services/tool-connection-headers.ts
+  h_f81d3033687456 1-317
+server/src/services/tool-gateway.ts
+  h_f81d3033687456 93-96,4809-4813,4817,5470-5472,5476,5557,5576-5578,5582,5614-5616,5620,5652-5654,5658
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ace8a4cae23b5fd7c36d27761743bb784ab36e2d",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
