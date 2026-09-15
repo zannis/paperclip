@@ -89,6 +89,7 @@ import {
   ISSUE_WATCHDOG_DISCOVERY_KINDS,
   TASK_WATCHDOG_PRODUCT_BUG_ORIGIN_KIND,
   ONBOARDING_FIRST_TASK_ORIGIN_KIND,
+  INTERNAL_OPERATION_ORIGIN_KIND,
   rejectIssueThreadInteractionSchema,
   restoreIssueDocumentRevisionSchema,
   respondIssueThreadInteractionSchema,
@@ -8569,6 +8570,9 @@ export function issueRoutes(
       includePluginOperations:
         req.query.includePluginOperations === "true" ||
         req.query.includePluginOperations === "1",
+      includeInternalOperations:
+        req.query.includeInternalOperations === "true" ||
+        req.query.includeInternalOperations === "1",
       includeBlockedBy:
         req.query.includeBlockedBy === "true" ||
         req.query.includeBlockedBy === "1",
@@ -8794,6 +8798,9 @@ export function issueRoutes(
       includePluginOperations:
         req.query.includePluginOperations === "true" ||
         req.query.includePluginOperations === "1",
+      includeInternalOperations:
+        req.query.includeInternalOperations === "true" ||
+        req.query.includeInternalOperations === "1",
       includeBlockedBy: true,
       includeBlockedInboxAttention: true,
       hasPlanDocument,
@@ -12056,6 +12063,7 @@ export function issueRoutes(
       const {
         watchdogDiscovery: rawWatchdogDiscovery,
         onboardingFirstTask: rawOnboardingFirstTask,
+        surfaceVisibility,
         ...rawCreateBody
       } = sanitizedBody;
       // The onboarding first-task marker grants privileged, server-owned behavior:
@@ -12175,6 +12183,9 @@ export function issueRoutes(
       }
       const createBody = {
         ...rawCreateBody,
+        ...(surfaceVisibility === "internal_operation"
+          ? { originKind: INTERNAL_OPERATION_ORIGIN_KIND }
+          : {}),
         parentId: effectiveParentId,
         ...(normalizedAssigneeAgentId !== undefined
           ? { assigneeAgentId: normalizedAssigneeAgentId }
