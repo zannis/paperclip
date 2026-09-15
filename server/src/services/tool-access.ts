@@ -189,6 +189,7 @@ import {
   mcpHttpRequestHeaders,
   parseMcpHttpResponseBody,
 } from "./mcp-http.js";
+import { buildRemoteHeaders } from "./tool-connection-headers.js";
 import {
   assertPublicRemoteHttpEndpoint,
   parseRemoteHttpEndpoint,
@@ -6737,11 +6738,18 @@ export function toolAccessService(
     const composioSession = composioChild
       ? await composioSessions.ensureSession(connection.id)
       : null;
-    let headers = composioSession?.headers ??
-      credentialHeaders ?? {
-        ...projectedConnectionHeaders(connection),
-        ...(await resolveCredentialHeaders(connection, actor)),
-      };
+    const projectedHeaders = projectedConnectionHeaders(connection);
+    const headersFor = (resolvedCredentials: Record<string, string>) =>
+      buildRemoteHeaders({
+        connection,
+        projectedHeaders,
+        credentialHeaders: resolvedCredentials,
+      }).headers;
+    let headers = headersFor(
+      composioSession?.headers ??
+        credentialHeaders ??
+        (await resolveCredentialHeaders(connection, actor)),
+    );
     const endpoint =
       composioSession?.url ?? (await resolvedRemoteEndpoint(connection, actor));
     // Pinned to the address the guard approved: `config.url` is operator-supplied,
@@ -6817,7 +6825,7 @@ export function toolAccessService(
       });
       response = await requestRemoteHttpEndpoint(new URL(refreshed.url), {
         method: "POST",
-        headers: mcpHttpRequestHeaders(refreshed.headers),
+        headers: mcpHttpRequestHeaders(headersFor(refreshed.headers)),
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: "paperclip-catalog-refresh-retry",
@@ -6840,12 +6848,11 @@ export function toolAccessService(
         resources: vercelConnectResourcesFor(connection),
       });
       vercelConnect?.evict(request);
-      headers = {
-        ...projectedConnectionHeaders(connection),
-        ...(await resolveVercelCredentialHeaders(connection, grant, {
+      headers = headersFor(
+        await resolveVercelCredentialHeaders(connection, grant, {
           forceRefresh: true,
-        })),
-      };
+        }),
+      );
       response = await sendToolsList(headers);
     }
     if (
@@ -6853,12 +6860,11 @@ export function toolAccessService(
       connection.authKind === "oauth" &&
       connection.credentialSource === "paperclip_vault"
     ) {
-      headers = {
-        ...projectedConnectionHeaders(connection),
-        ...(await resolveCredentialHeaders(connection, actor, {
+      headers = headersFor(
+        await resolveCredentialHeaders(connection, actor, {
           forceRefresh: true,
-        })),
-      };
+        }),
+      );
       response = await sendToolsList(headers);
       if (
         response.status === 401 &&
@@ -15804,7 +15810,6 @@ export function toolAccessService(
       enableAllByDefault: true,
       skipDefaultProfileSync: true,
       credentialHeaders: {
-        ...projectedConnectionHeaders(connection),
         [credential.headerName]: `${credential.headerPrefix ?? ""}${token.token}`,
       },
     });
