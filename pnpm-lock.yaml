@@ -39,10 +39,10 @@ patchedDependencies:
     hash: vbylpnnxt5av2zdnuqmf6hjyjy
     path: patches/@discordjs__ws@1.2.3.patch
   acpx@0.12.0:
-    hash: kww5qhmpak7g6zankvgzlm4iyu
+    hash: qosmxft4z3544jhkenwngv4nyi
     path: patches/acpx@0.12.0.patch
   acpx@0.13.1:
-    hash: zmi2maauog4djnfd2acdrgmyhe
+    hash: 6glae7y62ufmlzbmnb2hoeh7v4
     path: patches/acpx@0.13.1.patch
   embedded-postgres@18.1.0-beta.16:
     hash: 55uhvnotpqyiy37rn3pqpukhei
@@ -154,7 +154,7 @@ importers:
         version: link:../shared
       acpx:
         specifier: 0.12.0
-        version: 0.12.0(patch_hash=kww5qhmpak7g6zankvgzlm4iyu)
+        version: 0.12.0(patch_hash=qosmxft4z3544jhkenwngv4nyi)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -504,7 +504,7 @@ importers:
         version: 0.153.4
       acpx:
         specifier: 0.13.1
-        version: 0.13.1(patch_hash=zmi2maauog4djnfd2acdrgmyhe)
+        version: 0.13.1(patch_hash=6glae7y62ufmlzbmnb2hoeh7v4)
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -950,7 +950,7 @@ importers:
         version: 8.18.0
       acpx:
         specifier: 0.13.1
-        version: 0.13.1(patch_hash=zmi2maauog4djnfd2acdrgmyhe)
+        version: 0.13.1(patch_hash=6glae7y62ufmlzbmnb2hoeh7v4)
       ajv:
         specifier: ^8.20.0
         version: 8.20.0
@@ -7625,7 +7625,6 @@ packages:
 
   opencode-ai@1.18.29:
     resolution: {integrity: sha512-syIDVwlrYTgTOXzZe9SkInJWethbq6l3SNC762UeXyO0a9V0wGfd+U4yACvppwNBnhIsl0j2QPYYCyLpNaSomg==}
-    cpu: [arm64, x64]
     os: [darwin, linux, win32]
     hasBin: true
 
@@ -13287,7 +13286,7 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  acpx@0.12.0(patch_hash=kww5qhmpak7g6zankvgzlm4iyu):
+  acpx@0.12.0(patch_hash=qosmxft4z3544jhkenwngv4nyi):
     dependencies:
       '@agentclientprotocol/sdk': 1.2.1(zod@4.4.3)
       commander: 15.0.0
@@ -13299,7 +13298,7 @@ snapshots:
       - bare-buffer
       - react-native-b4a
 
-  acpx@0.13.1(patch_hash=zmi2maauog4djnfd2acdrgmyhe):
+  acpx@0.13.1(patch_hash=6glae7y62ufmlzbmnb2hoeh7v4):
     dependencies:
       '@agentclientprotocol/sdk': 1.4.0(zod@4.4.3)
       commander: 15.0.0

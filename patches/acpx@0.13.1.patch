@@ -39,7 +39,34 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..17f0739318e61744af3eaa760cfbdc84
  const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
  	"agent_capabilities",
  	"messages.Agent.content.ToolUse.input",
-@@ -3135,8 +3135,18 @@ function promotePrefixedAuthEnvironment(env) {
+@@ -3055,6 +3055,8 @@ async function ensureCopilotAcpSupport(command) {
+ function buildClaudeCodeOptionsMeta(options, isolateUserSettings = false) {
+ 	const claudeCodeOptions = {};
+ 	if (isolateUserSettings) claudeCodeOptions.settingSources = resolveClaudeCodeSettingSources();
++	const plugins = resolveClaudeCodePlugins();
++	if (plugins) claudeCodeOptions.plugins = plugins;
+ 	if (options) assignClaudeCodeOptions(claudeCodeOptions, options);
+ 	const meta = {};
+ 	if (Object.keys(claudeCodeOptions).length > 0) meta.claudeCode = { options: claudeCodeOptions };
+@@ -3066,6 +3068,17 @@ function resolveClaudeCodeSettingSources(env = process.env) {
+ 	if (env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS?.trim() === "1") return ["user", ...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ 	return [...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ }
++function resolveClaudeCodePlugins(env = process.env, platform = process.platform) {
++	const raw = env.ACPX_CLAUDE_PLUGIN_DIRS?.trim();
++	if (!raw) return;
++	const delimiter = platform === "win32" ? ";" : ":";
++	const paths = raw.split(delimiter).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
++	if (paths.length === 0) return;
++	return paths.map((path$1) => ({
++		type: "local",
++		path: path$1
++	}));
++}
+ function assignClaudeCodeOptions(target, options) {
+ 	if (typeof options.model === "string" && options.model.trim().length > 0) target.model = options.model;
+ 	if (Array.isArray(options.allowedTools)) target.allowedTools = [...options.allowedTools];
+@@ -3135,8 +3148,18 @@ function promotePrefixedAuthEnvironment(env) {
  	}
  	return protectedKeys;
  }
