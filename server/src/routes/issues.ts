@@ -301,6 +301,7 @@ import {
   issueReadSqlCondition,
   projectReadSqlCondition,
 } from "../services/authorization.js";
+import { resolveAgentIssueProjectId } from "../services/issue-project-inference.js";
 import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
 import { environmentService } from "../services/environments.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
@@ -3723,6 +3724,18 @@ export function issueRoutes(
       input.executionWorkspaceId !== undefined ||
       input.executionWorkspacePreference !== undefined ||
       input.executionWorkspaceSettings !== undefined
+    );
+  }
+
+  function hasExplicitIssueProjectCreateSelection(
+    input: Record<string, unknown>,
+  ) {
+    return (
+      input.projectId != null ||
+      input.parentId != null ||
+      input.inheritExecutionWorkspaceFromIssueId != null ||
+      input.projectWorkspaceId != null ||
+      input.executionWorkspaceId != null
     );
   }
 
@@ -12347,8 +12360,37 @@ export function issueRoutes(
         return;
       }
     }
+      // The route parents an agent's task under its run's issue by itself. Only a
+      // parent the agent named is a choice, and an implied one's project still wins.
+      const impliedParentProjectId = createBody.parentId && !rawCreateBody.parentId
+        ? (await svc.getById(createBody.parentId))?.projectId ?? null
+        : null;
+      const candidateProjectId =
+        hasExplicitIssueProjectCreateSelection({ ...createBody, parentId: rawCreateBody.parentId }) || impliedParentProjectId
+        ? null
+        : await resolveAgentIssueProjectId(db, companyId, {
+            createdByAgentId: actor.agentId,
+            actorRunId: actor.runId,
+            title: createBody.title,
+            description: createBody.description,
+          });
+      const inferredProjectId =
+        candidateProjectId &&
+        (
+          await access.decide({
+            actor: req.actor,
+            action: "project:read",
+            resource: { type: "project", companyId, projectId: candidateProjectId },
+          })
+        ).allowed
+          ? candidateProjectId
+          : null;
       const createAssignmentScope = {
-        projectId: await resolveCreateAssignmentProjectId({ ...createBody, companyId }),
+        projectId: await resolveCreateAssignmentProjectId({
+          ...createBody,
+          companyId,
+          projectId: createBody.projectId ?? inferredProjectId ?? undefined,
+        }),
         parentIssueId: createBody.parentId ?? null,
         assigneeAgentId: createBody.assigneeAgentId ?? null,
         assigneeUserId: rawCreateBody.assigneeUserId ?? null,
