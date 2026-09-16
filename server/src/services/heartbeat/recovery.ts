@@ -65,7 +65,7 @@ import { performance } from "node:perf_hooks";
 import { buildProcessLossDiagnostic } from "../process-loss-diagnostics.js";
 import { logActivity } from "../activity-log.js";
 import { releaseRuntimeServicesForRun } from "../workspace-runtime.js";
-import { isProcessGroupAlive } from "../local-service-supervisor.js";
+import { isProcessGroupAlive, isProcessPidAlive } from "../local-service-supervisor.js";
 import {
   findMissingHotRestartSnapshotRunIds,
   readHotRestartIntent,
@@ -788,7 +788,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
       const processPid = run.processPid ?? candidate.processPid;
       const processGroupId = run.processGroupId ?? candidate.processGroupId;
-      const processPidAlive = isProcessAlive(processPid);
+      const processPidAlive = isProcessPidAlive(processPid);
       const processGroupAlive = isProcessGroupAlive(processGroupId);
       if (!processPid && !processGroupId) {
         classify(candidate, "lost", "missing_process_metadata", patch);
@@ -2304,7 +2304,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       const processPidAlive =
         checksPersistedChildLiveness &&
         run.processPid &&
-        isProcessAlive(run.processPid);
+        isProcessPidAlive(run.processPid);
       const processGroupAlive =
         checksPersistedChildLiveness &&
         run.processGroupId &&
