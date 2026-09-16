@@ -286,6 +286,7 @@ import {
   readAcceptedPlanConfirmationTarget,
   type IssuePostCommitAction,
 } from "../services/issues.js";
+import { resolveAgentIssueProjectId } from "../services/issue-project-inference.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
 import { environmentService } from "../services/environments.js";
@@ -3812,6 +3813,18 @@ export function issueRoutes(
       input.executionWorkspaceId !== undefined ||
       input.executionWorkspacePreference !== undefined ||
       input.executionWorkspaceSettings !== undefined
+    );
+  }
+
+  function hasExplicitIssueProjectCreateSelection(
+    input: Record<string, unknown>,
+  ) {
+    return (
+      input.projectId != null ||
+      input.parentId != null ||
+      input.inheritExecutionWorkspaceFromIssueId != null ||
+      input.projectWorkspaceId != null ||
+      input.executionWorkspaceId != null
     );
   }
 
@@ -11786,8 +11799,20 @@ export function issueRoutes(
             }
           : {}),
       };
+      const inferredProjectId = hasExplicitIssueProjectCreateSelection(createBody)
+        ? null
+        : await resolveAgentIssueProjectId(db, companyId, {
+            createdByAgentId: actor.agentId,
+            actorRunId: actor.runId,
+            title: createBody.title,
+            description: createBody.description,
+          });
       const createAssignmentScope = {
-        projectId: await resolveCreateAssignmentProjectId({ ...createBody, companyId }),
+        projectId: await resolveCreateAssignmentProjectId({
+          ...createBody,
+          companyId,
+          projectId: createBody.projectId ?? inferredProjectId ?? undefined,
+        }),
         parentIssueId: createBody.parentId ?? null,
         assigneeAgentId: createBody.assigneeAgentId ?? null,
         assigneeUserId: rawCreateBody.assigneeUserId ?? null,
