@@ -465,6 +465,7 @@ import {
 } from "./workspace-operations.js";
 import {
   isProcessGroupAlive,
+  isProcessPidAlive,
   terminateLocalService,
 } from "./local-service-supervisor.js";
 import {
@@ -14919,7 +14920,7 @@ export function heartbeatService(
 
       const processPid = run.processPid ?? candidate.processPid;
       const processGroupId = run.processGroupId ?? candidate.processGroupId;
-      const processPidAlive = isProcessAlive(processPid);
+      const processPidAlive = isProcessPidAlive(processPid);
       const processGroupAlive = isProcessGroupAlive(processGroupId);
       if (!processPid && !processGroupId) {
         classify(candidate, "lost", "missing_process_metadata", patch);
@@ -19403,7 +19404,7 @@ export function heartbeatService(
       const processPidAlive =
         checksPersistedChildLiveness &&
         run.processPid &&
-        isProcessAlive(run.processPid);
+        isProcessPidAlive(run.processPid);
       const processGroupAlive =
         checksPersistedChildLiveness &&
         run.processGroupId &&
