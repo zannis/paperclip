@@ -217,3 +217,18 @@ describe("managed-account request isolation", () => {
     expect(await previousUser).toEqual({ apps: ["previous-user-account"] });
   });
 });
+
+describe("204 responses", () => {
+  // Routes that answer "nothing to return" with 204 rely on this: the body is empty, so
+  // calling `res.json()` on it would reject. `heartbeatsApi.activeRunForIssue` builds its
+  // `null` on top of the `undefined` resolved here, and that link was otherwise untested.
+  it("resolves undefined without reading the empty body", async () => {
+    const json = vi.fn(async () => {
+      throw new SyntaxError("Unexpected end of JSON input");
+    });
+    fetchMock.mockResolvedValue({ ok: true, status: 204, json } as unknown as Response);
+
+    await expect(api.get("/no-content")).resolves.toBeUndefined();
+    expect(json).not.toHaveBeenCalled();
+  });
+});
