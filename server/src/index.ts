@@ -57,7 +57,7 @@ import {
 import { getOperatorSettingDefaults } from "./services/setting-defaults.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
 import { setupLiveEventsWebSocketServer } from "./realtime/live-events-ws.js";
-import { setupRunnerPrpWebSocketServer } from "./realtime/runner-prp-ws.js";
+import { setupRunnerPrpWebSocketServer, updateRunnerPrpApiUrl } from "./realtime/runner-prp-ws.js";
 import { cloudActorHeaderSourceFromHeaders, resolveCloudTenantActor } from "./middleware/auth.js";
 import {
   feedbackService,
@@ -103,6 +103,13 @@ import {
 } from "./services/adapter-registry-bootstrap.js";
 import { createFeedbackTraceShareClientFromConfig } from "./services/feedback-share-client.js";
 import { buildRuntimeApiCandidateUrls, choosePrimaryRuntimeApiUrl } from "./runtime-api.js";
+import {
+  loggableApiUrl,
+  probeRuntimeApiUrl,
+  resolveVerifiedRuntimeApiUrl,
+  RUNTIME_API_PROBE_PATH,
+  runtimeSelfOriginApiUrl,
+} from "./runtime-api-probe.js";
 import { isLoopbackHost, rewriteLoopbackUrlPort } from "./url-utils.js";
 import { createPluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createStorageServiceFromConfig } from "./storage/index.js";
@@ -1894,6 +1901,55 @@ async function startServerWithDatabaseTeardown(
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,
         databaseBackupDir: config.databaseBackupDir,
   });
+  let resolvedApiUrl = configuredApiUrl;
+  try {
+    const runtimeApiResolution = await resolveVerifiedRuntimeApiUrl({
+      configuredApiUrl,
+      selfOriginApiUrl: runtimeSelfOriginApiUrl(
+        server.address() ?? { address: runtimeListenHost, port: listenPort },
+      ),
+      probe: (apiUrl) => probeRuntimeApiUrl(apiUrl),
+    });
+    const loggableConfiguredApiUrl = loggableApiUrl(configuredApiUrl);
+    const loggableRejected = runtimeApiResolution.rejected.map((entry) => ({
+      apiUrl: loggableApiUrl(entry.apiUrl),
+      reason: entry.reason,
+    }));
+    if (runtimeApiResolution.unverified) {
+      logger.error(
+        {
+          configuredApiUrl: loggableConfiguredApiUrl,
+          probePath: RUNTIME_API_PROBE_PATH,
+          rejected: loggableRejected,
+        },
+        `Neither PAPERCLIP_API_URL=${loggableConfiguredApiUrl} nor this server's own bound origin served the Paperclip API; spawned agents keep that PAPERCLIP_API_URL and may be unable to reach their own board`,
+      );
+    } else if (runtimeApiResolution.changed) {
+      resolvedApiUrl = runtimeApiResolution.apiUrl;
+      logger.error(
+        {
+          configuredApiUrl: loggableConfiguredApiUrl,
+          fallbackApiUrl: resolvedApiUrl,
+          probePath: RUNTIME_API_PROBE_PATH,
+          rejected: loggableRejected,
+        },
+        `PAPERCLIP_API_URL=${loggableConfiguredApiUrl} does not serve the Paperclip API; spawned agents will use ${resolvedApiUrl} instead`,
+      );
+      process.env.PAPERCLIP_API_URL = resolvedApiUrl;
+      process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = JSON.stringify([
+        resolvedApiUrl,
+        ...runtimeApiCandidates.filter(
+          (candidate) => candidate !== resolvedApiUrl && candidate !== configuredApiUrl,
+        ),
+      ]);
+      updateRunnerPrpApiUrl(resolvedApiUrl);
+    }
+  } catch (err) {
+    logger.error(
+      { err, configuredApiUrl: loggableApiUrl(configuredApiUrl) },
+      "runtime API URL startup validation failed; keeping the configured URL",
+    );
+  }
   const boardClaimUrl = getBoardClaimWarningUrl(config.host, listenPort);
   if (boardClaimUrl) {
     const red = "\x1b[41m\x1b[30m";
@@ -2024,7 +2080,7 @@ async function startServerWithDatabaseTeardown(
     server,
     host: config.host,
     listenPort,
-    apiUrl: configuredApiUrl,
+    apiUrl: resolvedApiUrl,
     databaseUrl: activeDatabaseConnectionString,
     shutdown: (signal = "SIGTERM") => shutdown(signal, false),
   };
