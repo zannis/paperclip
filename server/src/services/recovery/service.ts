@@ -105,6 +105,7 @@ import {
 } from "../issue-dependency-wakeups.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
+import { isInfraTerminatedRun } from "../heartbeat-stop-metadata.js";
 import {
   DEFAULT_MAX_SUCCESSFUL_RUN_HANDOFF_ATTEMPTS,
   FINISH_SUCCESSFUL_RUN_HANDOFF_REASON,
@@ -122,6 +123,12 @@ import {
   buildStrandedRecoveryEscalationNotice,
   type StrandedRecoveryNoticeSeed,
 } from "./stranded-notice.js";
+import {
+  INFRA_REDISPATCH_BACKOFF_NOTICE_TITLE,
+  buildInfraRedispatchBackoffNotice,
+  evaluateInfraRedispatchBackoff,
+  type InfraRedispatchBackoffPolicy,
+} from "./infra-redispatch-backoff.js";
 import {
   RECOVERY_ORIGIN_KINDS,
   isStrandedIssueRecoveryOriginKind,
@@ -220,6 +227,7 @@ type LatestIssueRun =
       | "createdAt"
     > & {
       resultJson?: unknown;
+      finishedAt?: Date | null;
     })
   | null;
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & {
@@ -230,6 +238,7 @@ export type StrandedRecoveryCause =
   | "stranded_assigned_issue"
   | "deliberate_wait_without_target"
   | "process_lost"
+  | "infra_terminated"
   | "provider_quota"
   | "codex_output_inactivity_monitor"
   | "workspace_validation_failed"
@@ -287,6 +296,8 @@ function recoveryCauseTitle(cause: StrandedRecoveryCause) {
   switch (cause) {
     case "process_lost":
       return "retries exhausted";
+    case "infra_terminated":
+      return "infrastructure-terminated run";
     case "codex_output_inactivity_monitor":
       return "output-inactivity retry exhausted";
     case "workspace_validation_failed":
@@ -376,12 +387,17 @@ function isProviderQuotaRecovery(latestRun: LatestIssueRun) {
   );
 }
 
+function isEnvironmentalWaitRecoveryCause(cause: StrandedRecoveryCause) {
+  return cause === "provider_quota" || cause === "infra_terminated";
+}
+
 function resolveStrandedRecoveryCause(
   latestRun: LatestIssueRun,
   explicitCause?: StrandedRecoveryCause,
 ): StrandedRecoveryCause {
   if (explicitCause) return explicitCause;
   if (isProviderQuotaRecovery(latestRun)) return "provider_quota";
+  if (isInfraTerminatedRun(latestRun)) return "infra_terminated";
   if (latestRun?.errorCode === "process_lost") return "process_lost";
   if (latestRun?.errorCode === "codex_output_inactivity_monitor") {
     return "codex_output_inactivity_monitor";
@@ -515,6 +531,8 @@ const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
+export const INFRA_TERMINATION_RECOVERY_BACKOFF_MS = 2 * 60 * 1000;
+const INFRA_TERMINATION_SCAN_LIMIT = 10;
 
 const PROVIDER_QUOTA_ERROR_RE =
   /(?:you(?:'|’)ve hit your (?:\w+ )?limit|usage limit(?: reached| exceeded)?|provider quota|quota (?:limit )?exceeded|model (?:is )?at capacity)/i;
@@ -939,6 +957,7 @@ export function recoveryService(
         resultJson: heartbeatRuns.resultJson,
         startedAt: heartbeatRuns.startedAt,
         createdAt: heartbeatRuns.createdAt,
+        finishedAt: heartbeatRuns.finishedAt,
       })
       .from(heartbeatRuns)
       .where(
@@ -1040,6 +1059,117 @@ export function recoveryService(
       if (latestFinishedAt === null) latestFinishedAt = row.finishedAt ?? null;
     }
     return { consecutive, latestFinishedAt };
+  }
+
+  async function summarizeConsecutiveInfraTerminations(
+    companyId: string,
+    issueId: string,
+    agentId: string,
+  ) {
+    const rows = await db
+      .select({
+        id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        resultJson: heartbeatRuns.resultJson,
+        finishedAt: heartbeatRuns.finishedAt,
+      })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, agentId),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+          inArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
+        ),
+      )
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id))
+      .limit(INFRA_TERMINATION_SCAN_LIMIT);
+
+    let consecutive = 0;
+    let latestFinishedAt: Date | null = null;
+    for (const row of rows) {
+      if (!isInfraTerminatedRun(row)) break;
+      consecutive += 1;
+      if (latestFinishedAt === null) latestFinishedAt = row.finishedAt ?? null;
+    }
+    return { consecutive, latestFinishedAt };
+  }
+
+  async function evaluateInfraRedispatchGate(input: {
+    companyId: string;
+    issueId: string;
+    agentId: string;
+    latestRun: LatestIssueRun;
+    now: Date;
+    policy?: InfraRedispatchBackoffPolicy;
+  }) {
+    if (!isInfraTerminatedRun(input.latestRun)) {
+      return { kind: "dispatch" as const };
+    }
+    const { consecutive, latestFinishedAt } =
+      await summarizeConsecutiveInfraTerminations(
+        input.companyId,
+        input.issueId,
+        input.agentId,
+      );
+    return evaluateInfraRedispatchBackoff({
+      consecutive,
+      latestFinishedAt,
+      now: input.now,
+      policy: input.policy,
+    });
+  }
+
+  async function recordInfraRedispatchBackoffNotice(input: {
+    issueId: string;
+    latestRun: LatestIssueRun;
+    consecutive: number;
+    cooldownMs: number;
+    retryAt: Date;
+  }) {
+    if (!input.latestRun) return;
+    const alreadyNoticed = await db
+      .select({
+        metadata: issueComments.metadata,
+        presentation: issueComments.presentation,
+      })
+      .from(issueComments)
+      .where(
+        and(
+          eq(issueComments.issueId, input.issueId),
+          eq(issueComments.authorType, "system"),
+        ),
+      )
+      .orderBy(desc(issueComments.createdAt))
+      .limit(20)
+      .then((rows) =>
+        rows.some((row) => {
+          const presentation = parseObject(row.presentation);
+          if (presentation.title !== INFRA_REDISPATCH_BACKOFF_NOTICE_TITLE) {
+            return false;
+          }
+          return parseObject(row.metadata).sourceRunId === input.latestRun?.id;
+        }),
+      );
+    if (alreadyNoticed) return;
+
+    const notice = buildInfraRedispatchBackoffNotice({
+      consecutive: input.consecutive,
+      cooldownMs: input.cooldownMs,
+      retryAt: input.retryAt,
+      latestRun: {
+        id: input.latestRun.id,
+        status: input.latestRun.status,
+        agentId: input.latestRun.agentId,
+        errorCode: input.latestRun.errorCode,
+      },
+    });
+    await issuesSvc.addComment(input.issueId, notice.body, {}, {
+      authorType: "system",
+      presentation: notice.presentation,
+      metadata: notice.metadata,
+    });
   }
 
   async function hasActiveExecutionPath(
@@ -2447,7 +2577,8 @@ export function recoveryService(
       issue: input.issue,
       latestRun: input.latestRun,
     });
-    const isProviderQuotaWait = recoveryCause === "provider_quota";
+    const isEnvironmentalWaitRecovery =
+      isEnvironmentalWaitRecoveryCause(recoveryCause);
     const now = new Date();
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
@@ -2459,7 +2590,7 @@ export function recoveryService(
       supersedeOnIdentityChange: recoveryCause === "configuration_incomplete",
       preserveExistingOwner: true,
       kind: strandedRecoveryActionKind(recoveryCause),
-      ownerType: isProviderQuotaWait ? "system" : "board",
+      ownerType: isEnvironmentalWaitRecovery ? "system" : "board",
       ownerAgentId: null,
       ownerUserId: null,
       previousOwnerAgentId: input.issue.assigneeAgentId,
@@ -2481,7 +2612,7 @@ export function recoveryService(
         failureSummary:
           summarizeRunFailureForIssueComment(input.latestRun)?.trim() ?? null,
       },
-      evidenceOnCreate: isProviderQuotaWait
+      evidenceOnCreate: isEnvironmentalWaitRecovery
         ? {}
         : { routingPolicy: STRANDED_BOARD_ESCALATION_POLICY },
       nextAction:
@@ -2489,6 +2620,8 @@ export function recoveryService(
           ? "Board operator: inspect the run evidence, then explicitly choose a valid issue disposition, retry the original owner, reassign, or intentionally resolve the task."
           : recoveryCause === "process_lost"
             ? "Board operator: inspect the retry history, then explicitly retry the original owner, reassign, or intentionally resolve the task."
+            : recoveryCause === "infra_terminated"
+              ? "Wait for the scheduled re-dispatch of the original assignee. The previous run was terminated by host/platform infrastructure, not by an agent fault; do not wake a takeover owner."
             : recoveryCause === "provider_quota"
               ? "Wait for provider quota recovery, then retry the original assignee; do not wake a takeover owner."
               : recoveryCause === "codex_output_inactivity_monitor"
@@ -2517,7 +2650,7 @@ export function recoveryService(
                     : recoveryCause === "execution_review_participant_recovery"
                       ? "Board operator: repair the failed review participant path, restore a live reviewer, explicitly reassign, or record an intentional resolution."
                       : "Board operator: inspect the evidence, repair the runtime if appropriate, then explicitly retry the original owner, reassign, or intentionally resolve the task.",
-      wakePolicy: isProviderQuotaWait
+      wakePolicy: isEnvironmentalWaitRecovery
         ? {
             type: "monitor_only",
             reason: recoveryCause,
@@ -2527,7 +2660,7 @@ export function recoveryService(
             reason: recoveryCause,
             preservesSourceAssignee: true,
           },
-      monitorPolicy: isProviderQuotaWait
+      monitorPolicy: isEnvironmentalWaitRecovery
         ? { type: "wait_recovery", retryAgentId: routing.returnOwnerAgentId }
         : null,
       maxAttempts: null,
@@ -2558,12 +2691,17 @@ export function recoveryService(
     return new Date(now.getTime() + PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS);
   }
 
-  async function ensureProviderQuotaWaitRecoveryMonitor(input: {
+  async function ensureWaitRecoveryMonitor(input: {
     issue: typeof issues.$inferSelect;
     latestRun: LatestIssueRun;
     actionId: string;
     agentId: string;
+    recoveryCause: StrandedRecoveryCause;
   }) {
+    const retryReason =
+      input.recoveryCause === "infra_terminated"
+        ? "infra_termination_recovery"
+        : "provider_quota_recovery";
     const existing = await db
       .select()
       .from(heartbeatRuns)
@@ -2581,7 +2719,10 @@ export function recoveryService(
     if (existing) return existing;
 
     const now = new Date();
-    const retryAt = readProviderQuotaRetryAt(input.latestRun, now);
+    const retryAt =
+      input.recoveryCause === "infra_terminated"
+        ? new Date(now.getTime() + INFRA_TERMINATION_RECOVERY_BACKOFF_MS)
+        : readProviderQuotaRetryAt(input.latestRun, now);
     return db.transaction(async (tx) => {
       const wakeup = await tx
         .insert(agentWakeupRequests)
@@ -2590,20 +2731,20 @@ export function recoveryService(
           agentId: input.agentId,
           source: "automation",
           triggerDetail: "system",
-          reason: "provider_quota_recovery",
+          reason: retryReason,
           payload: withRecoveryContext(
             {
               issueId: input.issue.id,
               retryOfRunId: input.latestRun?.id ?? null,
-              retryReason: "provider_quota_recovery",
-              providerQuotaRetryNotBefore: retryAt.toISOString(),
+              retryReason,
+              retryNotBefore: retryAt.toISOString(),
             },
             "normal_model",
           ),
           status: "queued",
           requestedByActorType: "system",
           requestedByActorId: null,
-          idempotencyKey: `provider_quota_recovery:${input.issue.id}:${retryAt.toISOString()}`,
+          idempotencyKey: `${retryReason}:${input.issue.id}:${retryAt.toISOString()}`,
           updatedAt: now,
         })
         .returning()
@@ -2620,14 +2761,14 @@ export function recoveryService(
           retryOfRunId: input.latestRun?.id ?? null,
           scheduledRetryAt: retryAt,
           scheduledRetryAttempt: 1,
-          scheduledRetryReason: "provider_quota_recovery",
+          scheduledRetryReason: retryReason,
           contextSnapshot: withRecoveryContext(
             {
               issueId: input.issue.id,
               taskId: input.issue.id,
-              wakeReason: "provider_quota_recovery",
-              retryReason: "provider_quota_recovery",
-              providerQuotaRetryNotBefore: retryAt.toISOString(),
+              wakeReason: retryReason,
+              retryReason,
+              retryNotBefore: retryAt.toISOString(),
             },
             "normal_model",
           ),
@@ -3752,16 +3893,17 @@ export function recoveryService(
       recoveryCause,
       successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
     });
-    const isProviderQuotaWait =
-      recoveryCause === "provider_quota" &&
+    const isEnvironmentalWait =
+      isEnvironmentalWaitRecoveryCause(recoveryCause) &&
       !recoveryAction.ownerAgentId &&
       Boolean(recoveryAction.returnOwnerAgentId);
-    if (isProviderQuotaWait && recoveryAction.returnOwnerAgentId) {
-      await ensureProviderQuotaWaitRecoveryMonitor({
+    if (isEnvironmentalWait && recoveryAction.returnOwnerAgentId) {
+      await ensureWaitRecoveryMonitor({
         issue: input.issue,
         latestRun: input.latestRun,
         actionId: recoveryAction.id,
         agentId: recoveryAction.returnOwnerAgentId,
+        recoveryCause,
       });
     }
     const blockerIds = await existingUnresolvedBlockerIssueIds(
@@ -3773,7 +3915,7 @@ export function recoveryService(
       blockedByIssueIds: blockerIds,
     });
     if (!updated) return null;
-    if (isProviderQuotaWait) return updated;
+    if (isEnvironmentalWait) return updated;
     const sourceAssigneePreserved =
       updated.assigneeAgentId === input.issue.assigneeAgentId &&
       updated.assigneeUserId === input.issue.assigneeUserId;
@@ -4176,6 +4318,7 @@ export function recoveryService(
       escalated: 0,
       waitingOnReviewResolved: 0,
       providerQuotaMonitored: 0,
+      infraBackoffDeferred: 0,
       recentProgressExempted: 0,
       operatorCancelExempted: 0,
       onboardingFirstTaskExempted: 0,
@@ -4254,6 +4397,25 @@ export function recoveryService(
       }
 
       let latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+      const infraBackoff = await evaluateInfraRedispatchGate({
+        companyId: issue.companyId,
+        issueId: issue.id,
+        agentId,
+        latestRun,
+        now: new Date(),
+      });
+      if (infraBackoff.kind === "defer") {
+        await recordInfraRedispatchBackoffNotice({
+          issueId: issue.id,
+          latestRun,
+          consecutive: infraBackoff.consecutive,
+          cooldownMs: infraBackoff.cooldownMs,
+          retryAt: infraBackoff.retryAt,
+        });
+        result.infraBackoffDeferred += 1;
+        result.skipped += 1;
+        continue;
+      }
       // A native chat can finish between the earlier settlement read and this
       // fresh run read, before its response is materialized. Its trusted
       // finalizer owns that settlement; generic productive-work recovery must
