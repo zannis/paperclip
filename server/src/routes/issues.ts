@@ -277,6 +277,7 @@ import {
   readAcceptedPlanConfirmationTarget,
   type IssuePostCommitAction,
 } from "../services/issues.js";
+import { resolveAgentIssueProjectId } from "../services/issue-project-inference.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
 import { environmentService } from "../services/environments.js";
@@ -3927,6 +3928,18 @@ export function issueRoutes(
       input.executionWorkspaceId !== undefined ||
       input.executionWorkspacePreference !== undefined ||
       input.executionWorkspaceSettings !== undefined
+    );
+  }
+
+  function hasExplicitIssueProjectCreateSelection(
+    input: Record<string, unknown>,
+  ) {
+    return (
+      input.projectId != null ||
+      input.parentId != null ||
+      input.inheritExecutionWorkspaceFromIssueId != null ||
+      input.projectWorkspaceId != null ||
+      input.executionWorkspaceId != null
     );
   }
 
@@ -11763,10 +11776,18 @@ export function issueRoutes(
             }
           : {}),
       };
+      const inferredProjectId = hasExplicitIssueProjectCreateSelection(createBody)
+        ? null
+        : await resolveAgentIssueProjectId(db, companyId, {
+            createdByAgentId: actor.agentId,
+            actorRunId: actor.runId,
+            title: createBody.title,
+            description: createBody.description,
+          });
       const createAssignmentScope = {
         projectId: await resolveAssignmentProjectId({
           companyId,
-          projectId: createBody.projectId,
+          projectId: createBody.projectId ?? inferredProjectId ?? undefined,
           parentIssueId: createBody.parentId,
         }),
         parentIssueId: createBody.parentId ?? null,
@@ -11802,7 +11823,7 @@ export function issueRoutes(
         {
           id: issueId,
           companyId,
-          projectId: createBody.projectId ?? null,
+          projectId: createBody.projectId ?? inferredProjectId ?? null,
           executionPolicy,
         },
         actor,
@@ -11812,6 +11833,7 @@ export function issueRoutes(
       const createInput = {
         ...createBody,
         ...(taskBridgeOriginForActor(req) ?? {}),
+        ...(inferredProjectId ? { projectId: inferredProjectId } : {}),
         id: issueId,
         originRunId: createBody.originRunId ?? actor.runId,
         originIdentityContextId: req.actor.identityContextId ?? null,
