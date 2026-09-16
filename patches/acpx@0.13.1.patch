@@ -11,7 +11,7 @@ index 5e2113ac0a1a92c99322cf01e5c106760a0b0dbf..b7b5151f3da45b5e0d12aea55e9f3b07
    private setSessionModelThroughConfig;
    private setSessionModelThroughLegacyMethod;
 diff --git a/dist/live-checkpoint-BSIrfgVo.js b/dist/live-checkpoint-BSIrfgVo.js
-index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d2e777e9e 100644
+index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..7724311863401488882e31330ca9a7443e5aa2c7 100644
 --- a/dist/live-checkpoint-BSIrfgVo.js
 +++ b/dist/live-checkpoint-BSIrfgVo.js
 @@ -1068,6 +1068,7 @@ function serializeSessionRecordForDisk(record) {
@@ -49,7 +49,34 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
  	"agent_capabilities",
  	"messages.Agent.content.ToolUse.input",
-@@ -3104,10 +3107,10 @@ function authEnvKey(methodId) {
+@@ -3055,6 +3058,8 @@ async function ensureCopilotAcpSupport(command) {
+ function buildClaudeCodeOptionsMeta(options, isolateUserSettings = false) {
+ 	const claudeCodeOptions = {};
+ 	if (isolateUserSettings) claudeCodeOptions.settingSources = resolveClaudeCodeSettingSources();
++	const plugins = resolveClaudeCodePlugins();
++	if (plugins) claudeCodeOptions.plugins = plugins;
+ 	if (options) assignClaudeCodeOptions(claudeCodeOptions, options);
+ 	const meta = {};
+ 	if (Object.keys(claudeCodeOptions).length > 0) meta.claudeCode = { options: claudeCodeOptions };
+@@ -3066,6 +3071,17 @@ function resolveClaudeCodeSettingSources(env = process.env) {
+ 	if (env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS?.trim() === "1") return ["user", ...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ 	return [...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ }
++function resolveClaudeCodePlugins(env = process.env, platform = process.platform) {
++	const raw = env.ACPX_CLAUDE_PLUGIN_DIRS?.trim();
++	if (!raw) return;
++	const delimiter = platform === "win32" ? ";" : ":";
++	const paths = raw.split(delimiter).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
++	if (paths.length === 0) return;
++	return paths.map((path$1) => ({
++		type: "local",
++		path: path$1
++	}));
++}
+ function assignClaudeCodeOptions(target, options) {
+ 	if (typeof options.model === "string" && options.model.trim().length > 0) target.model = options.model;
+ 	if (Array.isArray(options.allowedTools)) target.allowedTools = [...options.allowedTools];
+@@ -3104,10 +3120,10 @@ function authEnvKey(methodId) {
  	authEnvKeyCache.set(methodId, key);
  	return key;
  }
@@ -62,7 +89,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  	if (typeof value === "string" && value.trim().length > 0) return value;
  }
  function protectedEnvKey(key) {
-@@ -3135,8 +3138,21 @@ function promotePrefixedAuthEnvironment(env) {
+@@ -3135,8 +3151,21 @@ function promotePrefixedAuthEnvironment(env) {
  	}
  	return protectedKeys;
  }
@@ -86,7 +113,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  	const protectedAuthEnvKeys = promotePrefixedAuthEnvironment(env);
  	if (authCredentials) for (const [methodId, credential] of Object.entries(authCredentials)) {
  		addAuthCredentialEnvKeys(protectedAuthEnvKeys, methodId, credential);
-@@ -3178,10 +3194,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
+@@ -3178,10 +3207,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
  	const configCredentials = authCredentials ?? {};
  	return configCredentials[methodId] ?? configCredentials[toEnvToken(methodId)];
  }
@@ -99,7 +126,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		stdio: [
  			"pipe",
  			"pipe",
-@@ -3961,10 +3977,13 @@ function resolveClientCapabilities(params) {
+@@ -3961,10 +3990,13 @@ function resolveClientCapabilities(params) {
  			...params.elicitationModes.includes("url") ? { url: {} } : {}
  		} } : {}
  	};
@@ -115,7 +142,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  	};
  }
  function hasResponseField(response, field) {
-@@ -4067,6 +4086,27 @@ function createNdJsonMessageStream(agentCommand, output, input) {
+@@ -4067,6 +4099,27 @@ function createNdJsonMessageStream(agentCommand, output, input) {
  		} })
  	};
  }
@@ -143,7 +170,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  var AcpClient = class {
  	options;
  	connection;
-@@ -4105,7 +4145,9 @@ var AcpClient = class {
+@@ -4105,7 +4158,9 @@ var AcpClient = class {
  			cwd: asAbsoluteCwd(options.cwd),
  			authPolicy: options.authPolicy ?? "skip",
  			permissionPolicy: snapshotPermissionPolicy(options.permissionPolicy),
@@ -154,7 +181,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		};
  		this.eventHandlers = {
  			onAcpMessage: this.options.onAcpMessage,
-@@ -4216,9 +4258,21 @@ var AcpClient = class {
+@@ -4216,9 +4271,21 @@ var AcpClient = class {
  		this.lastAgentExit = void 0;
  		this.lastKnownPid = child.pid ?? void 0;
  		this.attachAgentLifecycleObservers(child);
@@ -176,7 +203,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			if (!this.options.verbose) return;
  			process.stderr.write(chunk);
  		});
-@@ -4226,6 +4280,7 @@ var AcpClient = class {
+@@ -4226,6 +4293,7 @@ var AcpClient = class {
  		const output = Readable.toWeb(child.stdout);
  		const stream = this.createTappedStream(createNdJsonMessageStream(this.options.agentCommand, input, output));
  		const connection = this.createConnection(stream, launch);
@@ -184,7 +211,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		connection.signal.addEventListener("abort", () => {
  			this.recordAgentExit("connection_close", child.exitCode ?? null, child.signalCode ?? null);
  		}, { once: true });
-@@ -4253,7 +4308,12 @@ var AcpClient = class {
+@@ -4253,7 +4321,12 @@ var AcpClient = class {
  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
@@ -198,7 +225,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		};
  	}
  	logAgentLaunch(plan) {
-@@ -4279,10 +4339,17 @@ var AcpClient = class {
+@@ -4279,10 +4352,17 @@ var AcpClient = class {
  	}
  	async spawnAgentProcess(plan) {
  		const spawnCommand = buildAgentSpawnCommand(plan.spawnCommand, plan.args, process.platform, plan.spawnOptions.env);
@@ -218,7 +245,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		try {
  			await waitForSpawn$1(spawnedChild);
  		} catch (error) {
-@@ -4293,10 +4360,10 @@ var AcpClient = class {
+@@ -4293,10 +4373,10 @@ var AcpClient = class {
  	createConnection(stream, launch) {
  		const app = client({ name: "acpx" }).onNotification(methods.client.session.update, async ({ params }) => {
  			await this.handleSessionUpdate(params);
@@ -232,7 +259,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		}).onRequest(methods.client.fs.readTextFile, async ({ params }) => {
  			return await this.handleReadTextFile(params);
  		}).onRequest(methods.client.fs.writeTextFile, async ({ params }) => {
-@@ -4312,6 +4379,11 @@ var AcpClient = class {
+@@ -4312,6 +4392,11 @@ var AcpClient = class {
  		}).onRequest(methods.client.terminal.release, async ({ params }) => {
  			return await this.handleReleaseTerminal(params);
  		});
@@ -244,7 +271,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		if (launch.devinAcp) app.onRequest("_cognition.ai/request_diagnostics", (params) => {
  			return params && typeof params === "object" && !Array.isArray(params) ? params : {};
  		}, async () => ({}));
-@@ -4333,12 +4405,12 @@ var AcpClient = class {
+@@ -4333,12 +4418,12 @@ var AcpClient = class {
  	async initializeProtocolConnection(connection, launch) {
  		const initializePromise = connection.initialize({
  			protocolVersion: PROTOCOL_VERSION,
@@ -259,7 +286,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			clientInfo: resolveClientInfo(launch.devinAcp)
  		});
  		const initialized = launch.geminiAcp ? await withTimeout(initializePromise, resolveGeminiAcpStartupTimeoutMs()) : await initializePromise;
-@@ -4358,6 +4430,36 @@ var AcpClient = class {
+@@ -4358,6 +4443,36 @@ var AcpClient = class {
  		throw normalizedError;
  	}
  	createTappedStream(base) {
@@ -296,7 +323,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		const onAcpMessage = () => this.eventHandlers.onAcpMessage;
  		const onAcpOutputMessage = () => this.eventHandlers.onAcpOutputMessage;
  		const elicitationRequestIds = /* @__PURE__ */ new Set();
-@@ -4367,8 +4469,9 @@ var AcpClient = class {
+@@ -4367,8 +4482,9 @@ var AcpClient = class {
  		const shouldSuppressInboundReplaySessionUpdate = (message) => {
  			return this.suppressReplaySessionUpdateMessages && isSessionUpdateNotification(message);
  		};
@@ -307,7 +334,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			if (requestId !== void 0) {
  				elicitationRequestIds.add(requestId);
  				return;
-@@ -4379,6 +4482,7 @@ var AcpClient = class {
+@@ -4379,6 +4495,7 @@ var AcpClient = class {
  			}
  		};
  		return {
@@ -315,7 +342,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			readable: new ReadableStream({ async start(controller) {
  				const reader = base.readable.getReader();
  				try {
-@@ -4387,10 +4491,16 @@ var AcpClient = class {
+@@ -4387,10 +4504,16 @@ var AcpClient = class {
  						if (done) break;
  						if (!value) continue;
  						observeInbound(value);
@@ -333,7 +360,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  					reader.releaseLock();
  					controller.close();
  				}
-@@ -4403,10 +4513,20 @@ var AcpClient = class {
+@@ -4403,10 +4526,20 @@ var AcpClient = class {
  					onAcpOutputMessage()?.("outbound", message);
  					onAcpMessage()?.("outbound", message);
  				}
@@ -354,7 +381,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  					writer.releaseLock();
  				}
  			} })
-@@ -4422,7 +4542,10 @@ var AcpClient = class {
+@@ -4422,7 +4555,10 @@ var AcpClient = class {
  			const createPromise = this.runConnectionRequest(() => connection.newSession({
  				cwd: sessionCwd,
  				mcpServers: this.options.mcpServers ?? [],
@@ -366,7 +393,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			}));
  			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
  		} catch (error) {
-@@ -4864,7 +4987,7 @@ var AcpClient = class {
+@@ -4864,7 +5000,7 @@ var AcpClient = class {
  	}
  	selectAuthMethod(methods) {
  		for (const method of methods) {
@@ -375,7 +402,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			if (envCredential) return {
  				methodId: method.id,
  				credential: envCredential,
-@@ -4890,7 +5013,7 @@ var AcpClient = class {
+@@ -4890,7 +5026,7 @@ var AcpClient = class {
  	}
  	readAgentSpecificEnvCredential(methodId) {
  		if (!this.isGrokBuildAcpCommand() || methodId !== "xai.api_key") return;
@@ -384,7 +411,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		return typeof value === "string" && value.trim().length > 0 ? value : void 0;
  	}
  	selectAgentManagedAuthMethod(methodId) {
-@@ -4915,9 +5038,9 @@ var AcpClient = class {
+@@ -4915,9 +5051,9 @@ var AcpClient = class {
  		await connection.authenticate({ methodId: selected.methodId });
  		this.log(`authenticated with method ${selected.methodId} (${selected.source})`);
  	}
@@ -396,7 +423,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		if (hostResponse) return hostResponse;
  		const { response, recorded } = await this.resolvePermissionRequestFromMode(params);
  		if (!recorded) {
-@@ -4926,14 +5049,49 @@ var AcpClient = class {
+@@ -4926,14 +5062,49 @@ var AcpClient = class {
  		}
  		return response;
  	}
@@ -448,7 +475,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		})).then((response) => ({
  			kind: "response",
  			response
-@@ -4970,7 +5128,7 @@ var AcpClient = class {
+@@ -4970,7 +5141,7 @@ var AcpClient = class {
  	isElicitationSessionCancelling(sessionId) {
  		return this.closing || this.cancellingSessionIds.has(sessionId);
  	}
@@ -457,7 +484,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		if (!this.options.onPermissionRequest) return;
  		const signal = this.cancellationSignalForSession(params.sessionId);
  		try {
-@@ -4978,7 +5136,7 @@ var AcpClient = class {
+@@ -4978,7 +5149,7 @@ var AcpClient = class {
  				sessionId: params.sessionId,
  				raw: params,
  				inferredKind: inferToolKind(params)
@@ -466,7 +493,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  			return this.hostPermissionDecisionResponse(params, signal, decision);
  		} catch (error) {
  			return this.hostPermissionErrorResponse(params, signal, error);
-@@ -5028,6 +5186,12 @@ var AcpClient = class {
+@@ -5028,6 +5199,12 @@ var AcpClient = class {
  	attachAgentLifecycleObservers(child) {
  		child.once("exit", (exitCode, signal) => {
  			this.recordAgentExit("process_exit", exitCode, signal);
@@ -479,7 +506,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  		});
  		child.once("close", (exitCode, signal) => {
  			this.recordAgentExit("process_close", exitCode, signal);
-@@ -5771,10 +5935,20 @@ function recordSessionUpdate(conversation, state, notification, timestamp = isoN
+@@ -5771,10 +5948,20 @@ function recordSessionUpdate(conversation, state, notification, timestamp = isoN
  	trimConversationForRuntime(conversation);
  	return acpx;
  }
@@ -502,7 +529,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  	updateConversationTimestamp(conversation, timestamp);
  	trimConversationForRuntime(conversation);
  	return true;
-@@ -6435,6 +6609,27 @@ async function withConnectedSession(options) {
+@@ -6435,6 +6622,27 @@ async function withConnectedSession(options) {
  //#region src/runtime/engine/prompt-turn.ts
  const SESSION_REPLY_IDLE_MS = 1e3;
  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
@@ -530,7 +557,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e3a4989473bba20e6dcdccbac086bb6d
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt, params.onPromptRequestStarted, params.onElicitation);
-@@ -6444,7 +6639,22 @@ async function runPromptTurn(params) {
+@@ -6444,7 +6652,22 @@ async function runPromptTurn(params) {
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
@@ -665,7 +692,7 @@ index e8102acb03c4c38830ad5ec22f356125eb0423b7..d3a9ba6266a29926ed53302410534415
      text: string;
      attachments?: AcpRuntimeTurnAttachment[];
 diff --git a/dist/runtime.js b/dist/runtime.js
-index a1f4a70a003792c6eacf68b6b038f37bfec1db53..fe2484de6978fd16bfdd55ce69066fd43b1a0f77 100644
+index a1f4a70a003792c6eacf68b6b038f37bfec1db53..5af89239f88cf430546bcb63660b7a7f72e9f2dc 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -371,7 +371,7 @@ const PROMPT_EVENT_PARSERS = {
@@ -870,7 +897,7 @@ index a1f4a70a003792c6eacf68b6b038f37bfec1db53..fe2484de6978fd16bfdd55ce69066fd4
  		const { handle } = this.resolveManagerHandle(input.handle);
  		await (await this.getManager()).cancel(handle);
 diff --git a/dist/session-options-DwRDODlr.d.ts b/dist/session-options-DwRDODlr.d.ts
-index c3da1645235bbea22de3f8484149051cd7dca56b..5ccc8dda101e7c90f61483c86fd2731855ce2e51 100644
+index c3da1645235bbea22de3f8484149051cd7dca56b..c94c25d81bcd505de0433e0771bbd98ae5f43c76 100644
 --- a/dist/session-options-DwRDODlr.d.ts
 +++ b/dist/session-options-DwRDODlr.d.ts
 @@ -1,4 +1,5 @@
