@@ -290,10 +290,8 @@ describe("agent instructions bundle routes", () => {
     });
     // Cold route compilation belongs to fixture setup. Timing it as a request
     // let a timed-out import resume under the next case's reset mocks.
-    await Promise.all([
-      vi.importActual("../routes/agents.js"),
-      vi.importActual("../middleware/index.js"),
-    ]);
+    await vi.importActual("../routes/agents.js");
+    await vi.importActual("../middleware/index.js");
   }, 60_000);
 
   it("returns bundle metadata", async () => {
