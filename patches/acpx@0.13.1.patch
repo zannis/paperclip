@@ -11,7 +11,7 @@ index 5e2113ac0a1a92c99322cf01e5c106760a0b0dbf..b7b5151f3da45b5e0d12aea55e9f3b07
    private setSessionModelThroughConfig;
    private setSessionModelThroughLegacyMethod;
 diff --git a/dist/live-checkpoint-BSIrfgVo.js b/dist/live-checkpoint-BSIrfgVo.js
-index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d686b781129 100644
+index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..92742e28e2025a499e0ec33a663ae29379540c54 100644
 --- a/dist/live-checkpoint-BSIrfgVo.js
 +++ b/dist/live-checkpoint-BSIrfgVo.js
 @@ -1068,6 +1068,7 @@ function serializeSessionRecordForDisk(record) {
@@ -39,7 +39,34 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
  	"agent_capabilities",
  	"messages.Agent.content.ToolUse.input",
-@@ -3135,8 +3137,18 @@ function promotePrefixedAuthEnvironment(env) {
+@@ -3055,6 +3057,8 @@ async function ensureCopilotAcpSupport(command) {
+ function buildClaudeCodeOptionsMeta(options, isolateUserSettings = false) {
+ 	const claudeCodeOptions = {};
+ 	if (isolateUserSettings) claudeCodeOptions.settingSources = resolveClaudeCodeSettingSources();
++	const plugins = resolveClaudeCodePlugins();
++	if (plugins) claudeCodeOptions.plugins = plugins;
+ 	if (options) assignClaudeCodeOptions(claudeCodeOptions, options);
+ 	const meta = {};
+ 	if (Object.keys(claudeCodeOptions).length > 0) meta.claudeCode = { options: claudeCodeOptions };
+@@ -3066,6 +3070,17 @@ function resolveClaudeCodeSettingSources(env = process.env) {
+ 	if (env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS?.trim() === "1") return ["user", ...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ 	return [...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ }
++function resolveClaudeCodePlugins(env = process.env, platform = process.platform) {
++	const raw = env.ACPX_CLAUDE_PLUGIN_DIRS?.trim();
++	if (!raw) return;
++	const delimiter = platform === "win32" ? ";" : ":";
++	const paths = raw.split(delimiter).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
++	if (paths.length === 0) return;
++	return paths.map((path$1) => ({
++		type: "local",
++		path: path$1
++	}));
++}
+ function assignClaudeCodeOptions(target, options) {
+ 	if (typeof options.model === "string" && options.model.trim().length > 0) target.model = options.model;
+ 	if (Array.isArray(options.allowedTools)) target.allowedTools = [...options.allowedTools];
+@@ -3135,8 +3150,18 @@ function promotePrefixedAuthEnvironment(env) {
  	}
  	return protectedKeys;
  }
@@ -60,7 +87,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  	const protectedAuthEnvKeys = promotePrefixedAuthEnvironment(env);
  	if (authCredentials) for (const [methodId, credential] of Object.entries(authCredentials)) {
  		addAuthCredentialEnvKeys(protectedAuthEnvKeys, methodId, credential);
-@@ -3178,10 +3190,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
+@@ -3178,10 +3203,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
  	const configCredentials = authCredentials ?? {};
  	return configCredentials[methodId] ?? configCredentials[toEnvToken(methodId)];
  }
@@ -73,7 +100,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		stdio: [
  			"pipe",
  			"pipe",
-@@ -3961,10 +3973,13 @@ function resolveClientCapabilities(params) {
+@@ -3961,10 +3986,13 @@ function resolveClientCapabilities(params) {
  			...params.elicitationModes.includes("url") ? { url: {} } : {}
  		} } : {}
  	};
@@ -89,7 +116,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  	};
  }
  function hasResponseField(response, field) {
-@@ -4216,9 +4231,21 @@ var AcpClient = class {
+@@ -4216,9 +4244,21 @@ var AcpClient = class {
  		this.lastAgentExit = void 0;
  		this.lastKnownPid = child.pid ?? void 0;
  		this.attachAgentLifecycleObservers(child);
@@ -111,7 +138,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  			if (!this.options.verbose) return;
  			process.stderr.write(chunk);
  		});
-@@ -4253,7 +4280,12 @@ var AcpClient = class {
+@@ -4253,7 +4293,12 @@ var AcpClient = class {
  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
@@ -125,7 +152,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		};
  	}
  	logAgentLaunch(plan) {
-@@ -4279,10 +4311,17 @@ var AcpClient = class {
+@@ -4279,10 +4324,17 @@ var AcpClient = class {
  	}
  	async spawnAgentProcess(plan) {
  		const spawnCommand = buildAgentSpawnCommand(plan.spawnCommand, plan.args, process.platform, plan.spawnOptions.env);
@@ -145,7 +172,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		try {
  			await waitForSpawn$1(spawnedChild);
  		} catch (error) {
-@@ -5028,6 +5067,12 @@ var AcpClient = class {
+@@ -5028,6 +5080,12 @@ var AcpClient = class {
  	attachAgentLifecycleObservers(child) {
  		child.once("exit", (exitCode, signal) => {
  			this.recordAgentExit("process_exit", exitCode, signal);
@@ -158,7 +185,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		});
  		child.once("close", (exitCode, signal) => {
  			this.recordAgentExit("process_close", exitCode, signal);
-@@ -6435,6 +6480,27 @@ async function withConnectedSession(options) {
+@@ -6435,6 +6493,27 @@ async function withConnectedSession(options) {
  //#region src/runtime/engine/prompt-turn.ts
  const SESSION_REPLY_IDLE_MS = 1e3;
  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
@@ -186,7 +213,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt, params.onPromptRequestStarted, params.onElicitation);
-@@ -6444,6 +6510,19 @@ async function runPromptTurn(params) {
+@@ -6444,6 +6523,19 @@ async function runPromptTurn(params) {
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
@@ -206,7 +233,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
  		return {
  			stopReason: response.stopReason,
-@@ -6518,4 +6597,4 @@ var LiveSessionCheckpoint = class {
+@@ -6518,4 +6610,4 @@ var LiveSessionCheckpoint = class {
  //#endregion
  export { writeSessionRecord as $, PERMISSION_POLICY_ACTIONS as $t, REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE as A, TimeoutError as At, getAcpxVersion as B, formatErrorMessage as Bt, mergeSessionOptions as C, PromptInputValidationError as Ct, applyLifecycleSnapshotToRecord as D, promptToDisplayText as Dt, applyConversation as E, parsePromptSource as Et, modelStateFromConfigOptions as F, normalizeAgentName$1 as Ft, findSession as G, toAcpErrorPayload as Gt, DEFAULT_HISTORY_LIMIT as H, normalizeOutputError as Ht, normalizeAgentCommandInput as I, resolveAgentArgv as It, listSessions as J, NON_INTERACTIVE_PERMISSION_POLICIES as Jt, findSessionByDirectoryWalk as K, AUTH_POLICIES as Kt, renderArgvIdentity as L, resolveAgentCommand as Lt, RequestedModelUnsupportedError as M, withTimeout as Mt, assertRequestedModelSupported as N, DEFAULT_AGENT_NAME as Nt, reconcileAgentSessionId as O, textPrompt as Ot, isRequestedModelUnsupportedError as P, listBuiltInAgents as Pt, resolveSessionRecord as Q, PERMISSION_MODES as Qt, runTimedExecFile as R, resolveCanonicalAgentName as Rt, advertisedModelState as S, parsePromptStopReason as St, sessionOptionsFromRecord as T, mergePromptSourceWithText as Tt, absolutePath as U, extractAcpError as Ut, permissionModeSatisfies as V, isRetryablePromptError as Vt, findGitRepositoryRoot as W, isAcpResourceNotFoundError as Wt, normalizeName as X, OUTPUT_ERROR_ORIGINS as Xt, listSessionsForAgent as Y, OUTPUT_ERROR_CODES as Yt, pruneSessions as Z, OUTPUT_FORMATS as Zt, createSessionConversation as _, sessionEventLockPath as _t, applyRequestedModelIfAdvertised as a, measurePerf as at, recordSessionUpdate as b, isAcpJsonRpcMessage as bt, setCurrentModelId as c, setPerfGauge as ct, setDesiredModelId as d, serializeSessionRecordForDisk as dt, SESSION_RECORD_SCHEMA as en, createAtomicWriteTempPath as et, syncAdvertisedModelState as f, normalizeRuntimeSessionId as ft, cloneSessionConversation as g, sessionEventActivePath as gt, cloneSessionAcpxState as h, sessionBaseDir$1 as ht, connectAndLoadSession as i, QueueProtocolError as in, incrementPerfCounter as it, REQUESTED_MODEL_UNSUPPORTED_REASONS as j, withInterrupt as jt, AcpClient as k, InterruptedError as kt, setDesiredConfigOption as l, startPerfTimer as lt, applyConfigOptionsToState as m, defaultSessionEventLog as mt, runPromptTurn as n, AgentSpawnError as nn, formatPerfMetric as nt, currentModelIdFromSetModelResponse as o, recordPerfDuration as ot, applyConfigOptionsToRecord as p, DEFAULT_EVENT_SEGMENT_MAX_BYTES as pt, isoNow$2 as q, EXIT_CODES as qt, withConnectedSession as r, QueueConnectionError as rn, getPerfMetricsSnapshot as rt, clearDesiredConfigOption as s, resetPerfMetrics as st, LiveSessionCheckpoint as t, AcpxOperationalError as tn, assertPersistedKeyPolicy as tt, setDesiredModeId as u, parseSessionRecord as ut, recordClientOperation as v, sessionEventSegmentPath as vt, persistSessionOptions as w, isPromptInput as wt, trimConversationForRuntime as x, parseJsonRpcErrorMessage as xt, recordPromptSubmission as y, extractSessionUpdateNotification as yt, splitCommandLine as z, exitCodeForOutputErrorCode as zt };
 
