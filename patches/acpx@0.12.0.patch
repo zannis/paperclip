@@ -1,7 +1,7 @@
 diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
 --- a/dist/live-checkpoint-ClPCSdrW.js
 +++ b/dist/live-checkpoint-ClPCSdrW.js
-@@ -1532,7 +1532,7 @@
+@@ -1532,7 +1532,7 @@ const ZED_TAG_KEYS = /* @__PURE__ */ new Set([
  	"RedactedThinking",
  	"ToolUse"
  ]);
@@ -10,7 +10,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
  	"agent_capabilities",
  	"messages.Agent.content.ToolUse.input",
-@@ -2557,7 +2557,7 @@
+@@ -2557,7 +2557,7 @@ function readCommandLineChar(state) {
  		escaping: false,
  		hasPart: true
  	};
@@ -19,7 +19,34 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  		current: state.current,
  		quote: state.quote,
  		escaping: true,
-@@ -2912,8 +2912,8 @@
+@@ -2832,6 +2832,8 @@ async function ensureCopilotAcpSupport(command) {
+ function buildClaudeCodeOptionsMeta(options, isolateUserSettings = false) {
+ 	const claudeCodeOptions = {};
+ 	if (isolateUserSettings) claudeCodeOptions.settingSources = resolveClaudeCodeSettingSources();
++	const plugins = resolveClaudeCodePlugins();
++	if (plugins) claudeCodeOptions.plugins = plugins;
+ 	if (options) assignClaudeCodeOptions(claudeCodeOptions, options);
+ 	const meta = {};
+ 	if (Object.keys(claudeCodeOptions).length > 0) meta.claudeCode = { options: claudeCodeOptions };
+@@ -2843,6 +2845,17 @@ function resolveClaudeCodeSettingSources(env = process.env) {
+ 	if (env.ACPX_CLAUDE_INCLUDE_USER_SETTINGS?.trim() === "1") return ["user", ...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ 	return [...CLAUDE_CODE_DEFAULT_SETTING_SOURCES];
+ }
++function resolveClaudeCodePlugins(env = process.env, platform = process.platform) {
++	const raw = env.ACPX_CLAUDE_PLUGIN_DIRS?.trim();
++	if (!raw) return;
++	const delimiter = platform === "win32" ? ";" : ":";
++	const paths = raw.split(delimiter).map((entry) => entry.trim()).filter((entry) => entry.length > 0);
++	if (paths.length === 0) return;
++	return paths.map((path$1) => ({
++		type: "local",
++		path: path$1
++	}));
++}
+ function assignClaudeCodeOptions(target, options) {
+ 	if (typeof options.model === "string" && options.model.trim().length > 0) target.model = options.model;
+ 	if (Array.isArray(options.allowedTools)) target.allowedTools = [...options.allowedTools];
+@@ -2912,8 +2925,8 @@ function promotePrefixedAuthEnvironment(env) {
  	}
  	return protectedKeys;
  }
@@ -30,7 +57,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  	const protectedAuthEnvKeys = promotePrefixedAuthEnvironment(env);
  	if (authCredentials) for (const [methodId, credential] of Object.entries(authCredentials)) {
  		addAuthCredentialEnvKeys(protectedAuthEnvKeys, methodId, credential);
-@@ -2955,10 +2955,10 @@
+@@ -2955,10 +2968,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
  	const configCredentials = authCredentials ?? {};
  	return configCredentials[methodId] ?? configCredentials[toEnvToken(methodId)];
  }
@@ -43,7 +70,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  		stdio: [
  			"pipe",
  			"pipe",
-@@ -3724,10 +3724,13 @@
+@@ -3724,10 +3737,13 @@ function resolveClientCapabilities(params) {
  		},
  		terminal: params.terminal
  	};
@@ -59,7 +86,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  	};
  }
  function isDevinRequestDiagnosticsMethod(method) {
-@@ -3957,9 +3960,26 @@
+@@ -3957,9 +3973,26 @@ var AcpClient = class {
  		this.lastAgentExit = void 0;
  		this.lastKnownPid = child.pid ?? void 0;
  		this.attachAgentLifecycleObservers(child);
@@ -86,7 +113,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  			if (!this.options.verbose) return;
  			process.stderr.write(chunk);
  		});
-@@ -3994,7 +4014,7 @@
+@@ -3994,7 +4027,7 @@ var AcpClient = class {
  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
@@ -95,7 +122,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  		};
  	}
  	logAgentLaunch(plan) {
-@@ -4729,6 +4749,9 @@
+@@ -4729,6 +4762,9 @@ var AcpClient = class {
  			return await this.filesystem.readTextFile(params);
  		} catch (error) {
  			this.recordPermissionError(params.sessionId, error);
@@ -105,7 +132,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  			throw error;
  		}
  	}
-@@ -6070,6 +6093,27 @@
+@@ -6070,6 +6106,27 @@ async function withConnectedSession(options) {
  //#region src/runtime/engine/prompt-turn.ts
  const SESSION_REPLY_IDLE_MS = 1e3;
  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
@@ -133,7 +160,7 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt);
-@@ -6079,6 +6123,20 @@
+@@ -6079,6 +6136,20 @@ async function runPromptTurn(params) {
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
@@ -155,7 +182,6 @@ diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
  		return {
  			stopReason: response.stopReason,
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
-index ccdbe5b032521518022223733049b8b38793473b..416bdaae1450c6e85b34afd154349770f9f7b0a9 100644
 --- a/dist/runtime.d.ts
 +++ b/dist/runtime.d.ts
 @@ -45,6 +45,7 @@ type AcpRuntimeTurnAttachment = {
@@ -194,7 +220,6 @@ index ccdbe5b032521518022223733049b8b38793473b..416bdaae1450c6e85b34afd154349770
      text: string;
      attachments?: AcpRuntimeTurnAttachment[];
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..e06bf4fdee534f3ef56be0387a2f5f8626e697ad 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -744,7 +744,8 @@ var AcpRuntimeManager = class {
@@ -232,7 +257,6 @@ index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..e06bf4fdee534f3ef56be0387a2f5f86
  			mode: input.mode,
  			sessionMode: state.mode,
 diff --git a/dist/session-options-jkYbBxGE.d.ts b/dist/session-options-jkYbBxGE.d.ts
-index 9d37f377fb6a0828e0d2bc5a48754f3aa71509a4..22dda59e0b7616a20ad45218913e5d8f884bae49 100644
 --- a/dist/session-options-jkYbBxGE.d.ts
 +++ b/dist/session-options-jkYbBxGE.d.ts
 @@ -84,6 +84,10 @@ type AcpClientOptions = {
