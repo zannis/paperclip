@@ -79,10 +79,10 @@ function localAdminActor() {
 
 describe("instance settings routes", () => {
   const routeModules = hoistModuleGraph(registerModuleMocks, async () => {
-    const [{ errorHandler }, { instanceSettingsRoutes }] = await Promise.all([
-      vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
-      vi.importActual<typeof import("../routes/instance-settings.js")>("../routes/instance-settings.js"),
-    ]);
+    const [{ errorHandler }, { instanceSettingsRoutes }] = [
+      await vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+      await vi.importActual<typeof import("../routes/instance-settings.js")>("../routes/instance-settings.js"),
+    ];
     return { errorHandler, instanceSettingsRoutes };
   });
 
