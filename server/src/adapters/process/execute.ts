@@ -9,6 +9,7 @@ import {
   parseObject,
   buildPaperclipEnv,
   buildRuntimeToolsEnv,
+  describeProcessExitFailure,
   isForbiddenConfigEnvKey,
   isPaperclipRuntimeEnvKey,
   buildInvocationEnvForLogs,
@@ -116,7 +117,14 @@ async function executeProcess(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode: proc.exitCode,
       signal: proc.signal,
       timedOut: false,
-      errorMessage: `Process exited with code ${proc.exitCode ?? -1}`,
+      // Carry the child's own last words into the message that becomes
+      // agents.errorReason. A bare exit code sends operators digging through
+      // the run log for a cause that was already printed.
+      errorMessage: describeProcessExitFailure({
+        exitCode: proc.exitCode,
+        stdout: proc.stdout,
+        stderr: proc.stderr,
+      }),
       resultJson: {
         stdout: proc.stdout,
         stderr: proc.stderr,
