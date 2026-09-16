@@ -90,13 +90,20 @@ is not a successful `verify`/`promote` cycle.
   workspace policy and project inference passed all 391 tests.
 - The direct server TypeScript check and UI build passed.
 - Full `pnpm build` and `pnpm -r typecheck` were attempted and stopped because
-  `cargo` is not installed. Filtering out the runner is not enough: the server
+  `cargo` was not on the build PATH. Filtering out the runner is not enough: the server
   build invokes it transitively.
 - `pnpm test:run` was started, then explicitly stopped before completion once
   the build prerequisite blocker was established. No full-suite pass is claimed.
 
-Install the required Rust toolchain and rerun the full build, recursive
+Make the required Rust toolchain available on PATH and rerun the full build, recursive
 typechecks and test runner before treating this first queue as deployable.
+
+On this host, the matching Rust/Cargo 1.97.1 toolchain is already installed.
+For build commands, use:
+
+```sh
+export PATH="/home/zannis/.rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin:$PATH"
+```
 
 ## Routine upstream update
 
