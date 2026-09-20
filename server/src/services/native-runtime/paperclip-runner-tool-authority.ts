@@ -241,7 +241,7 @@ export class PaperclipRunnerToolAuthority {
       if (!(this.binding.connectorAssignments ?? []).some((assignment) => assignment.tools.some((tool) => tool.name === call.tool))) throw forbidden("Connector tool is not available to this run");
       const { run } = await this.#boundContext();
       const snapshot = record(run.contextSnapshot);
-      if (isPaperclipExternalChatContractTurn(snapshot.paperclipWake) || String(snapshot.source ?? "").startsWith("chat:") || snapshot.paperclipExternalChatQuestionResponse) throw forbidden("Restricted chat runs cannot use email actions");
+      if (isPaperclipExternalChatContractTurn(snapshot.paperclipWake) || String(snapshot.source ?? "").startsWith("chat:") || snapshot.paperclipExternalChatQuestionResponse) throw forbidden("Restricted chat runs cannot use connector actions");
       return executeConnectorTool(this.db, this.binding, call.tool, call.arguments);
     }
     if (RUNTIME_CONNECTION_TOOL_DEFINITIONS.some((tool) => tool.name === call.tool)) {
