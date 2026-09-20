@@ -42,9 +42,10 @@ Local recovery references:
 | OpenAPI authorization annotations | Deployed baseline; upstream PR #12720 remains open |
 | Serialized mock imports | Deployed test corrections; upstream PR #12522 remains open |
 | Recovery fixtures and CI adaptations | Later deployment fixes retained in order |
-| Watchdog recovery audit | Deployed `fe297dbbc`; preserve its tested authority boundaries |
+| Watchdog recovery audit | Deployed `fe297dbbc`; preserve its tested authority boundaries. Its comment-only grant refused the run's own recovery once the restored owner checked the leaf out; `025a952b1` attributes that one transition and adds a deterministic comparator test |
 | Internal operation surfaces | Fork PR #3 merged into deployment, including its test import fix |
 | Remote MCP header policy | Fork PR #5 merged into deployment, plus reconnect deduplication |
+| TypeSafe connection | Fork PR #7 replayed onto the queue (19 topic commits); upstream PR paperclipai/paperclip#13713 open |
 
 ## Completed fixes and exclusions
 
@@ -104,6 +105,15 @@ For build commands, use:
 ```sh
 export PATH="/home/zannis/.rustup/toolchains/1.97.1-aarch64-unknown-linux-gnu/bin:$PATH"
 ```
+
+## Validation status (September 20, 2026)
+
+Two serialized server suites failed on the published queue and on `fe297dbbc`
+alone: `issue-watchdogs-routes` (12 tests, a race the warm test process loses)
+and `permissions-upgrade-boundary-routes` (a mock missing an export the retained
+patch imports). Both pass after `025a952b1`. On this queue tip: `pnpm -r
+typecheck` and `pnpm build` pass; the patch's seven watchdog, issue and
+interaction suites pass (491 tests); the full runner is left to fork CI.
 
 ## Routine upstream update
 
