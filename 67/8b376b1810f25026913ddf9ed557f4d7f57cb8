@@ -1,0 +1,25 @@
+server/src/__tests__/typesafe-api.test.ts
+  s_135b141e55ac3c::t_60dcf8c5c5e76a 67-82
+server/src/services/typesafe-api.ts
+  s_135b141e55ac3c::t_15cee40614b913 38-42,64-66,121-123
+doc/connections/TYPESAFE.md
+  s_135b141e55ac3c::t_babb91fce969e0 80
+server/src/routes/openapi.ts
+  s_135b141e55ac3c::t_70a54bb50cb78c 2239
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "678b376b1810f25026913ddf9ed557f4d7f57cb8",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
