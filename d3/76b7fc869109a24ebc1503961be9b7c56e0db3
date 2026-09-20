@@ -1,0 +1,30 @@
+server/src/services/tool-access.ts
+  s_135b141e55ac3c::t_ee176d5751a5c6 2834,2838
+server/src/services/typesafe-api.ts
+  s_135b141e55ac3c::t_ee176d5751a5c6 17-45,48-49,51-54,56-63,116-122,126-128,130
+server/src/__tests__/typesafe-api.test.ts
+  s_135b141e55ac3c::t_2a2a12dd5f5fd6 51-57,61,73-83
+server/src/services/connectors/typesafe.ts
+  s_135b141e55ac3c::t_ee176d5751a5c6 174
+server/src/__tests__/typesafe-connector.integration.test.ts
+  s_135b141e55ac3c::t_2a2a12dd5f5fd6 293,303-318
+  s_135b141e55ac3c::t_73dba9fa82fc05 319-320
+doc/connections/TYPESAFE.md
+  s_135b141e55ac3c::t_cec863b427ce2d 78-80,82-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d376b7fc869109a24ebc1503961be9b7c56e0db3",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
