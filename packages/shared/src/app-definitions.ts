@@ -11,6 +11,7 @@ export const CONNECTABLE_APP_SLUGS = new Set([
   "daytona",
   "unikraft",
   "cognee",
+  "typesafe",
   ...SELF_SERVE_MCP_CANDIDATES.map((entry) => entry.slug),
   "monday",
   "enterpret",
