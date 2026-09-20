@@ -2766,4 +2766,5 @@ export * from "./ai-connections.js";
 export * from "./types/email.js";
 export * from "./validators/email.js";
 export { configureRailwaySshSchema, type ConfigureRailwaySsh, type RailwaySshSetup } from "./railway-connection.js";
+export { typesafeAskSchema, type TypesafeAsk, type TypesafeAnswer, type TypesafeAskResult } from "./typesafe.js";
 export * from "./announcements.js";
