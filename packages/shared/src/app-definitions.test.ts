@@ -7,6 +7,7 @@ import {
   APP_STORE_DEFINITIONS,
   APP_STORE_HIDDEN_SLUGS,
   CONNECTABLE_APP_DEFINITIONS,
+  CONNECTABLE_APP_SLUGS,
   appSupportsCatalogSetup,
   getAvailableConnectionMethod,
   getAppDefinitionForUrl,
@@ -729,7 +730,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(59);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(60);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );
@@ -1149,4 +1150,27 @@ it("validates native pool catalog entries without inventing an authentication me
   expect(appDefinitionSchema.safeParse({ ...entry, aiConnectionRouter: undefined }).success).toBe(false);
   expect(appDefinitionSchema.safeParse({ ...entry, methods: APP_STORE_DEFINITIONS[0]!.methods }).success).toBe(false);
   expect(appDefinitionSchema.safeParse({ ...entry, categories: ["developer"] }).success).toBe(false);
+});
+
+describe("typesafe", () => {
+  const app = APP_DEFINITIONS.find((entry) => entry.slug === "typesafe");
+  it("is a connectable, store-visible API-key tool app", () => {
+    expect(app).toBeTruthy();
+    expect(CONNECTABLE_APP_SLUGS).toContain("typesafe");
+    expect(APP_STORE_DEFINITIONS.some((entry) => entry.slug === "typesafe")).toBe(true);
+    expect(app!.methods).toHaveLength(1);
+    const [method] = app!.methods;
+    expect(method).toMatchObject({
+      key: "api-key",
+      transport: "rest_api",
+      auth: "api_key",
+      riskTier: "S2",
+      keyPlacement: { location: "header", name: "Authorization", prefix: "Bearer " },
+    });
+    expect(method.provider).toBeUndefined();
+    expect(method.credentialFields?.map((field) => field.key)).toEqual(["apiKey"]);
+    expect(method.extensionFields).toEqual([
+      expect.objectContaining({ key: "model", defaultValue: "jev-latest", advanced: true }),
+    ]);
+  });
 });
