@@ -7,6 +7,7 @@ import {
   APP_STORE_DEFINITIONS,
   APP_STORE_HIDDEN_SLUGS,
   CONNECTABLE_APP_DEFINITIONS,
+  CONNECTABLE_APP_SLUGS,
   appSupportsCatalogSetup,
   getAvailableConnectionMethod,
   getRecommendedConnectionMethod,
@@ -686,7 +687,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(46);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(47);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );
@@ -972,5 +973,28 @@ describe("AppDefinition catalog", () => {
           if (field.required && field.type !== "checkbox")
             expect(field.placeholder).toBeTruthy();
       }
+  });
+});
+
+describe("typesafe", () => {
+  const app = APP_DEFINITIONS.find((entry) => entry.slug === "typesafe");
+  it("is a connectable, store-visible API-key tool app", () => {
+    expect(app).toBeTruthy();
+    expect(CONNECTABLE_APP_SLUGS).toContain("typesafe");
+    expect(APP_STORE_DEFINITIONS.some((entry) => entry.slug === "typesafe")).toBe(true);
+    expect(app!.methods).toHaveLength(1);
+    const [method] = app!.methods;
+    expect(method).toMatchObject({
+      key: "api-key",
+      transport: "rest_api",
+      auth: "api_key",
+      riskTier: "S2",
+      keyPlacement: { location: "header", name: "Authorization", prefix: "Bearer " },
+    });
+    expect(method.provider).toBeUndefined();
+    expect(method.credentialFields?.map((field) => field.key)).toEqual(["apiKey"]);
+    expect(method.extensionFields).toEqual([
+      expect.objectContaining({ key: "model", defaultValue: "jev-latest", advanced: true }),
+    ]);
   });
 });
