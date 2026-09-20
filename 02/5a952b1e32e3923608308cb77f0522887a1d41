@@ -1,0 +1,23 @@
+server/src/__tests__/permissions-upgrade-boundary-routes.test.ts
+  s_135b141e55ac3c::t_96c29d0f2ef8bb 33-34
+server/src/__tests__/task-watchdogs-attribution.test.ts
+  s_135b141e55ac3c::t_9ccf191ef5830e 1-72
+server/src/services/task-watchdogs.ts
+  s_135b141e55ac3c::t_36c99f045c346c 597-598,634-640,2421-2432
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "025a952b1e32e3923608308cb77f0522887a1d41",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
