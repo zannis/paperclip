@@ -1,0 +1,22 @@
+ui/storybook/stories/typesafe-connect-flow.stories.tsx
+  s_135b141e55ac3c::t_47d2d023713cde 686
+  s_135b141e55ac3c::t_7c60e7a8c159af 695-697
+  s_135b141e55ac3c::t_0284777a0d6c96 1-684,687-694,698-787
+  s_135b141e55ac3c::t_3a78b9b89961c0 685
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a311b2668675465ecccc98dfbff2f781e6a546a7",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
