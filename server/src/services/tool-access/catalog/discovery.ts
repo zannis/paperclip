@@ -22,6 +22,7 @@ import { badRequest, HttpError, unprocessable } from "../../../errors.js";
 import { isSlackMcpAccessDisabledResponse } from "../../slack-mcp-error.js";
 import { initializeMcpHttpSession, McpHttpInitializationError, getMcpHttpSession, forgetMcpHttpSessions, readMcpHttpResponse, mcpHttpRequestHeaders } from "../../mcp-http.js";
 import { secretService } from "../../secrets.js";
+import { typesafeApi } from "../../typesafe-api.js";
 import { agentmailApi } from "../../agentmail-api.js";
 import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, RailwayError } from "../../railway.js";
 import { isPaperclipCloudConnectorStrategy } from "../../paperclip-cloud-connector.js";
@@ -45,6 +46,19 @@ export function isAgentMailConnection(connection: typeof toolConnections.$inferS
   return connection.transport === "rest_api" && connection.config.provider === "agentmail";
 }
 
+export const TYPESAFE_GALLERY_KEY = "typesafe";
+export const TYPESAFE_HEALTH_MESSAGE = "TypeSafe API key is connected.";
+
+export function isTypesafeConnection(connection: {
+  transport: string;
+  config: Record<string, unknown>;
+}) {
+  return (
+    connection.transport === "rest_api" &&
+    connection.config.sourceTemplateKey === TYPESAFE_GALLERY_KEY
+  );
+}
+
 type DiscoveryDependencies = {
   now: () => Date;
   audit: ToolAccessAudit;
@@ -57,9 +71,11 @@ type DiscoveryDependencies = {
   resolveOAuthGrantSecret: OAuthCredentialStore["resolveOAuthGrantSecret"];
   discoverOAuthEndpoints: ReturnType<typeof createOAuthDiscovery>["discoverOAuthEndpoints"];
   localTools(connection: typeof toolConnections.$inferSelect): Promise<McpToolDescriptor[]>;
+  /** Test seam for TypeSafe without live vendor traffic. */
+  typesafeFetch?: typeof fetch;
 };
 
-export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, credentials, vercel, vercelConnect, setupPolicy, requestRemoteHttpEndpoint, resolveOAuthGrantSecret, discoverOAuthEndpoints, localTools }: DiscoveryDependencies) {
+export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, credentials, vercel, vercelConnect, setupPolicy, requestRemoteHttpEndpoint, resolveOAuthGrantSecret, discoverOAuthEndpoints, localTools, typesafeFetch }: DiscoveryDependencies) {
   const { vaultGrantForConnection, resolveCredentialHeaders, resolvedRemoteEndpoint } = credentials;
   const { resolveVercelCredentialHeaders, vercelGrantForConnection } = vercel;
   const { assertConnectorConnectionSetupEnabled } = setupPolicy;
@@ -422,6 +438,34 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
     await agentmailApi(key).whoami();
   }
 
+  async function validateTypesafeConnection(
+    connection: typeof toolConnections.$inferSelect,
+  ) {
+    const configPath = "credentials.apiKey";
+    const ref = connection.credentialSecretRefs.find(
+      (candidate) => candidate.configPath === configPath,
+    );
+    if (!ref) {
+      throw unprocessable("Reconnect TypeSafe to restore its API key", {
+        code: "missing_secret",
+      });
+    }
+    const key = await secrets.resolveSecretValue(
+      connection.companyId,
+      ref.secretId,
+      ref.versionSelector ?? "latest",
+      {
+        consumerType: "tool_connection",
+        consumerId: connection.id,
+        configPath,
+        actorType: "system",
+        actorId: null,
+      },
+    );
+    // The list holds aliases only, so it proves the key, not the configured model.
+    await typesafeApi(key, typesafeFetch).listModels();
+  }
+
   async function discoverTools(
     connection: typeof toolConnections.$inferSelect,
     credentialHeaders?: Record<string, string>,
@@ -446,6 +490,10 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       await validateAgentMailConnection(connection);
       return [];
     }
+    if (isTypesafeConnection(connection)) {
+      await validateTypesafeConnection(connection);
+      return [];
+    }
     if (connection.transport === "mcp_remote")
       return remoteTools(connection, credentialHeaders, actor, undefined, unavailableServices);
     if (connection.transport !== "local_stdio") {
@@ -455,6 +503,6 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
     await validateCogneeConnection(connection, actor);
     return localTools(connection);
   }
-  return { remoteTools, validateCogneeConnection, validateAgentMailConnection, discoverTools };
+  return { remoteTools, validateCogneeConnection, validateAgentMailConnection, validateTypesafeConnection, discoverTools };
 }
 export type ToolCatalogDiscovery = ReturnType<typeof createToolCatalogDiscovery>;

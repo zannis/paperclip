@@ -9,7 +9,8 @@ import { toCatalogEntry } from "./tool-access/catalog/projection.js";
 import { toConnection, toConnectionInstall } from "./tool-access/connections/projection.js";
 import { isOAuthEndpointRejection } from "./tool-access/catalog/failures.js";
 import { createCatalogDefaultAccess, toPolicy } from "./tool-access/catalog/default-access.js";
-import { createToolCatalogDiscovery } from "./tool-access/catalog/discovery.js";
+import { createToolCatalogDiscovery, isTypesafeConnection, TYPESAFE_GALLERY_KEY } from "./tool-access/catalog/discovery.js";
+export { isTypesafeConnection, TYPESAFE_GALLERY_KEY } from "./tool-access/catalog/discovery.js";
 import { createConnectionHealth } from "./tool-access/catalog/health.js";
 import { createToolAppAttention } from "./tool-access/catalog/attention.js";
 import { createToolCatalogPublication } from "./tool-access/catalog/publication.js";
@@ -162,6 +163,8 @@ type ToolAccessServiceOptions = {
   paperclipIdGmailConnector?: PaperclipCloudConnector | null;
   /** Test seam for Vercel Connect without live vendor traffic. */
   vercelConnectClient?: VercelConnectClient | null;
+  /** Test seam for TypeSafe without live vendor traffic. */
+  typesafeFetch?: typeof fetch;
 };
 
 const GOOGLE_SHEETS_SPREADSHEET_SCHEMA = {
@@ -793,7 +796,7 @@ export function toolAccessService(
   const { ensureRuntimeSlot } = runtimeSlots;
   const defaultCatalogAccess = createCatalogDefaultAccess(db);
   const { enableCatalogEntriesByDefault, upsertAskFirstPolicies } = defaultCatalogAccess;
-  const catalogDiscovery = createToolCatalogDiscovery(db, { now, audit, secrets, credentials: credentialAccess, vercel: vercelCredentials, vercelConnect, setupPolicy, requestRemoteHttpEndpoint, resolveOAuthGrantSecret, discoverOAuthEndpoints, localTools });
+  const catalogDiscovery = createToolCatalogDiscovery(db, { now, audit, secrets, credentials: credentialAccess, vercel: vercelCredentials, vercelConnect, setupPolicy, requestRemoteHttpEndpoint, resolveOAuthGrantSecret, discoverOAuthEndpoints, localTools, typesafeFetch: options.typesafeFetch });
   const connectionHealth = createConnectionHealth(db, { now, audit, getConnectionRow, discovery: catalogDiscovery, setupPolicy, resolveCredentialHeaders, refreshManagedGitHubGrantAccess, ensureRuntimeSlot, stdioTemplateId });
   const { updateConnectionHealth, checkConnectionHealth, sweepConnectionHealth } = connectionHealth;
   const refreshCatalog = createToolCatalogPublication(db, { now, audit, getConnectionRow, discoverTools: catalogDiscovery.discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, ensureRuntimeSlot, enableCatalogEntriesByDefault });
@@ -2840,6 +2843,23 @@ export function toolAccessService(
         // later fails: another retry may already be using the committed grant.
         personalPublicSetupEstablished = true;
       }
+      if (galleryEntry?.slug === TYPESAFE_GALLERY_KEY) {
+        const [application] = await db
+          .select()
+          .from(toolApplications)
+          .where(eq(toolApplications.id, applicationRow.id));
+        return {
+          connectionId: health.connection.id,
+          application: toApplication(application),
+          connection: health.connection,
+          catalog: [],
+          actions: { readOnly: [], canMakeChanges: [] },
+          suggestedDefaults: recommendedDefaultsForApp(
+            galleryEntry,
+            method?.key,
+          ),
+        };
+      }
       const restoreDraftDefaults = Boolean(revivedConnectionPrevious);
       const refreshOptions = {
         enableAllByDefault: restoreDraftDefaults && !remoteMcpConnector,
@@ -3486,6 +3506,38 @@ export function toolAccessService(
         .update(toolApplications)
         .set({ status: "active", updatedAt: new Date() })
         .where(eq(toolApplications.id, connection.applicationId));
+      if (isTypesafeConnection(connection)) {
+        // Connector tools resolve access from installs; only OAuth setup creates them.
+        if (!input.preserveExistingAccess)
+          await tx
+            .delete(toolConnectionInstalls)
+            .where(
+              and(
+                eq(toolConnectionInstalls.companyId, companyId),
+                eq(toolConnectionInstalls.connectionId, connection.id),
+              ),
+            );
+        await tx
+          .insert(toolConnectionInstalls)
+          .values(
+            (input.access === "all_agents"
+              ? [{ targetType: "company" as const, targetId: companyId }]
+              : [...new Set(input.access.agentIds)].map((agentId) => ({
+                  targetType: "agent" as const,
+                  targetId: agentId,
+                }))
+            ).map((target) => ({
+              ...target,
+              companyId,
+              connectionId: connection.id,
+              createdByAgentId:
+                actor?.actorType === "agent" ? (actor.actorId ?? null) : null,
+              createdByUserId:
+                actor?.actorType === "user" ? (actor.actorId ?? null) : null,
+            })),
+          )
+          .onConflictDoNothing();
+      }
 
       return { profileId, profileBindings, policies, updatedConnection };
     });

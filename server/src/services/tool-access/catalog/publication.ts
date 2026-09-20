@@ -21,7 +21,7 @@ import type { ConnectionCredentialAccess } from "../credential-access.js";
 import type { ConnectionSetupPolicy } from "../connections/setup-policy.js";
 import type { CatalogDefaultAccess } from "./default-access.js";
 import type { ConnectionHealth } from "./health.js";
-import { isAgentMailConnection, type ToolCatalogDiscovery } from "./discovery.js";
+import { isAgentMailConnection, isTypesafeConnection, TYPESAFE_HEALTH_MESSAGE, type ToolCatalogDiscovery } from "./discovery.js";
 import { classifyRisk, shouldQuarantineNewEntries, isGoogleWorkspaceToolAllowed, type McpToolDescriptor } from "./descriptors.js";
 import { toConnection } from "../connections/projection.js";
 import { toCatalogEntry } from "./projection.js";
@@ -277,6 +277,8 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
           ? `Actions refreshed. Google services unavailable: ${unavailableServices.join(", ")}. Other services remain available; retry refreshing actions.`
           : isAgentMailConnection(connection)
           ? "AgentMail API key is connected."
+          : isTypesafeConnection(connection)
+          ? TYPESAFE_HEALTH_MESSAGE
           : "Tool catalog refreshed.",
         healthCheckedAt: refreshedAt,
         lastHealthAt: refreshedAt,
