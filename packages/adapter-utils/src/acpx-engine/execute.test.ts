@@ -6491,6 +6491,39 @@ describe("ACPX engine run lifecycle corrections (F3: one teardown error policy)"
     expect(result.errorMessage).not.toContain("close boom");
   });
 
+  it("classifies a turn killed by an overloaded provider as transient upstream", async () => {
+    const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    stubBridges();
+    const execute = createAcpxEngineExecutor({
+      warmHandles: new Map(),
+      stagedRuntimes: new Map(),
+      stagingLocks: new Map(),
+      createRuntime: () =>
+        ({
+          ensureSession: async () => okHandle,
+          startTurn: () => ({
+            events: (async function* () {
+              throw new Error("API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}");
+            })(),
+            result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+            cancel: async () => {},
+          }),
+          close: async () => {},
+        }) as never,
+    });
+
+    const result = await execute({
+      runId: "transient-529",
+      ...remoteArgs(stateDir, localCwd, executionTarget),
+    } as never);
+
+    // Bare acpx_turn_failed earns one immediate retry inside the same overload
+    // window; the transient code puts it on the backoff ladder instead.
+    expect(result.exitCode).toBe(1);
+    expect(result.errorCode).toBe("acpx_transient_upstream");
+    expect(result.errorMeta).toMatchObject({ category: "transient_upstream", phase: "turn" });
+  });
+
   it("test_flush_child_stderr_runs_on_every_exit_path", async () => {
     const writes: string[] = [];
     const spy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {

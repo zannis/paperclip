@@ -10748,8 +10748,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         runErrorCode: "adapter_failed",
         runError: "ssh: connection reset",
       });
-    // Backfill two more consecutive failed continuation retries so the cap (3) is reached.
+    // Backfill five more consecutive failed continuation retries so the transient cap (6) is reached.
     const olderTimestamps = [
+      new Date("2026-03-18T23:35:00.000Z"),
+      new Date("2026-03-18T23:40:00.000Z"),
+      new Date("2026-03-18T23:45:00.000Z"),
       new Date("2026-03-18T23:50:00.000Z"),
       new Date("2026-03-18T23:55:00.000Z"),
     ];
@@ -10805,7 +10808,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(issueComments.issueId, issueId));
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("retried continuation");
-    expect(comments[0]?.body).toContain("3× attempts");
+    expect(comments[0]?.body).toContain("6× attempts");
     expect(commentMetadataRows(comments[0])).toContainEqual({
       type: "key_value",
       label: "Failure code",

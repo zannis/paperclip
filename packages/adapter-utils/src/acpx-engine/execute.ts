@@ -3296,6 +3296,10 @@ function describeErrorDiagnostics(err: unknown): {
   return { errorName, acpCode, causeMessage, retryable, stackPreview };
 }
 
+// Mirrors adapter-claude-local's CLAUDE_TRANSIENT_UPSTREAM_RE.
+const ACPX_TRANSIENT_UPSTREAM_RE =
+  /(?:\b429\b|\b503\b|\b529\b|overloaded(?:_error)?|server\s+overloaded|rate[-\s]?limit(?:ed)?|rate_limit_error|too\s+many\s+requests|service\s+unavailable|throttl(?:ed|ing))/i;
+
 function classifyError(
   err: unknown,
   phase?: AcpxExecutionPhase,
@@ -3334,6 +3338,18 @@ function classifyError(
     return {
       errorCode: "acpx_auth_required",
       errorMeta: { category: "auth", ...baseMeta },
+    };
+  }
+  // A turn killed by a transient provider condition must carry a transient
+  // code: as bare acpx_turn_failed it gets one immediate retry inside the same
+  // overload window and the issue parks blocked with its work dropped.
+  if (
+    ACPX_TRANSIENT_UPSTREAM_RE.test(message)
+    || (causeMessage != null && ACPX_TRANSIENT_UPSTREAM_RE.test(causeMessage))
+  ) {
+    return {
+      errorCode: "acpx_transient_upstream",
+      errorMeta: { category: "transient_upstream", ...baseMeta },
     };
   }
   const phaseCode = (() => {

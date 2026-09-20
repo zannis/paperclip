@@ -2012,6 +2012,20 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     );
   });
 
+  it("reads acpx_transient_upstream as the transient family and schedules a bounded retry", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const runId = randomUUID();
+    const now = new Date(2026, 3, 22, 10, 0, 0);
+
+    // No persisted errorFamily: the family has to come from the error code.
+    await seedRetryFixture({ runId, companyId, agentId, now, errorCode: "acpx_transient_upstream", errorFamily: null });
+
+    const scheduled = await heartbeat.scheduleBoundedRetry(runId, { now, random: () => 0.5 });
+
+    expect(scheduled.outcome).toBe("scheduled");
+  });
+
   it("schedules bounded retries for claude_transient_upstream and honors its retry-not-before hint", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

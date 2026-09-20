@@ -1050,6 +1050,7 @@ function readHeartbeatRunErrorFamily(
   if (
     run.errorCode === "codex_transient_upstream" ||
     run.errorCode === "claude_transient_upstream" ||
+    run.errorCode === "acpx_transient_upstream" ||
     run.errorCode === "codex_harness_crash"
   ) {
     return "transient_upstream";
