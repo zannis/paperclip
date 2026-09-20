@@ -1,0 +1,21 @@
+doc/connections/TYPESAFE.md
+  s_135b141e55ac3c::t_c7974eea08cd99 1-109
+doc/connections/CONNECTOR-PLAYBOOK.md
+  s_135b141e55ac3c::t_2c473abc73500c 452,465-467
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "43e94239aaf9e824207560ef6bc091a31028ddf1",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
