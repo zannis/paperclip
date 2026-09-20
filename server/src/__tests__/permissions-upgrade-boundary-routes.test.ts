@@ -30,7 +30,8 @@ vi.hoisted(() => {
   process.env.PAPERCLIP_IN_WORKTREE = "false";
 });
 
-vi.mock("../services/issue-assignment-wakeup.js", () => ({
+vi.mock("../services/issue-assignment-wakeup.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/issue-assignment-wakeup.js")>()),
   queueIssueAssignmentWakeup: vi.fn(),
 }));
 

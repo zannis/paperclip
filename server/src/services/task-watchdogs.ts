@@ -594,6 +594,8 @@ export function unattributedSubtreeChanges(input: {
   next: TaskWatchdogStopSnapshot;
   nextMaterialByIssueId: TaskWatchdogMaterialByIssueId;
   parentByIssueId: Map<string, string | null>;
+  /** Issues whose every live path this run's own wake started. */
+  ownedLiveIssueIds?: ReadonlySet<string>;
 }): string[] {
   const declaredByIssueId = mergeDeclaredWrites(input.ledger.mutations ?? []);
   const baselineMaterial = input.ledger.baselineMaterialByIssueId ?? {};
@@ -629,7 +631,13 @@ export function unattributedSubtreeChanges(input: {
           declared.resolvedInteractionIds,
         );
       }
-      if (canonicalJson(expected) !== canonicalJson(leaf)) unattributed.add(issueId);
+      if (canonicalJson(expected) !== canonicalJson(leaf)) {
+        // The path this run's wake started checks the leaf out on arrival. That
+        // one transition is the run's own doing; anything beyond it is not.
+        const checkedOutByOwnPath = input.ownedLiveIssueIds?.has(issueId) === true
+          && canonicalJson({ ...expected, status: "in_progress" }) === canonicalJson(leaf);
+        if (!checkedOutByOwnPath) unattributed.add(issueId);
+      }
       continue;
     }
     // The issue did not exist in the watched subtree at baseline, so there is
@@ -2401,12 +2409,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       return { allowed: false as const, reason: staleReason, classification };
     }
 
-    const unattributedIssueIds = unattributedSubtreeChanges({
-      ledger,
-      next: classification.stopSnapshot,
-      nextMaterialByIssueId: classification.materialByIssueId,
-      parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
-    });
     const unattributedLiveness = classification.state === "live"
       ? unattributedLiveIssueIds(
         scope.runId ?? null,
@@ -2416,6 +2418,18 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       : classification.state === "pending_first_run"
       ? unattributedPendingIssueIds(ledger, classification.pendingIssueIds)
       : [];
+    const ownedLiveIssueIds = new Set(
+      classification.state === "live"
+        ? classification.liveIssueIds.filter((issueId) => !unattributedLiveness.includes(issueId))
+        : [],
+    );
+    const unattributedIssueIds = unattributedSubtreeChanges({
+      ledger,
+      next: classification.stopSnapshot,
+      nextMaterialByIssueId: classification.materialByIssueId,
+      parentByIssueId: new Map(input.issues.map((issue) => [issue.id, issue.parentId ?? null])),
+      ownedLiveIssueIds,
+    });
     if (unattributedIssueIds.length > 0 || unattributedLiveness.length > 0) {
       return {
         allowed: false as const,
