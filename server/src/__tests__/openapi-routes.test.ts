@@ -91,6 +91,7 @@ const apiPrefixes: Record<string, string> = {
   "tool-access.ts": "/api",
   "voice-sessions.ts": "/api",
   "tool-gateway.ts": "/api",
+  "typesafe.ts": "/api",
   "user-profiles.ts": "/api",
 };
 
