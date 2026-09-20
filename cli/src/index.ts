@@ -1,5 +1,6 @@
 import { registerEmailCommands } from "./commands/client/email.js";
 import { registerMcpCommands } from "./commands/mcp.js";
+import { registerTypesafeCommands } from "./commands/client/typesafe.js";
 import { Command } from "commander";
 import { warnIfUnsupportedNodeVersion } from "@paperclipai/shared/node-version";
 import { onboard } from "./commands/onboard.js";
@@ -236,6 +237,7 @@ registerContextCommands(program);
 registerConnectCommand(program);
 registerConnectionIntentCommands(program);
 registerEmailCommands(program);
+registerTypesafeCommands(program);
 registerCompanyCommands(program);
 registerIssueCommands(program);
 registerAgentCommands(program);
