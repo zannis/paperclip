@@ -1,0 +1,35 @@
+server/src/services/connector-runtime.ts
+  s_135b141e55ac3c::t_956c91403dc3b3 19-23,90-107
+  s_135b141e55ac3c::t_d05146db78a586 108
+server/src/services/tool-access.ts
+  s_135b141e55ac3c::t_f1d9789a323490 208-213
+server/src/__tests__/typesafe-connector.integration.test.ts
+  s_135b141e55ac3c::t_3736e187732b5d 307
+  s_135b141e55ac3c::t_1f363d02a51e93 1-306,308-320,322-351
+  s_135b141e55ac3c::t_50fd2ee4d631e9 321
+server/src/services/typesafe-api.ts
+  s_135b141e55ac3c::t_f1d9789a323490 5-16
+server/src/services/native-runtime/paperclip-runner-tool-authority.ts
+  s_135b141e55ac3c::t_956c91403dc3b3 244
+skills/typesafe/SKILL.md
+  s_135b141e55ac3c::t_8b13320241ffdf 1-120
+server/src/services/connectors/typesafe.ts
+  s_135b141e55ac3c::t_50fd2ee4d631e9 196-197
+  s_135b141e55ac3c::t_1f388d1a69b1b0 1-195,198-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0e4eb7730f64255bf9b1ba2bb0323cb7ab43dccf",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
