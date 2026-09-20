@@ -1,0 +1,31 @@
+doc/ONLYBOTS-PATCHES.md
+  s_135b141e55ac3c::t_da6bb90c946bc8 49
+packages/adapter-utils/src/acpx-engine/execute.test.ts
+  s_135b141e55ac3c::t_048f0a48adf8cd 6494-6526
+packages/adapter-utils/src/acpx-engine/execute.ts
+  s_135b141e55ac3c::t_1cdc70127fdc8e 3299-3302,3343-3354
+server/src/__tests__/heartbeat-retry-scheduling.test.ts
+  s_135b141e55ac3c::t_238041be8db970 2015-2028
+server/src/__tests__/recovery-transient-classification.test.ts
+  s_135b141e55ac3c::t_020036d77ddd7b 1-25
+server/src/services/heartbeat.ts
+  s_135b141e55ac3c::t_f9514296e68991 1053
+server/src/services/recovery/service.ts
+  s_135b141e55ac3c::t_2601d51a91a1b7 492,531-533
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "4de3f9617bb9399f7a819891581b9fc67110ce4d",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
