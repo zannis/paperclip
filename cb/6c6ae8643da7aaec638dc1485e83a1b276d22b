@@ -1,0 +1,37 @@
+server/src/__tests__/typesafe-routes.test.ts
+  s_135b141e55ac3c::t_527afe2cebf8c7 116-150,153,179,204
+server/src/routes/typesafe.ts
+  s_135b141e55ac3c::t_657f3c050c0eaf 2,4,23-38,45
+server/src/services/connectors/typesafe.ts
+  s_135b141e55ac3c::t_657f3c050c0eaf 1,8,92-93,147-174,176-182,225
+server/src/services/tool-access.ts
+  s_135b141e55ac3c::t_924306ad187caf 13877-13884,13952-13957
+server/src/__tests__/typesafe-connector.integration.test.ts
+  s_135b141e55ac3c::t_527afe2cebf8c7 10-11,21,203-271
+  s_135b141e55ac3c::t_2ebf7869971252 272
+server/src/__tests__/typesafe-connection.test.ts
+  s_135b141e55ac3c::t_924306ad187caf 10,179-203
+  s_135b141e55ac3c::t_27a532b6b5476b 204-206
+doc/connections/TYPESAFE.md
+  s_135b141e55ac3c::t_811fac8803eab3 53-54,56-64,68-70
+server/src/routes/openapi.ts
+  s_135b141e55ac3c::t_a93f60003926cd 2226
+skills/typesafe/SKILL.md
+  s_135b141e55ac3c::t_6cf7c2c9782c74 117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "cb6c6ae8643da7aaec638dc1485e83a1b276d22b",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
