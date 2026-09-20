@@ -13,6 +13,7 @@ import {
   emailEndpointSetupSchema,
   emailConnectionSchema,
   emailSendSchema,
+  typesafeAskSchema,
   // Agent
   createAgentSchema,
   createAgentHireSchema,
@@ -2215,6 +2216,26 @@ for (const [method, path, summary, body, success] of [
     responses: { [success]: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
   });
 }
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/typesafe/ask",
+  tags: ["TypeSafe"],
+  summary: "Ask TypeSafe typed questions about a state",
+  description:
+    "Agent only. The agent needs an active TypeSafe connection installed for the company or for that agent. The state and questions are sent to TypeSafe. Paperclip does not retry 429 or 503.",
+  request: {
+    params: z.object({ companyId: z.string().uuid() }),
+    body: jsonBody(typesafeAskSchema),
+  },
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    422: r.unprocessable,
+  },
+});
 
 // ─── Chat Channels ─────────────────────────────────────────────────────────
 
