@@ -22,7 +22,7 @@ import { badRequest, HttpError, unprocessable } from "../../../errors.js";
 import { isSlackMcpAccessDisabledResponse } from "../../slack-mcp-error.js";
 import { initializeMcpHttpSession, McpHttpInitializationError, getMcpHttpSession, forgetMcpHttpSessions, readMcpHttpResponse, mcpHttpRequestHeaders } from "../../mcp-http.js";
 import { secretService } from "../../secrets.js";
-import { typesafeApi } from "../../typesafe-api.js";
+import { isTypesafeConnection, typesafeApi } from "../../typesafe-api.js";
 import { agentmailApi } from "../../agentmail-api.js";
 import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, RailwayError } from "../../railway.js";
 import { isPaperclipCloudConnectorStrategy } from "../../paperclip-cloud-connector.js";
@@ -46,18 +46,7 @@ export function isAgentMailConnection(connection: typeof toolConnections.$inferS
   return connection.transport === "rest_api" && connection.config.provider === "agentmail";
 }
 
-export const TYPESAFE_GALLERY_KEY = "typesafe";
 export const TYPESAFE_HEALTH_MESSAGE = "TypeSafe API key is connected.";
-
-export function isTypesafeConnection(connection: {
-  transport: string;
-  config: Record<string, unknown>;
-}) {
-  return (
-    connection.transport === "rest_api" &&
-    connection.config.sourceTemplateKey === TYPESAFE_GALLERY_KEY
-  );
-}
 
 type DiscoveryDependencies = {
   now: () => Date;

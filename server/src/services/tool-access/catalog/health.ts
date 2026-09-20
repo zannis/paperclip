@@ -16,7 +16,8 @@ import type { ToolAccessAudit } from "../audit.js";
 import type { ConnectionCredentialAccess } from "../credential-access.js";
 import type { ConnectionSetupPolicy } from "../connections/setup-policy.js";
 import { toConnection } from "../connections/projection.js";
-import { isAgentMailConnection, isTypesafeConnection, TYPESAFE_HEALTH_MESSAGE, type ToolCatalogDiscovery } from "./discovery.js";
+import { isAgentMailConnection, TYPESAFE_HEALTH_MESSAGE, type ToolCatalogDiscovery } from "./discovery.js";
+import { isTypesafeConnection } from "../../typesafe-api.js";
 import { healthFailureHttpStatus, sanitizeHttpFailure, unsupportedToolConnectionTransport } from "./failures.js";
 function asRecord(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value))
