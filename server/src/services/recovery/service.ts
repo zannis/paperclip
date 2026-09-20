@@ -491,6 +491,7 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
   "codex_transient_upstream",
   "codex_harness_crash",
   "claude_transient_upstream",
+  "acpx_transient_upstream",
   "provider_quota",
   "timeout",
 ]);
@@ -529,7 +530,9 @@ const CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE =
   "issue_continuation_waiting_on_review";
 const INTERACTION_CONTINUATION_REQUEUE_MAX_ATTEMPTS = 3;
 
-const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 3;
+// Gaps are base * 2^(n-1), so 6 attempts span ~1h (60s..32m): a real 529
+// storm outlasts the ~7 minutes 3 attempts gave.
+const CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS = 6;
 const CONTINUATION_RECOVERY_DEFAULT_MAX_ATTEMPTS = 1;
 const CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS = 60_000;
 export const PROVIDER_QUOTA_RECOVERY_DEFAULT_BACKOFF_MS = 60 * 60 * 1000;
