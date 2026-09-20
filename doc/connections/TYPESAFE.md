@@ -143,7 +143,7 @@ external. No key, state or answer text is recorded here.
 Not covered by this run: the setup screens against the real provider in a
 browser, and the 429 and 529 paths, which the provider did not produce. The
 setup screens are covered by `AppsConnect.test.tsx` and by the interactive
-stories in `ui/storybook/stories/typesafe-connect-flow.stories.tsx`.
+stories in `ui/storybook/stories/connection-setup/typesafe-connect-flow.stories.tsx`.
 
 One difference from the provider documentation: the API accepts a `score` with
 one level. Paperclip keeps the documented minimum of two.
