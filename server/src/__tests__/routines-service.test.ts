@@ -39,6 +39,7 @@ import { secretService } from "../services/secrets.ts";
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 const originalSecretsProviderEnv = process.env.PAPERCLIP_SECRETS_PROVIDER;
+const originalPaperclipApiUrlEnv = process.env.PAPERCLIP_API_URL;
 
 if (!embeddedPostgresSupport.supported) {
   console.warn(
@@ -51,6 +52,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
+    process.env.PAPERCLIP_API_URL = "http://localhost:3100";
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-routines-service-");
     db = createDb(tempDb.connectionString);
   }, 20_000);
@@ -86,6 +88,11 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+    if (originalPaperclipApiUrlEnv === undefined) {
+      delete process.env.PAPERCLIP_API_URL;
+    } else {
+      process.env.PAPERCLIP_API_URL = originalPaperclipApiUrlEnv;
+    }
   });
 
   async function seedFixture(opts?: {
@@ -754,15 +761,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           },
         },
         runtimeConfig: {
-          modelProfiles: {
-            cheap: {
-              adapterConfig: {
-                env: {
-                  ROUTINE_ASSIGNEE_RUNTIME_SECRET: { type: "plain", value: sentinelSecret },
-                },
-              },
-            },
-          },
+          privateRuntimeSetting: { token: sentinelSecret },
         },
       })
       .where(eq(agents.id, agentId));
@@ -2464,6 +2463,21 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(oldRuns).toMatchObject([{ status: "skipped", failureReason: "worktree_execution_cutoff", linkedIssueId: null }]);
     const newRuns = await db.select().from(routineRuns).where(eq(routineRuns.routineId, newRoutine.id));
     expect(newRuns).toMatchObject([{ status: "issue_created" }]);
+  });
+
+  it("excludes removed schedules from dispatch and resumes them after Undo", async () => {
+    const { routine, svc, wakeups } = await seedFixture({ runtimeEnv: {} });
+    const { trigger } = await svc.createTrigger(routine.id, { kind: "schedule", cronExpression: "0 9 * * *", timezone: "UTC" }, {});
+    await svc.updateTrigger(trigger.id, { archived: true }, {});
+    const due = new Date("2026-09-19T09:00:00Z");
+    await db.update(routineTriggers).set({ nextRunAt: due }).where(eq(routineTriggers.id, trigger.id));
+    expect(await svc.tickScheduledTriggers(due)).toEqual({ triggered: 0 });
+    expect(wakeups).toHaveLength(0);
+    expect(await db.select().from(routineRuns)).toHaveLength(0);
+    await svc.updateTrigger(trigger.id, { archived: false }, {});
+    await db.update(routineTriggers).set({ nextRunAt: due }).where(eq(routineTriggers.id, trigger.id));
+    expect(await svc.tickScheduledTriggers(due)).toEqual({ triggered: 1 });
+    expect(wakeups).toHaveLength(1);
   });
 
   it("coalesces multiple missed sub-hourly ticks into one catch-up run", async () => {
