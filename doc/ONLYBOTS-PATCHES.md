@@ -46,6 +46,7 @@ Local recovery references:
 | Internal operation surfaces | Fork PR #3 merged into deployment, including its test import fix |
 | Remote MCP header policy | Fork PR #5 merged into deployment, plus reconnect deduplication |
 | TypeSafe connection | Fork PR #7 replayed onto the queue (19 topic commits); upstream PR paperclipai/paperclip#13713 open |
+| Transient upstream turn failures | Ported from onlybots `bin/patch-paperclip-529-recovery.sh` as source: acpx turn failures matching the 529/429/503 shape classify as `acpx_transient_upstream`, join the transient continuation set with a budget of 6, and read as the `transient_upstream` family. Not upstream |
 
 ## Completed fixes and exclusions
 
