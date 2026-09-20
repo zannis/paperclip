@@ -2764,4 +2764,5 @@ export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from
 export * from "./ai-connections.js";
 export * from "./types/email.js";
 export * from "./validators/email.js";
+export { typesafeAskSchema, type TypesafeAsk, type TypesafeAnswer, type TypesafeAskResult } from "./typesafe.js";
 export * from "./announcements.js";
