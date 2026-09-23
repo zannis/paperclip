@@ -1,0 +1,31 @@
+scripts/ingest-app-definitions.mjs
+  s_135b141e55ac3c::t_6acc2b4fd04b2b 190-200
+ui/public/brands/apps/manifest.json
+  s_135b141e55ac3c::t_6acc2b4fd04b2b 407-411
+  s_135b141e55ac3c::t_01f5fb132d516e 406
+packages/shared/src/app-definitions.test.ts
+  s_135b141e55ac3c::t_c5374fe88bcb09 10,1009-1028
+  s_135b141e55ac3c::t_c376b69a30767b 1029-1030
+packages/shared/src/app-definitions/typesafe.json
+  s_135b141e55ac3c::t_6acc2b4fd04b2b 1-61
+packages/shared/src/app-definitions.ts
+  s_135b141e55ac3c::t_6acc2b4fd04b2b 9
+packages/shared/src/app-definitions.generated.ts
+  s_135b141e55ac3c::t_b1cbd4d2b1ea5a 2-3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ee437eb7a06ade96b06241721399429700397657",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}

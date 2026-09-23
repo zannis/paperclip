@@ -1,0 +1,28 @@
+ui/src/features/connections/ConnectionSetupFlow.tsx
+  s_135b141e55ac3c::t_d490a3c0aa6d31 3725
+packages/shared/src/app-definitions/typesafe.json
+  s_135b141e55ac3c::t_d490a3c0aa6d31 33-34
+scripts/ingest-app-definitions.mjs
+  s_135b141e55ac3c::t_d490a3c0aa6d31 193
+ui/src/pages/apps/AppsConnect.test.tsx
+  s_135b141e55ac3c::t_65ab7aee09739c 54,745-761
+  s_135b141e55ac3c::t_2c8cde9bb4e557 762-763
+doc/connections/TYPESAFE.md
+  s_135b141e55ac3c::t_d6719d0c9b899d 104-106,143-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3e4d75e290f820a9adc9b385602606d82ba3d01d",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}

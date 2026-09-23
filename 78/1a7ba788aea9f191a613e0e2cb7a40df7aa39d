@@ -1,0 +1,28 @@
+server/src/app.ts
+  s_135b141e55ac3c::t_9a6b776628f70e 7,769
+server/src/__tests__/typesafe-routes.test.ts
+  s_135b141e55ac3c::t_79c2dd661f9743 1-176
+server/src/routes/openapi.ts
+  s_135b141e55ac3c::t_9a6b776628f70e 18,2281-2299
+  s_135b141e55ac3c::t_ec2180da4eb445 2300
+server/src/__tests__/openapi-routes.test.ts
+  s_135b141e55ac3c::t_52fe3a6d0a0999 75
+server/src/routes/typesafe.ts
+  s_135b141e55ac3c::t_2b90e8c0b7363e 1-38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "781a7ba788aea9f191a613e0e2cb7a40df7aa39d",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}

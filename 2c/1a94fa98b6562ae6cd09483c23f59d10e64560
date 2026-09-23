@@ -1,0 +1,14 @@
+doc/ONLYBOTS-PATCHES.md
+  h_f81d3033687456 45,48,109-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2c1a94fa98b6562ae6cd09483c23f59d10e64560",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
