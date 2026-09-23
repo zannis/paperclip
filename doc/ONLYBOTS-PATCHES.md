@@ -47,6 +47,7 @@ Local recovery references:
 | Remote MCP header policy | Fork PR #5 merged into deployment, plus reconnect deduplication |
 | TypeSafe connection | Fork PR #7 replayed onto the queue (19 topic commits); upstream PR paperclipai/paperclip#13713 open |
 | Transient upstream turn failures | Ported from onlybots `bin/patch-paperclip-529-recovery.sh` as source: acpx turn failures matching the 529/429/503 shape classify as `acpx_transient_upstream`, join the transient continuation set with a budget of 6, and read as the `transient_upstream` family. Not upstream |
+| Lockfile sync | Upstream `4b8ec588f` has bumped the codex and claude-agent-sdk overrides and the codex-acp patch without refreshing `pnpm-lock.yaml`. The git installer runs a frozen install, so this commit syncs it. Retire it when upstream's refreshed lockfile arrives |
 
 ## Completed fixes and exclusions
 
@@ -115,6 +116,36 @@ and `permissions-upgrade-boundary-routes` (a mock missing an export the retained
 patch imports). Both pass after `025a952b1`. On this queue tip: `pnpm -r
 typecheck` and `pnpm build` pass; the patch's seven watchdog, issue and
 interaction suites pass (491 tests); the full runner is left to fork CI.
+
+## Upstream update (September 24, 2026)
+
+The queue moved from upstream `4577d1002` to `4b8ec588f` (117 upstream
+commits). The old queue tip `735945c29` is anchored at
+`refs/onlybots-backups/pre-rebase-20260923`. 37 of 48 patches replayed
+unchanged. These resolutions need review:
+
+- **Claude SDK plugin loading.** Upstream #13651 changed `patches/acpx@0.13.1.patch`.
+  The patch was rebuilt from the pristine 0.13.1 package: upstream's hunks, then
+  the plugin hunks. Both acpx patches apply to their pristine packages. Only the
+  two acpx hashes changed in that commit's lockfile.
+- **Remote MCP header policy.** Upstream #13758 retired the Composio broker.
+  Discovery and execution keep the shared `buildRemoteHeaders` policy without
+  the Composio session and retry branches.
+- **TypeSafe connection.** The health check and install early return no longer
+  reference Composio. The install early return keys on TypeSafe alone.
+- **Chat-run connector restriction.** Upstream #13828 limits the restricted
+  chat-run block to `agentmail_` tools so Slack-origin runs can use governed
+  connector tools. The TypeSafe commit had widened the block to every connector.
+  Upstream's line is kept, so a restricted chat run can call TypeSafe under tool
+  governance.
+- **Watchdog recovery audit, internal operation surfaces.** Both sides were
+  kept: the Slack conversation resume and the `afterInsert` hook, and the idle
+  Slack condition inside `surfaceIssueCondition`.
+
+On the rebased tip, with Node 26 and pnpm 9.15.4: the frozen install, `pnpm -r
+typecheck` and `pnpm build` (including the Rust runner) pass. The 79 test files
+that the queue touches pass: 77 files and 2670 tests, with 2 files and 12 tests
+skipped. The serialized server suite was not run.
 
 ## Routine upstream update
 
