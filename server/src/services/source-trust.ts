@@ -94,8 +94,10 @@ export function buildPromotedSourceTrust(input: {
   };
 }
 
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 export async function resolveActorSourceTrustForIssue(input: {
-  db: Db;
+  db: Db | DbTransaction;
   issue: SourceTrustIssueContext;
   actor: SourceTrustActor;
 }): Promise<SourceTrustMetadata | null> {
