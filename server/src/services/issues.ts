@@ -9370,7 +9370,10 @@ export function issueService(db: Db) {
           throw conflict("Idempotency key is void", { code: "idempotency_key_void", idempotencyKey });
         }
         if (keyRow && keyRow.issueId === null) {
-          throw conflict("Idempotency key's issue was deleted", { code: "idempotency_key_deleted", idempotencyKey });
+          if (keyRow.retain) {
+            throw conflict("Idempotency key's issue was deleted", { code: "idempotency_key_deleted", idempotencyKey });
+          }
+          await db.delete(issueCreateIdempotencyKeys).where(eq(issueCreateIdempotencyKeys.id, keyRow.id));
         }
         if (keyRow?.issueId) {
           const existingChild = await db
@@ -9979,6 +9982,7 @@ export function issueService(db: Db) {
               where ${issueCreateIdempotencyKeys.companyId} = ${companyId}
                 and ${issueCreateIdempotencyKeys.createdAt} < ${idempotencyKeyRetentionCutoff.toISOString()}::timestamptz
                 and ${issueCreateIdempotencyKeys.retain} = false
+                and ${issueCreateIdempotencyKeys.state} = 'active'
               order by ${issueCreateIdempotencyKeys.createdAt} asc, ${issueCreateIdempotencyKeys.id} asc
               limit ${ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE}
             )
@@ -9998,7 +10002,10 @@ export function issueService(db: Db) {
             throw conflict("Idempotency key is void", { code: "idempotency_key_void", idempotencyKey });
           }
           if (keyRow && keyRow.issueId === null) {
-            throw conflict("Idempotency key's issue was deleted", { code: "idempotency_key_deleted", idempotencyKey });
+            if (keyRow.retain) {
+              throw conflict("Idempotency key's issue was deleted", { code: "idempotency_key_deleted", idempotencyKey });
+            }
+            await tx.delete(issueCreateIdempotencyKeys).where(eq(issueCreateIdempotencyKeys.id, keyRow.id));
           }
           if (keyRow?.issueId) {
             [existingIssue] = await tx.select().from(issues).where(eq(issues.id, keyRow.issueId)).limit(1);
