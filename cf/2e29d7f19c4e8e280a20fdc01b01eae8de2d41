@@ -2,16 +2,26 @@ server/src/services/issue-expectation.ts
   s_49f62545611f8e::t_b49aae6dc20999 1-30
 packages/shared/src/index.ts
   s_49f62545611f8e::t_4d2f86cc857faa 1960,2066
+  s_49f62545611f8e::t_c0b6a378d8bf41 2066
+  s_49f62545611f8e::t_f9bb47c3f303bb 1960
 packages/shared/src/validators/index.ts
   s_49f62545611f8e::t_ebbcb3c13b063d 431,502
+  s_49f62545611f8e::t_a51fb16c895d73 431
+  s_49f62545611f8e::t_6097e6d46d8c40 502
 packages/shared/src/validators/issue.ts
   s_49f62545611f8e::t_ff4d8be319f5ca 848-858,883
+  s_49f62545611f8e::t_0328aab31f3e12 848-858
+  s_49f62545611f8e::t_89634b1f420c34 883
 server/src/__tests__/issue-conditional-update-routes.test.ts
   s_49f62545611f8e::t_2d55917bff3645 1-83
+  s_49f62545611f8e::t_c7f48c6d53d79e 1-83
 server/src/routes/issues.ts
   s_49f62545611f8e::t_10f9e9a1b24494 13476,14173
+  s_49f62545611f8e::t_42c83f61d9522f 13476
+  s_49f62545611f8e::t_9ea5fc2a10f4e1 14173
 server/src/services/issues.ts
   s_49f62545611f8e::t_bc525fc4eee9d0 89,106,10602-10604,10642,10662,10935
+  s_49f62545611f8e::t_de2ce144d7e11d 89,10602-10604,10642,10662,10935
 ---
 {
   "schema_version": "authorship/3.0.0",
