@@ -2129,6 +2129,13 @@
       "when": 1791300719193,
       "tag": "0305_chubby_vin_gonzales",
       "breakpoints": true
+    },
+    {
+      "idx": 306,
+      "version": "7",
+      "when": 1791300719194,
+      "tag": "0306_issue_revision",
+      "breakpoints": true
     }
   ]
 }
