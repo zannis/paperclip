@@ -1,0 +1,31 @@
+server/src/__tests__/issue-idempotency-registry-routes.test.ts
+  s_f800b88c84cab0::t_c60e6e5a9fe81e 123-155
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_6288ba3830b942 12527-12528,12532-12540,12544-12545
+server/src/services/issues.ts
+  s_49f62545611f8e::t_f4b43bd970efe1 7896-7907
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "22aa15c440866516be95f9a6bd1b8806e4cbc17c",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_f800b88c84cab0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e35505c1-4245-4db1-bbf3-8ecd15609d7e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
