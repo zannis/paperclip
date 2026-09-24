@@ -1,0 +1,23 @@
+packages/db/src/migrations/0285_issue_idempotency_key_registry.sql
+  s_49f62545611f8e::t_49e4a390a383e1 8-11,13-34,37-41
+server/src/__tests__/issue-idempotency-registry-routes.test.ts
+  s_49f62545611f8e::t_e93d524e3b76fc 73-84
+server/src/services/issues.ts
+  s_49f62545611f8e::t_d21a3442044078 9280-9283,9876,9896-9899
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9df6f64b2b83a280bc05e9d12a040d229d986b47",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
