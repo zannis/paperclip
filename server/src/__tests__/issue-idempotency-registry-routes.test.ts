@@ -70,6 +70,18 @@ d("idempotency key registry", () => {
     expect((count as any).rows?.[0]?.n ?? (count as any)[0]?.n).toBe(0);
   });
 
+  it("deleting the issue under a non-retained key allows a fresh issue on the next create, not a 409", async () => {
+    const companyId = await seedCompany();
+    const first = await create(companyId, "lane:e", false).expect(201);
+    await db.delete(issues).where(eq(issues.id, first.body.id));
+    const again = await create(companyId, "lane:e", false).expect(201);
+    expect(again.body.id).not.toBe(first.body.id);
+    expect(again.body.deduplicated).toBeUndefined();
+    const rows = await db.select().from(issueCreateIdempotencyKeys).where(eq(issueCreateIdempotencyKeys.idempotencyKey, "lane:e"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].issueId).toBe(again.body.id);
+  });
+
   it("a void key refuses creation", async () => {
     const companyId = await seedCompany();
     await db.insert(issueCreateIdempotencyKeys).values({ companyId, idempotencyKey: "lane:d", issueId: null, state: "void", retain: true });
