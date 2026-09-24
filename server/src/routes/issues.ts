@@ -3874,8 +3874,9 @@ export function issueRoutes(
       executionPolicy?: unknown;
     },
     actor: ReturnType<typeof getActorInfo>,
+    dbOrTx: Parameters<typeof resolveActorSourceTrustForIssue>[0]["db"] = db,
   ) {
-    return resolveActorSourceTrustForIssue({ db, issue, actor });
+    return resolveActorSourceTrustForIssue({ db: dbOrTx, issue, actor });
   }
 
   async function assertCrossIssueInfluenceWithinRunCap(
@@ -14473,7 +14474,7 @@ export function issueRoutes(
                   authorizationReason: issueMutationAuthorizationReason,
                   clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
                   mirrorToSlack: actor.actorType === "user",
-                  sourceTrust: await sourceTrustForActorWrite(updated, actor),
+                  sourceTrust: await sourceTrustForActorWrite(updated, actor, tx),
                   afterInsert: taskWatchdogAuditCommentClaim(res),
                 },
                 tx,

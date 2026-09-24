@@ -177,6 +177,8 @@ d("conditional issue update", () => {
     const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
     expect(after.body.status).toBe("blocked");
     expect(after.body.description).toBe("brief A");
+    const comments = await request(app()).get(`/api/issues/${issue.id}/comments`).expect(200);
+    expect(comments.body.map((c: any) => c.body)).not.toContain("late");
   });
   it("returns the committed revision, so the response can fence the next conditional update", async () => {
     const issue = await seed();
