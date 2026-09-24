@@ -1,0 +1,33 @@
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_42c83f61d9522f 13319
+  s_49f62545611f8e::t_9ea5fc2a10f4e1 14009
+packages/shared/src/validators/issue.ts
+  s_49f62545611f8e::t_0328aab31f3e12 848-858
+  s_49f62545611f8e::t_89634b1f420c34 883
+server/src/__tests__/issue-conditional-update-routes.test.ts
+  s_49f62545611f8e::t_c7f48c6d53d79e 1-83
+packages/shared/src/index.ts
+  s_49f62545611f8e::t_c0b6a378d8bf41 2062
+  s_49f62545611f8e::t_f9bb47c3f303bb 1956
+packages/shared/src/validators/index.ts
+  s_49f62545611f8e::t_a51fb16c895d73 431
+  s_49f62545611f8e::t_6097e6d46d8c40 502
+server/src/services/issues.ts
+  s_49f62545611f8e::t_de2ce144d7e11d 85,347-376,10571-10573,10611,10631,10904
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "73d73fb846b4857364df73abbf5391bfd8417cfb",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
