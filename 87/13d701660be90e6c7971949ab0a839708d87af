@@ -1,9 +1,12 @@
 server/src/__tests__/issue-conditional-update-routes.test.ts
   s_49f62545611f8e::t_592d5f2d13c3c6 180-181
+  s_49f62545611f8e::t_63c71b5ef90ed8 180-181
 server/src/routes/issues.ts
   s_49f62545611f8e::t_d07263078d7c21 3992,3994,14408
+  s_49f62545611f8e::t_ae3abaa1447898 3992,3994,14408
 server/src/services/source-trust.ts
   s_49f62545611f8e::t_d03c6b1d3c2e95 97-98,100
+  s_49f62545611f8e::t_1a9b20a550179f 97-98,100
 ---
 {
   "schema_version": "authorship/3.0.0",
