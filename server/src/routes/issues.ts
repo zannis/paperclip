@@ -12681,6 +12681,20 @@ export function issueRoutes(
     },
   );
 
+  router.get("/companies/:companyId/issue-idempotency-keys/:key", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await svc.lookupIdempotencyKey(companyId, req.params.key as string));
+  });
+
+  router.post("/companies/:companyId/issue-idempotency-keys/:key/void", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    res.json(await svc.voidIdempotencyKey(companyId, req.params.key as string));
+  });
+
   router.post(
     "/issues/:id/children",
     applyCreateIssueStatusDefault,

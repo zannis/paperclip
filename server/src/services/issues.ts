@@ -7872,6 +7872,75 @@ export function issueService(db: Db) {
     return row;
   }
 
+  async function lookupIdempotencyKeyImpl(
+    companyId: string,
+    idempotencyKey: string,
+    dbOrTx: Db | DbTransaction = db,
+  ) {
+    const [keyRow] = await dbOrTx
+      .select()
+      .from(issueCreateIdempotencyKeys)
+      .where(
+        and(
+          eq(issueCreateIdempotencyKeys.companyId, companyId),
+          eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (!keyRow) return { state: "absent" as const };
+    if (keyRow.state === "void") return { state: "void" as const };
+    if (keyRow.issueId === null) {
+      // A non-retained tombstone is not durable: the create path deletes it
+      // and proceeds as if the key had never been used, so lookup must agree.
+      return keyRow.retain
+        ? { state: "deleted" as const }
+        : { state: "absent" as const };
+    }
+    const [issue] = await dbOrTx
+      .select()
+      .from(issues)
+      .where(eq(issues.id, keyRow.issueId))
+      .limit(1);
+    if (!issue) return { state: "deleted" as const };
+    const [enriched] = await withIssueLabels(dbOrTx, [issue]);
+    const [withRelations] = await withIssueRelationSummaries(
+      companyId,
+      [enriched],
+      dbOrTx,
+    );
+    return { state: "created" as const, issue: withRelations };
+  }
+
+  async function voidIdempotencyKeyImpl(companyId: string, idempotencyKey: string) {
+    return db.transaction(async (tx: DbTransaction) => {
+      const idempotencyGuardKey = `issue-create:idempotency:${companyId}:${idempotencyKey}`;
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${idempotencyGuardKey}, 0))`,
+      );
+      const found = await lookupIdempotencyKeyImpl(companyId, idempotencyKey, tx);
+      if (found.state !== "absent") return found;
+      // "absent" also covers a non-retained tombstone row (issue_id null,
+      // retain false); clear it before inserting so the unique (company,
+      // key) index does not reject the void row.
+      await tx
+        .delete(issueCreateIdempotencyKeys)
+        .where(
+          and(
+            eq(issueCreateIdempotencyKeys.companyId, companyId),
+            eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
+          ),
+        );
+      await tx.insert(issueCreateIdempotencyKeys).values({
+        companyId,
+        idempotencyKey,
+        issueId: null,
+        state: "void",
+        retain: true,
+      });
+      return { state: "void" as const };
+    });
+  }
+
   const service = {
     clearExecutionRunIfTerminal,
     clearCheckoutRunIfTerminal,
@@ -9781,6 +9850,10 @@ export function issueService(db: Db) {
     getConversation: async (companyId: string, agentId: string, userId: string) => db.select().from(issues).where(and(
       eq(issues.companyId, companyId), eq(issues.conversationAgentId, agentId), eq(issues.conversationUserId, userId),
     )).then((rows) => rows[0] ?? null),
+
+    lookupIdempotencyKey: lookupIdempotencyKeyImpl,
+
+    voidIdempotencyKey: voidIdempotencyKeyImpl,
 
     create: async (
       companyId: string,
