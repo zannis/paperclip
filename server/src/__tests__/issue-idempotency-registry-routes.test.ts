@@ -120,6 +120,39 @@ d("idempotency key registry", () => {
     expect(res.body.issue.id).toBe(made.body.id);
   });
 
+  it("void on a non-retained key that created an issue marks the key retained", async () => {
+    const companyId = await seedCompany();
+    const made = await create(companyId, "lane:j", false).expect(201);
+    const res = await request(app()).post(`${keyUrl(companyId, "lane:j")}/void`).expect(200);
+    expect(res.body.state).toBe("created");
+    expect(res.body.issue.id).toBe(made.body.id);
+    const rows = await db.select().from(issueCreateIdempotencyKeys).where(eq(issueCreateIdempotencyKeys.idempotencyKey, "lane:j"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].retain).toBe(true);
+  });
+
+  it("lookup and void trim the key like create does and reject an empty or over-long key", async () => {
+    const companyId = await seedCompany();
+    const made = await create(companyId, "  lane:k  ", true).expect(201);
+    const found = await request(app()).get(keyUrl(companyId, "  lane:k  ")).expect(200);
+    expect(found.body.state).toBe("created");
+    expect(found.body.issue.id).toBe(made.body.id);
+    expect((await request(app()).post(`${keyUrl(companyId, " lane:k ")}/void`).expect(200)).body.state).toBe("created");
+    const tooLong = "k".repeat(256);
+    for (const key of ["   ", tooLong]) {
+      await request(app()).get(keyUrl(companyId, key)).expect(400);
+      await request(app()).post(`${keyUrl(companyId, key)}/void`).expect(400);
+    }
+    const rows = await db.select().from(issueCreateIdempotencyKeys).where(eq(issueCreateIdempotencyKeys.companyId, companyId));
+    expect(rows.map((row) => row.idempotencyKey)).toEqual(["lane:k"]);
+  });
+
+  it("lookup and void on an unknown company return 404", async () => {
+    const unknown = randomUUID();
+    await request(app()).get(keyUrl(unknown, "lane:l")).expect(404);
+    await request(app()).post(`${keyUrl(unknown, "lane:l")}/void`).expect(404);
+  });
+
   it("void on an absent key records void; a later create under it is refused", async () => {
     const companyId = await seedCompany();
     expect((await request(app()).post(`${keyUrl(companyId, "lane:g")}/void`).expect(200)).body).toEqual({ state: "void" });
