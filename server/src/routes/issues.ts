@@ -15341,13 +15341,17 @@ export function issueRoutes(
       const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides
         ? await sourceTrustForActorWrite(existing, actor)
         : undefined;
+      const conditionalUpdateRequested = req.body.expected !== undefined;
+      const conditionalCommentRequested =
+        conditionalUpdateRequested && Boolean(commentBody);
       const shouldUseTransactionalIssueUpdate =
         Boolean(commentAttachmentIds?.length) ||
         commentWithAdapterOverrides ||
         Boolean(decision) ||
         shouldRelayStop ||
         persistReviewActivityTransactionally ||
-        reviewPolicySensitiveMutationRequested;
+        reviewPolicySensitiveMutationRequested ||
+        conditionalUpdateRequested;
       try {
         if (shouldUseTransactionalIssueUpdate) {
           issue = await db.transaction(async (tx) => {
@@ -15356,7 +15360,7 @@ export function issueRoutes(
               !(await assertLockedReviewPolicyAllowsMutation(tx))
             )
               return null;
-            const updated = await updateIssue(tx);
+            let updated = await updateIssue(tx);
             if (!updated) return null;
             if (commentAttachmentIds?.length || commentWithAdapterOverrides) {
               // Adapter settings, reassignment, comment and upload binding commit together.
@@ -15384,6 +15388,37 @@ export function issueRoutes(
                 companyId: updated.companyId, issueId: updated.id, agentId: updated.assigneeAgentId, responsibleUserId: actor.actorId,
                 sourceCommentId: transactionalComment.id, sourceKey: `comment:${transactionalComment.id}`, acceptedAt: new Date(transactionalComment.createdAt),
               });
+            } else if (conditionalCommentRequested) {
+              // A conditional update's status and comment commit together, before any wake.
+              transactionalComment = await svc.addComment(
+                id,
+                commentBody,
+                {
+                  agentId: actor.agentId ?? undefined,
+                  userId:
+                    actor.actorType === "user" ? actor.actorId : undefined,
+                  runId: actor.runId,
+                  onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+                },
+                {
+                  authorizationReason: issueMutationAuthorizationReason,
+                  clientRequestId: actor.actorType === "user" ? commentClientRequestId : undefined,
+                  mirrorToSlack: actor.actorType === "user",
+                  sourceTrust: await sourceTrustForActorWrite(updated, actor),
+                  afterInsert: taskWatchdogAuditCommentClaim(res),
+                },
+                tx,
+              );
+            }
+            if (transactionalComment) {
+              // The comment bumped the row under this transaction's lock, so these are still our own values.
+              const afterComment = await svc.getByIdForUpdate(id, tx);
+              if (!afterComment) return null;
+              updated = {
+                ...updated,
+                revision: afterComment.revision,
+                updatedAt: afterComment.updatedAt,
+              };
             }
 
             if (decision && decisionId) {
