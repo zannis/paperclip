@@ -1,0 +1,23 @@
+server/src/__tests__/issue-conditional-update-routes.test.ts
+  s_49f62545611f8e::t_3cd26ce76199f5 5,12-23,36,234-326
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_1c4a96906bdcc4 13458,14511,14519-14525,15245-15249,15258-15259
+server/src/services/issue-change-receipt.ts
+  s_49f62545611f8e::t_fa33ddd75c854e 27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a35e0b155ae72792d2cb14d31d1593d0c8371a9a",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
