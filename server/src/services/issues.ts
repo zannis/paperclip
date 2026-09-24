@@ -86,6 +86,7 @@ import type {
   IssueBlockedInboxAttention,
   IssueBlockedInboxIssueRef,
   IssueRelationIssueSummary,
+  IssueUpdateExpectation,
   IssueWatchdogSummary,
   LowTrustBoundary,
   SuccessfulRunHandoffState,
@@ -102,6 +103,7 @@ import {
   INTERNAL_OPERATION_ORIGIN_KIND,
 } from "@paperclipai/shared";
 import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { assertIssueExpectation } from "./issue-expectation.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -10597,6 +10599,9 @@ export function issueService(db: Db) {
         actorUserId?: string | null;
         companyGuard?: string;
         expectedCurrentLeaf?: IssueUpdatePrecondition | null;
+        // Client-facing compare-and-swap precondition (PATCH `expected`); see
+        // `assertIssueExpectation`. Distinct from `expectedCurrentLeaf` above.
+        expected?: IssueUpdateExpectation;
         /**
          * Persist nothing this update derived on its own, so it writes only the
          * fields the caller named. For a caller whose authority is bounded to
@@ -10634,6 +10639,7 @@ export function issueService(db: Db) {
         .where(idPredicate)
         .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
+      assertIssueExpectation(existing, data.expected); // fail fast, before any validation work
       if (data.parentId !== undefined && data.parentId !== existing.parentId) {
         await assertExecutionTaskParent(dbOrTx, existing.companyId, data.parentId);
       }
@@ -10653,6 +10659,7 @@ export function issueService(db: Db) {
         actorUserId,
         companyGuard,
         expectedCurrentLeaf,
+        expected,
         suppressServerDerivedFields,
         ...issueData
       } = data;
@@ -10925,6 +10932,7 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        assertIssueExpectation(receiptExisting, expected); // authoritative: under the row lock
         // The blocker half of the precondition, checked here because the row
         // lock is held from the statement above until this transaction commits.
         // It is checked whether or not this request writes blockers: the caller
