@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, companies, createDb, issueComments, issues } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/index.js";
@@ -20,7 +21,8 @@ d("conditional issue update", () => {
     db = createDb(tempDb.connectionString);
   }, 20_000);
   afterEach(async () => {
-    await db.delete(activityLog); await db.delete(issueComments); await db.delete(issues); await db.delete(companies);
+    await db.delete(activityLog); await db.delete(issueComments); await db.delete(heartbeatRuns);
+    await db.delete(issues); await db.delete(agents); await db.delete(companies);
   });
   afterAll(async () => { await tempDb?.cleanup(); });
 
@@ -79,5 +81,64 @@ d("conditional issue update", () => {
       .send({ title: "nodesc", allowDuplicate: true }).expect(201);
     await request(app()).patch(`/api/issues/${created.body.id}`)
       .send({ title: "z", expected: { descriptionSha256: sha("") } }).expect(200);
+  });
+
+  it("refuses a stale-precondition terminalization before any side effect, leaving an assigned issue untouched", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: `T${companyId.slice(0, 5).toUpperCase()}` });
+    const [agent] = await db.insert(agents).values({
+      companyId, name: "Agent", role: "engineer", status: "active",
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+    }).returning();
+    const created = await request(app()).post(`/api/companies/${companyId}/issues`)
+      .send({ title: "term", allowDuplicate: true }).expect(201);
+    await db.update(issues)
+      .set({ status: "in_progress", assigneeAgentId: agent!.id })
+      .where(eq(issues.id, created.body.id));
+    const before = await request(app()).get(`/api/issues/${created.body.id}`).expect(200);
+    const activityBefore = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+
+    const res = await request(app()).patch(`/api/issues/${created.body.id}`)
+      .send({ status: "done", expected: { revision: before.body.revision + 1000 } }).expect(409);
+    expect(res.body.details?.code).toBe("issue_precondition_failed");
+
+    const after = await request(app()).get(`/api/issues/${created.body.id}`).expect(200);
+    expect(after.body.status).toBe("in_progress");
+    expect(after.body.revision).toBe(before.body.revision);
+    const comments = await request(app()).get(`/api/issues/${created.body.id}/comments`).expect(200);
+    expect(comments.body).toEqual([]);
+    const activityAfter = await db.select().from(activityLog).where(eq(activityLog.companyId, companyId));
+    expect(activityAfter.length).toBe(activityBefore.length);
+  });
+
+  it("refuses a stale-precondition interrupt-with-comment before any side effect, leaving the active run and comments untouched", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: `I${companyId.slice(0, 5).toUpperCase()}` });
+    const [agent] = await db.insert(agents).values({
+      companyId, name: "Agent", role: "engineer", status: "active",
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+    }).returning();
+    const created = await request(app()).post(`/api/companies/${companyId}/issues`)
+      .send({ title: "interrupt", allowDuplicate: true }).expect(201);
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: agent!.id, status: "running",
+    }).returning();
+    await db.update(issues)
+      .set({ status: "in_progress", assigneeAgentId: agent!.id, executionRunId: run!.id })
+      .where(eq(issues.id, created.body.id));
+    const before = await request(app()).get(`/api/issues/${created.body.id}`).expect(200);
+
+    const res = await request(app()).patch(`/api/issues/${created.body.id}`)
+      .send({ comment: "must not post", interrupt: true, expected: { revision: before.body.revision + 1000 } })
+      .expect(409);
+    expect(res.body.details?.code).toBe("issue_precondition_failed");
+
+    const comments = await request(app()).get(`/api/issues/${created.body.id}/comments`).expect(200);
+    expect(comments.body).toEqual([]);
+    const [runAfter] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+    expect(runAfter?.status).toBe("running");
+    const cancelledActivity = await db.select().from(activityLog)
+      .where(eq(activityLog.action, "heartbeat.cancelled"));
+    expect(cancelledActivity.filter((row) => row.entityId === run!.id)).toEqual([]);
   });
 });

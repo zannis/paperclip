@@ -286,6 +286,7 @@ import {
   readAcceptedPlanConfirmationTarget,
   type IssuePostCommitAction,
 } from "../services/issues.js";
+import { assertIssueExpectation } from "../services/issue-expectation.js";
 import { resolveAgentIssueProjectId } from "../services/issue-project-inference.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { stalledReviewDecisionService } from "../services/stalled-review-decisions.js";
@@ -13439,6 +13440,12 @@ export function issueRoutes(
       );
       if (!issueMutationAccess) return;
       if (req.body.comment && !(await assertBoardCommentNotPaused(req, res, existing))) return;
+      // Fail-fast: a stale `expected` must not trigger any of the side
+      // effects below (interrupt/cancel-run, comment-cancels-retry,
+      // reassignment, terminal status, workspace reopen) before `svc.update`
+      // ever runs. The authoritative check stays under `runUpdate`'s row
+      // lock; this narrows, but does not close, the race with it.
+      assertIssueExpectation(existing, req.body.expected);
       const issueMutationAuthorizationReason =
         req.actor.type === "agent"
           ? issueWriteAuthorizationReason(
