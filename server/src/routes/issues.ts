@@ -13513,11 +13513,7 @@ export function issueRoutes(
       );
       if (!issueMutationAccess) return;
       if (req.body.comment && !(await assertBoardCommentNotPaused(req, res, existing))) return;
-      // Fail-fast: a stale `expected` must not trigger any of the side
-      // effects below (interrupt/cancel-run, comment-cancels-retry,
-      // reassignment, terminal status, workspace reopen) before `svc.update`
-      // ever runs. The authoritative check stays under `runUpdate`'s row
-      // lock; this narrows, but does not close, the race with it.
+      // Pre-side-effect check; the authoritative one runs under svc.update's row lock.
       assertIssueExpectation(existing, req.body.expected);
       const issueMutationAuthorizationReason =
         req.actor.type === "agent"
@@ -14581,7 +14577,7 @@ export function issueRoutes(
           },
         });
         if (ownerNotifiedAt) {
-          await db
+          const [notified] = await db
             .update(issueRows)
             .set({ blockedOwnerNotifiedAt: ownerNotifiedAt })
             .where(
@@ -14589,8 +14585,13 @@ export function issueRoutes(
                 eq(issueRows.id, blockedIssue.id),
                 eq(issueRows.companyId, blockedIssue.companyId),
               ),
-            );
-          issue = { ...blockedIssue, blockedOwnerNotifiedAt: ownerNotifiedAt };
+            )
+            .returning({ revision: issueRows.revision });
+          issue = {
+            ...blockedIssue,
+            blockedOwnerNotifiedAt: ownerNotifiedAt,
+            ...(notified ? { revision: notified.revision } : {}),
+          };
         }
       }
 
@@ -15316,6 +15317,11 @@ export function issueRoutes(
         // as the comment route, at the same funnel: an audit comment enqueues no
         // wake, so it cannot steer the execution path the run just restored.
         const watchdogAuditCommentOnly = isTaskWatchdogAuditComment(res);
+        const conditionalParkRequested =
+          req.body.expected !== undefined &&
+          (req.body.status === "blocked" ||
+            req.body.status === "done" ||
+            req.body.status === "cancelled");
         const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
           if (watchdogAuditCommentOnly) return;
           const wakeIssueId =
@@ -15324,6 +15330,8 @@ export function issueRoutes(
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : issue.id;
+          // A conditional park (quiesce/fence) must wake nobody on the parked issue.
+          if (conditionalParkRequested && wakeIssueId === issue.id) return;
           // Provider turns use the task identifier as their session key. Board
           // messages must resume that same session instead of creating a UUID-keyed fork.
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
