@@ -1,4 +1,4 @@
-import { index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { issues } from "./issues.js";
 
@@ -8,7 +8,9 @@ export const issueCreateIdempotencyKeys = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     idempotencyKey: text("idempotency_key").notNull(),
-    issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
+    issueId: uuid("issue_id").references(() => issues.id, { onDelete: "set null" }),
+    retain: boolean("retain").notNull().default(false),
+    state: text("state").$type<"active" | "void">().notNull().default("active"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

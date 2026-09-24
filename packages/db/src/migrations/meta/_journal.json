@@ -2136,6 +2136,13 @@
       "when": 1791300719194,
       "tag": "0306_issue_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1791300719195,
+      "tag": "0307_issue_idempotency_key_registry",
+      "breakpoints": true
     }
   ]
 }
