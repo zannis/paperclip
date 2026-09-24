@@ -88,4 +88,58 @@ d("idempotency key registry", () => {
     const res = await create(companyId, "lane:d", true).expect(409);
     expect(res.body.details?.code).toBe("idempotency_key_void");
   });
+
+  const keyUrl = (companyId: string, key: string) =>
+    `/api/companies/${companyId}/issue-idempotency-keys/${encodeURIComponent(key)}`;
+
+  it("lookup reports absent, created, deleted and void without creating anything", async () => {
+    const companyId = await seedCompany();
+    expect((await request(app()).get(keyUrl(companyId, "lane:e")).expect(200)).body).toEqual({ state: "absent" });
+    const made = await create(companyId, "lane:e", true).expect(201);
+    const found = await request(app()).get(keyUrl(companyId, "lane:e")).expect(200);
+    expect(found.body.state).toBe("created");
+    expect(found.body.issue.id).toBe(made.body.id);
+    await db.delete(issues).where(eq(issues.id, made.body.id));
+    expect((await request(app()).get(keyUrl(companyId, "lane:e")).expect(200)).body).toEqual({ state: "deleted" });
+  });
+
+  it("lookup reports absent for a non-retained tombstone, matching what a create under it would do", async () => {
+    const companyId = await seedCompany();
+    const made = await create(companyId, "lane:i", false).expect(201);
+    await db.delete(issues).where(eq(issues.id, made.body.id));
+    expect((await request(app()).get(keyUrl(companyId, "lane:i")).expect(200)).body).toEqual({ state: "absent" });
+    const again = await create(companyId, "lane:i", false).expect(201);
+    expect(again.body.id).not.toBe(made.body.id);
+  });
+
+  it("void returns the issue when the key already created one", async () => {
+    const companyId = await seedCompany();
+    const made = await create(companyId, "lane:f", true).expect(201);
+    const res = await request(app()).post(`${keyUrl(companyId, "lane:f")}/void`).expect(200);
+    expect(res.body.state).toBe("created");
+    expect(res.body.issue.id).toBe(made.body.id);
+  });
+
+  it("void on an absent key records void; a later create under it is refused", async () => {
+    const companyId = await seedCompany();
+    expect((await request(app()).post(`${keyUrl(companyId, "lane:g")}/void`).expect(200)).body).toEqual({ state: "void" });
+    await create(companyId, "lane:g", true).expect(409);
+    expect((await request(app()).get(keyUrl(companyId, "lane:g")).expect(200)).body).toEqual({ state: "void" });
+  });
+
+  it("void and create racing on one key: exactly one wins", async () => {
+    const companyId = await seedCompany();
+    const [v, c] = await Promise.all([
+      request(app()).post(`${keyUrl(companyId, "lane:h")}/void`),
+      create(companyId, "lane:h", true),
+    ]);
+    const created = c.status === 201;
+    if (created) {
+      expect(v.body.state).toBe("created");
+      expect(v.body.issue.id).toBe(c.body.id);
+    } else {
+      expect(c.status).toBe(409);
+      expect(v.body).toEqual({ state: "void" });
+    }
+  });
 });
