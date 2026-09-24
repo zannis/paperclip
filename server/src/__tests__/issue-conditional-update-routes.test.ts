@@ -2,12 +2,24 @@ import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { activityLog, agents, companies, createDb, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+
+const wakeupSpy = vi.hoisted(() => vi.fn(async () => null));
+vi.mock("../services/heartbeat.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../services/heartbeat.js")>();
+  return {
+    ...actual,
+    heartbeatService: (...args: Parameters<typeof actual.heartbeatService>) => ({
+      ...actual.heartbeatService(...args),
+      wakeup: wakeupSpy,
+    }),
+  };
+});
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const support = await getEmbeddedPostgresTestSupport();
@@ -21,6 +33,7 @@ d("conditional issue update", () => {
     db = createDb(tempDb.connectionString);
   }, 20_000);
   afterEach(async () => {
+    wakeupSpy.mockClear();
     await db.delete(activityLog); await db.delete(issueComments); await db.delete(heartbeatRuns);
     await db.delete(issues); await db.delete(agents); await db.delete(companies);
   });
@@ -217,5 +230,98 @@ d("conditional issue update", () => {
     const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
     expect(after.body.title).toBe("cond");
     expect(after.body.revision).toBe(issue.revision);
+  });
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
+  const seedAssigned = async (status: "todo" | "done") => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Co", issuePrefix: `W${companyId.slice(0, 5).toUpperCase()}` });
+    const [agent] = await db.insert(agents).values({
+      companyId, name: "Agent", role: "engineer", status: "active",
+      adapterType: "process", adapterConfig: {}, runtimeConfig: {},
+    }).returning();
+    const created = await request(app()).post(`/api/companies/${companyId}/issues`)
+      .send({ title: "lane", description: "brief A", allowDuplicate: true }).expect(201);
+    await db.update(issues)
+      .set({ status, assigneeAgentId: agent!.id })
+      .where(eq(issues.id, created.body.id));
+    const before = await request(app()).get(`/api/issues/${created.body.id}`).expect(200);
+    await settle();
+    wakeupSpy.mockClear();
+    return { agentId: agent!.id, issue: before.body as { id: string; revision: number } };
+  };
+
+  it.each(["blocked", "done", "cancelled"] as const)(
+    "a conditional park to %s with a comment wakes nobody",
+    async (status) => {
+      const { issue } = await seedAssigned("todo");
+      const res = await request(app()).patch(`/api/issues/${issue.id}`).send({
+        status,
+        ...(status === "blocked" ? { unblockDescriptor: { owner: "board", action: "retired" } } : {}),
+        comment: "<!-- quiesce:v1 {\"token\":\"t\"} -->",
+        expected: { revision: issue.revision },
+      }).expect(200);
+      expect(res.body.status).toBe(status);
+      await settle();
+      expect(wakeupSpy).not.toHaveBeenCalled();
+      const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
+      expect(after.body.status).toBe(status);
+    },
+  );
+
+  it("a non-conditional blocked update with a comment still wakes the assignee", async () => {
+    const { agentId, issue } = await seedAssigned("todo");
+    await request(app()).patch(`/api/issues/${issue.id}`).send({
+      status: "blocked",
+      unblockDescriptor: { owner: "board", action: "retired" },
+      comment: "plain note",
+    }).expect(200);
+    await vi.waitFor(() => expect(wakeupSpy).toHaveBeenCalledTimes(1));
+    expect(wakeupSpy.mock.calls[0]?.[0]).toBe(agentId);
+  });
+
+  it("a conditional wake from done enqueues exactly one wake for the assignee", async () => {
+    const { agentId, issue } = await seedAssigned("done");
+    const res = await request(app()).patch(`/api/issues/${issue.id}`).send({
+      status: "todo",
+      title: "lane v2",
+      description: "brief B",
+      comment: "<!-- delivery:v1 {\"token\":\"w\"} -->",
+      expected: { revision: issue.revision, status: "done" },
+    }).expect(200);
+    expect(res.body.status).toBe("todo");
+    await vi.waitFor(() => expect(wakeupSpy).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(wakeupSpy).toHaveBeenCalledTimes(1);
+    const [wokenAgentId, wake] = wakeupSpy.mock.calls[0] as unknown as [string, { payload?: { issueId?: string } }];
+    expect(wokenAgentId).toBe(agentId);
+    expect(wake.payload?.issueId).toBe(issue.id);
+  });
+
+  it("keeps revision out of the change receipt for comment-only and no-op updates", async () => {
+    const issue = await seed();
+    const commented = await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ comment: "just a note" }).expect(200);
+    expect(commented.body.changes).toEqual({});
+    const noop = await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ title: "cond" }).expect(200);
+    expect(noop.body.changes).toEqual({});
+    const updated = await db.select().from(activityLog).where(eq(activityLog.action, "issue.updated"));
+    const forIssue = updated.filter((row) => row.entityId === issue.id);
+    expect(forIssue.length).toBeGreaterThan(0);
+    for (const row of forIssue) {
+      expect((row.details as { changes?: Record<string, unknown> }).changes ?? {}).not.toHaveProperty("revision");
+    }
+  });
+
+  it("returns the row's revision after the blocked-owner notification stamp", async () => {
+    const { agentId, issue } = await seedAssigned("todo");
+    const res = await request(app()).patch(`/api/issues/${issue.id}`).send({
+      status: "blocked",
+      unblockDescriptor: { owner: { agentId }, action: "review the finding" },
+    }).expect(200);
+    expect(res.body.blockedOwnerNotifiedAt).toBeTruthy();
+    const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
+    expect(res.body.revision).toBe(after.body.revision);
   });
 });
