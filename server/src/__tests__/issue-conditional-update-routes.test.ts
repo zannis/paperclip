@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agents, companies, createDb, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -140,5 +140,80 @@ d("conditional issue update", () => {
     const cancelledActivity = await db.select().from(activityLog)
       .where(eq(activityLog.action, "heartbeat.cancelled"));
     expect(cancelledActivity.filter((row) => row.entityId === run!.id)).toEqual([]);
+  });
+  it("commits status and comment together, and an explicit status suppresses the comment reopen", async () => {
+    const issue = await seed();
+    await request(app()).patch(`/api/issues/${issue.id}`).send({ status: "done" }).expect(200);
+    const done = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
+
+    const res = await request(app()).patch(`/api/issues/${issue.id}`).send({
+      status: "blocked",
+      unblockDescriptor: { owner: "board", action: "retired lane" },
+      description: "retired: t1",
+      comment: "<!-- quiesce:v1 {\"token\":\"t1\"} -->",
+      expected: { revision: done.body.revision, status: "done" },
+    }).expect(200);
+    expect(res.body.status).toBe("blocked");            // not reopened to todo by the user comment
+    const comments = await request(app()).get(`/api/issues/${issue.id}/comments?order=asc`).expect(200);
+    expect(comments.body.map((c: any) => c.body)).toEqual(["<!-- quiesce:v1 {\"token\":\"t1\"} -->"]);
+    const commentActivity = await db.select().from(activityLog).where(eq(activityLog.action, "issue.comment_added"));
+    expect(commentActivity.filter((row) => row.entityId === issue.id)).toHaveLength(1);
+  });
+
+  it("bumps revision for a comment-only conditional update", async () => {
+    const issue = await seed();
+    const res = await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ comment: "only a comment", expected: { revision: issue.revision } }).expect(200);
+    expect(res.body.revision).toBeGreaterThan(issue.revision);
+  });
+
+  it("a stale second conditional update after the first applied is refused (version fence)", async () => {
+    const issue = await seed();
+    await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "blocked", unblockDescriptor: { owner: "board", action: "fenced" }, comment: "fence", expected: { revision: issue.revision } }).expect(200);
+    await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ status: "todo", description: "late wake", comment: "late", expected: { revision: issue.revision } })
+      .expect(409);
+    const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
+    expect(after.body.status).toBe("blocked");
+    expect(after.body.description).toBe("brief A");
+  });
+  it("returns the committed revision, so the response can fence the next conditional update", async () => {
+    const issue = await seed();
+    const res = await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ title: "fenced", comment: "with a comment", expected: { revision: issue.revision } }).expect(200);
+    const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
+    expect(res.body.revision).toBe(after.body.revision);
+    await request(app()).patch(`/api/issues/${issue.id}`)
+      .send({ title: "next", expected: { revision: res.body.revision } }).expect(200);
+  });
+
+  it("rolls the issue update back when the conditional comment cannot be inserted", async () => {
+    const issue = await seed();
+    await db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION paperclip_test_reject_comment()
+      RETURNS trigger LANGUAGE plpgsql AS $function$
+      BEGIN
+        IF NEW.body = 'reject me' THEN RAISE EXCEPTION 'comment rejected by test'; END IF;
+        RETURN NEW;
+      END
+      $function$;
+      CREATE TRIGGER paperclip_test_reject_comment
+      BEFORE INSERT ON issue_comments
+      FOR EACH ROW EXECUTE FUNCTION paperclip_test_reject_comment();
+    `));
+    try {
+      await request(app()).patch(`/api/issues/${issue.id}`)
+        .send({ title: "must roll back", comment: "reject me", expected: { revision: issue.revision } })
+        .expect(500);
+    } finally {
+      await db.execute(sql.raw(`
+        DROP TRIGGER IF EXISTS paperclip_test_reject_comment ON issue_comments;
+        DROP FUNCTION IF EXISTS paperclip_test_reject_comment();
+      `));
+    }
+    const after = await request(app()).get(`/api/issues/${issue.id}`).expect(200);
+    expect(after.body.title).toBe("cond");
+    expect(after.body.revision).toBe(issue.revision);
   });
 });
