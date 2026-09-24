@@ -1988,6 +1988,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   actorResponsibleUserId?: string | null;
   trustExplicitResponsibleUserId?: boolean;
   idempotencyKey?: string | null;
+  idempotencyRetain?: boolean;
   allowDuplicate?: boolean;
   assertCanReuseIssue?: (issue: typeof issues.$inferSelect) => Promise<void>;
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
@@ -9302,36 +9303,53 @@ export function issueService(db: Db) {
 
       const idempotencyKey = data.idempotencyKey?.trim();
       if (idempotencyKey) {
-        const existingChild = await db
-          .select({ issue: issues })
+        const [keyRow] = await db
+          .select()
           .from(issueCreateIdempotencyKeys)
-          .innerJoin(issues, eq(issueCreateIdempotencyKeys.issueId, issues.id))
           .where(
             and(
               eq(issueCreateIdempotencyKeys.companyId, parent.companyId),
               eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
             ),
           )
-          .limit(1)
-          .then((rows) => rows[0]?.issue ?? null);
-        if (existingChild) {
-          if (existingChild.parentId !== parent.id) {
-            throw conflict(
-              "Child creation idempotency key belongs to another parent issue",
+          .limit(1);
+        if (keyRow?.state === "void") {
+          throw conflict("Idempotency key is void", { code: "idempotency_key_void", idempotencyKey });
+        }
+        if (keyRow && keyRow.issueId === null) {
+          throw conflict("Idempotency key's issue was deleted", { code: "idempotency_key_deleted", idempotencyKey });
+        }
+        if (keyRow?.issueId) {
+          const existingChild = await db
+            .select()
+            .from(issues)
+            .where(eq(issues.id, keyRow.issueId))
+            .then((rows) => rows[0] ?? null);
+          if (existingChild) {
+            if (existingChild.parentId !== parent.id) {
+              throw conflict(
+                "Child creation idempotency key belongs to another parent issue",
+              );
+            }
+            await data.assertCanReuseIssue?.(existingChild);
+            if (data.idempotencyRetain && !keyRow.retain) {
+              await db
+                .update(issueCreateIdempotencyKeys)
+                .set({ retain: true })
+                .where(eq(issueCreateIdempotencyKeys.id, keyRow.id));
+            }
+            data.onDeduplicated?.("idempotency_key");
+            const [enriched] = await withIssueLabels(db, [existingChild]);
+            const [withRelations] = await withIssueRelationSummaries(
+              parent.companyId,
+              [enriched],
+              db,
             );
+            return {
+              issue: withRelations,
+              parentBlockerAdded: false,
+            };
           }
-          await data.assertCanReuseIssue?.(existingChild);
-          data.onDeduplicated?.("idempotency_key");
-          const [enriched] = await withIssueLabels(db, [existingChild]);
-          const [withRelations] = await withIssueRelationSummaries(
-            parent.companyId,
-            [enriched],
-            db,
-          );
-          return {
-            issue: withRelations,
-            parentBlockerAdded: false,
-          };
         }
       }
 
@@ -9823,6 +9841,7 @@ export function issueService(db: Db) {
         actorResponsibleUserId,
         trustExplicitResponsibleUserId,
         idempotencyKey: rawIdempotencyKey,
+        idempotencyRetain,
         allowDuplicate,
         assertCanReuseIssue,
         onDeduplicated,
@@ -9904,27 +9923,37 @@ export function issueService(db: Db) {
               from ${issueCreateIdempotencyKeys}
               where ${issueCreateIdempotencyKeys.companyId} = ${companyId}
                 and ${issueCreateIdempotencyKeys.createdAt} < ${idempotencyKeyRetentionCutoff.toISOString()}::timestamptz
+                and ${issueCreateIdempotencyKeys.retain} = false
               order by ${issueCreateIdempotencyKeys.createdAt} asc, ${issueCreateIdempotencyKeys.id} asc
               limit ${ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE}
             )
           `);
 
-          [existingIssue] = await tx
+          const [keyRow] = await tx
             .select()
             .from(issueCreateIdempotencyKeys)
-            .innerJoin(
-              issues,
-              eq(issueCreateIdempotencyKeys.issueId, issues.id),
-            )
             .where(
               and(
                 eq(issueCreateIdempotencyKeys.companyId, companyId),
                 eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
               ),
             )
-            .limit(1)
-            .then((rows) => rows.map((row) => row.issues));
-          if (existingIssue) deduplicationReason = "idempotency_key";
+            .limit(1);
+          if (keyRow?.state === "void") {
+            throw conflict("Idempotency key is void", { code: "idempotency_key_void", idempotencyKey });
+          }
+          if (keyRow && keyRow.issueId === null) {
+            throw conflict("Idempotency key's issue was deleted", { code: "idempotency_key_deleted", idempotencyKey });
+          }
+          if (keyRow?.issueId) {
+            [existingIssue] = await tx.select().from(issues).where(eq(issues.id, keyRow.issueId)).limit(1);
+            if (existingIssue) deduplicationReason = "idempotency_key";
+            if (idempotencyRetain && !keyRow.retain) {
+              await tx.update(issueCreateIdempotencyKeys)
+                .set({ retain: true })
+                .where(eq(issueCreateIdempotencyKeys.id, keyRow.id));
+            }
+          }
         }
         if (!existingIssue && deduplicateByTitle) {
           [existingIssue] = await tx
@@ -9955,7 +9984,7 @@ export function issueService(db: Db) {
           if (idempotencyKey) {
             await tx
               .insert(issueCreateIdempotencyKeys)
-              .values({ companyId, idempotencyKey, issueId: existingIssue.id })
+              .values({ companyId, idempotencyKey, issueId: existingIssue.id, retain: Boolean(idempotencyRetain) })
               .onConflictDoNothing();
           }
           if (deduplicationReason) onDeduplicated?.(deduplicationReason);
@@ -10259,6 +10288,7 @@ export function issueService(db: Db) {
             companyId,
             idempotencyKey,
             issueId: issue.id,
+            retain: Boolean(idempotencyRetain),
           });
         }
         if (watchdog) {
