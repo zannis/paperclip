@@ -1,7 +1,9 @@
 server/src/__tests__/issue-conditional-update-routes.test.ts
   s_49f62545611f8e::t_2f8db121a5b853 4,144-218
+  s_49f62545611f8e::t_7a2bf660ca04df 4,144-218
 server/src/routes/issues.ts
   s_49f62545611f8e::t_c48f0c48bcdbe0 14346,14351-14353,14359-14360,14369,14374,14392-14421,15003
+  s_49f62545611f8e::t_b328d308b7c47c 14346,14351-14353,14359-14360,14369,14374,14392-14421,15003
 ---
 {
   "schema_version": "authorship/3.0.0",
