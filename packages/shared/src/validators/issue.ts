@@ -769,6 +769,10 @@ const createIssueDuplicateGuardSchema = {
     )
     .optional()
     .default(false),
+  idempotencyRetain: z.boolean()
+    .describe("Keep this idempotency key past the retention window; required for keys that must never mint a second issue")
+    .optional()
+    .default(false),
 };
 
 // Narrow intent flag set by the onboarding wizard on the single first task. The
