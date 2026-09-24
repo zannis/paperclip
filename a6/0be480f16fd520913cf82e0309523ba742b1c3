@@ -1,9 +1,12 @@
 server/src/__tests__/issue-idempotency-registry-routes.test.ts
   s_49f62545611f8e::t_ee0939e937ca75 91-144
+  s_49f62545611f8e::t_2f61f79ee5b9bc 91-144
 server/src/routes/issues.ts
   s_49f62545611f8e::t_f2ea2d5d131cf3 12684-12697
+  s_49f62545611f8e::t_08f4bf4514e80e 12684-12697
 server/src/services/issues.ts
   s_49f62545611f8e::t_d488a870298a1c 7875-7943,9854-9857
+  s_49f62545611f8e::t_7c86ae0384bee4 7875-7943,9854-9857
 ---
 {
   "schema_version": "authorship/3.0.0",
