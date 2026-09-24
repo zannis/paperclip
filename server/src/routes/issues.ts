@@ -14301,6 +14301,7 @@ export function issueRoutes(
         hiddenAt: hiddenAtRaw,
         expectedExecutionPolicy,
         onBehalfOfUserId: _requestedOnBehalfOfUserId,
+        expected: expectedPrecondition,
         ...updateFields
       } = req.body;
     if (req.body.visibility === "private" && !existing.projectId && updateFields.projectId === undefined) {
@@ -15040,6 +15041,7 @@ export function issueRoutes(
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,
         actorUserId: actor.actorType === "user" ? actor.actorId : null,
+        expected: expectedPrecondition,
         ...(watchdogWritePrecondition ? { expectedCurrentLeaf: watchdogWritePrecondition } : {}),
         // The audit exception establishes that this request writes no issue
         // fields, and the service derives more below that check: an issue with no
