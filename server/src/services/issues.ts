@@ -7918,6 +7918,18 @@ export function issueService(db: Db) {
         sql`select pg_advisory_xact_lock(hashtextextended(${idempotencyGuardKey}, 0))`,
       );
       const found = await lookupIdempotencyKeyImpl(companyId, idempotencyKey, tx);
+      if (found.state === "created") {
+        await tx
+          .update(issueCreateIdempotencyKeys)
+          .set({ retain: true })
+          .where(
+            and(
+              eq(issueCreateIdempotencyKeys.companyId, companyId),
+              eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
+            ),
+          );
+        return found;
+      }
       if (found.state !== "absent") return found;
       // "absent" also covers a non-retained tombstone row (issue_id null,
       // retain false); clear it before inserting so the unique (company,

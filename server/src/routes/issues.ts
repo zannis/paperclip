@@ -12681,18 +12681,25 @@ export function issueRoutes(
     },
   );
 
-  router.get("/companies/:companyId/issue-idempotency-keys/:key", async (req, res) => {
+  const idempotencyKeyParamSchema = z.string().trim().min(1).max(255);
+  const resolveIdempotencyKeyRoute = async (req: Request) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    res.json(await svc.lookupIdempotencyKey(companyId, req.params.key as string));
+    const key = idempotencyKeyParamSchema.safeParse(req.params.key);
+    if (!key.success) throw badRequest("Invalid idempotency key");
+    if (!(await companiesSvc.getById(companyId))) throw notFound("Company not found");
+    return { companyId, key: key.data };
+  };
+
+  router.get("/companies/:companyId/issue-idempotency-keys/:key", async (req, res) => {
+    const { companyId, key } = await resolveIdempotencyKeyRoute(req);
+    res.json(await svc.lookupIdempotencyKey(companyId, key));
   });
 
   router.post("/companies/:companyId/issue-idempotency-keys/:key/void", async (req, res) => {
-    assertBoard(req);
-    const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
-    res.json(await svc.voidIdempotencyKey(companyId, req.params.key as string));
+    const { companyId, key } = await resolveIdempotencyKeyRoute(req);
+    res.json(await svc.voidIdempotencyKey(companyId, key));
   });
 
   router.post(
