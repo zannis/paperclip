@@ -1,0 +1,21 @@
+server/src/services/tool-access.ts
+  s_135b141e55ac3c::t_4a67569cafb10f 220,658-659,927-938,2855,2874-2881,7115-7142,7160-7163,7312-7313,7346-7347,7613-7615,13919-13950
+server/src/__tests__/typesafe-connection.test.ts
+  s_135b141e55ac3c::t_20d25e87e48d02 1-198
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "61f963b9cdc38fe32322bad3e2b14e0d69d0ee72",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}

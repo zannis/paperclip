@@ -1,0 +1,33 @@
+server/src/services/connector-runtime.ts
+  s_135b141e55ac3c::t_956c91403dc3b3 21-25,98-115
+  s_135b141e55ac3c::t_d05146db78a586 116
+server/src/services/tool-access.ts
+  s_135b141e55ac3c::t_f1d9789a323490 220-225
+server/src/__tests__/typesafe-connector.integration.test.ts
+  s_135b141e55ac3c::t_3736e187732b5d 307
+  s_135b141e55ac3c::t_1f363d02a51e93 1-306,308-320,322-351
+  s_135b141e55ac3c::t_50fd2ee4d631e9 321
+server/src/services/typesafe-api.ts
+  s_135b141e55ac3c::t_f1d9789a323490 5-16
+skills/typesafe/SKILL.md
+  s_135b141e55ac3c::t_8b13320241ffdf 1-120
+server/src/services/connectors/typesafe.ts
+  s_135b141e55ac3c::t_50fd2ee4d631e9 196-197
+  s_135b141e55ac3c::t_1f388d1a69b1b0 1-195,198-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "baf425a39f8a1611d757a6d87b929a87cd015e6a",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
