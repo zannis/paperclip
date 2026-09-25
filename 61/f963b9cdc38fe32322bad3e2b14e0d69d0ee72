@@ -1,7 +1,11 @@
 server/src/services/tool-access.ts
   s_135b141e55ac3c::t_4a67569cafb10f 220,658-659,927-938,2855,2874-2881,7115-7142,7160-7163,7312-7313,7346-7347,7613-7615,13919-13950
+  s_94abda480e2fa0::t_2d03d4b6b19755 13181-13196
+  s_94abda480e2fa0::t_eff06dc20c95ee 7348-7350,13180
 server/src/__tests__/typesafe-connection.test.ts
   s_135b141e55ac3c::t_20d25e87e48d02 1-198
+server/src/__tests__/tool-access-service.test.ts
+  s_94abda480e2fa0::t_2d03d4b6b19755 5095
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -14,6 +18,14 @@ server/src/__tests__/typesafe-connection.test.ts
         "tool": "claude",
         "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
         "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_94abda480e2fa0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a62769b5-68db-405b-86de-753df6c27df0",
+        "model": "claude-opus-5-5"
       },
       "human_author": "zannis <zkalampoukis@gmail.com>"
     }
