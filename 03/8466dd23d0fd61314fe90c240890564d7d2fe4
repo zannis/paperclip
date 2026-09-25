@@ -6,6 +6,7 @@ ui/public/brands/apps/manifest.json
 packages/shared/src/app-definitions.test.ts
   s_135b141e55ac3c::t_c5374fe88bcb09 10,1023-1043
   s_135b141e55ac3c::t_c376b69a30767b 1044-1045
+  s_94abda480e2fa0::t_259322b8f20ca6 723
 packages/shared/src/app-definitions/typesafe.json
   s_135b141e55ac3c::t_6acc2b4fd04b2b 1-61
 packages/shared/src/app-definitions.ts
@@ -24,6 +25,14 @@ packages/shared/src/app-definitions.generated.ts
         "tool": "claude",
         "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
         "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_94abda480e2fa0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a62769b5-68db-405b-86de-753df6c27df0",
+        "model": "claude-opus-5-5"
       },
       "human_author": "zannis <zkalampoukis@gmail.com>"
     }
