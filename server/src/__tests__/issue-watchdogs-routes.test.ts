@@ -1721,9 +1721,12 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     // too, so a derived field added to the update path lands here instead of in
     // the next review. `updatedAt` is excluded because the plain comment insert
     // bumps it on its own — recording comment activity is what it is for.
+    // `revision` is excluded because a DB trigger bumps it on every row update
+    // regardless of what changed — it is not derived from anything here.
     const columnsChanged = Object.keys(rootBefore ?? {}).filter(
       (key) =>
         key !== "updatedAt" &&
+        key !== "revision" &&
         JSON.stringify((rootBefore as Record<string, unknown>)[key])
           !== JSON.stringify((rootAfter as Record<string, unknown>)[key]),
     );
@@ -1791,10 +1794,12 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(rootAfter?.projectId).toBeNull();
     // Same whole-row comparison as the goal case, for the same reason: the
     // claim is that the update derived *nothing*, not that it stopped deriving
-    // the two fields a review happened to name.
+    // the two fields a review happened to name. `revision` is excluded because
+    // a DB trigger bumps it on every row update, not this derivation.
     const columnsChanged = Object.keys(rootBefore ?? {}).filter(
       (key) =>
         key !== "updatedAt" &&
+        key !== "revision" &&
         JSON.stringify((rootBefore as Record<string, unknown>)[key])
           !== JSON.stringify((rootAfter as Record<string, unknown>)[key]),
     );
