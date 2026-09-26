@@ -1,0 +1,23 @@
+server/src/__tests__/task-watchdogs-scheduler.test.ts
+  s_49f62545611f8e::t_f219efed094090 26,107,334-371,445-458
+server/src/services/task-watchdog-scope.ts
+  s_49f62545611f8e::t_799b94deee318c 208-209,216
+server/src/services/task-watchdogs.ts
+  s_49f62545611f8e::t_0e299ebe74e242 1428,2123-2124,2131,2135
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "417f21558eb2c5642a1c9f48d3ff242a93ee7ad6",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
