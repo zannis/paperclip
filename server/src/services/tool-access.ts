@@ -6984,7 +6984,7 @@ export function toolAccessService(
     let apiMessage = "Direct Railway service, log, and deployment tools are available.";
     try {
       const railwayOptions = {
-        authorization: headers.Authorization ?? "",
+        authorization: headers.authorization ?? "",
         request: (url: string, init: RequestInit) => requestRemoteHttpEndpoint(new URL(url), init),
         signal: AbortSignal.timeout(15_000),
       };
