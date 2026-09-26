@@ -73,6 +73,7 @@ import type { IncomingMessage, RequestOptions as HttpRequestOptions } from "node
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { forbidden } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
@@ -1916,8 +1917,10 @@ export function buildHostServices(
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
         // Grouped children are board-only; a plugin is never a board actor.
-        const { actorAgentId, actorUserId, actorRunId, originKind, surfaceVisibility, groupedChild: _groupedChild, ...issueInput } =
-          params as typeof params & { groupedChild?: unknown };
+        if ("groupedChild" in params) {
+          throw forbidden("Plugins cannot set groupedChild");
+        }
+        const { actorAgentId, actorUserId, actorRunId, originKind, surfaceVisibility, ...issueInput } = params;
         const normalizedOriginKind = normalizePluginOriginKind(
           surfaceVisibility === "plugin_operation" && !originKind
             ? pluginOperationIssueOriginKind(pluginKey)

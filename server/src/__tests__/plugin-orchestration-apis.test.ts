@@ -316,9 +316,14 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
     const parent = await services.issues.create({ companyId, title: "Parent" });
 
-    const child = await services.issues.create({
-      companyId, title: "Child", parentId: parent.id, groupedChild: true,
-    } as Parameters<typeof services.issues.create>[0]);
+    for (const groupedChild of [true, false]) {
+      await expect(services.issues.create({
+        companyId, title: "Grouped", parentId: parent.id, groupedChild,
+      } as Parameters<typeof services.issues.create>[0])).rejects.toThrow("Plugins cannot set groupedChild");
+    }
+    expect(await db.select().from(issues).where(eq(issues.parentId, parent.id))).toEqual([]);
+
+    const child = await services.issues.create({ companyId, title: "Child", parentId: parent.id });
     const stored = await db.select().from(issues).where(eq(issues.id, child.id)).then((rows) => rows[0]);
     expect(stored).toMatchObject({ parentId: parent.id, groupedChild: false });
 
