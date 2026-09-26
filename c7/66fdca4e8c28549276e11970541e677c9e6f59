@@ -1,0 +1,21 @@
+packages/plugins/sdk/src/testing.ts
+  s_49f62545611f8e::t_e5b792b46a7347 1944,1975
+server/src/__tests__/plugin-sdk-orchestration-contract.test.ts
+  s_49f62545611f8e::t_fa9c39fc5b89e0 257-279
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "c766fdca4e8c28549276e11970541e677c9e6f59",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
