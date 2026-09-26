@@ -220,4 +220,91 @@ d("grouped child issues", () => {
       },
     );
   });
+
+  describe("parent to child", () => {
+    it.each(["done", "cancelled", "in_review", "blocked"] as const)(
+      "the parent moving to %s leaves a grouped child's status, assignee and revision alone",
+      async (status) => {
+        const t = await seedTicket();
+        const lane = await createChild(t, { groupedChild: true });
+        const before = (await request(app()).get(`/api/issues/${lane.id}`).expect(200)).body;
+        await quiet();
+        await request(app()).patch(`/api/issues/${t.ticketId}`).send({
+          status,
+          ...(status === "blocked" ? { unblockDescriptor: { owner: "board", action: "ticket parked" } } : {}),
+        }).expect(200);
+        await settle();
+        const after = (await request(app()).get(`/api/issues/${lane.id}`).expect(200)).body;
+        expect(after.status).toBe("todo");
+        expect(after.assigneeAgentId).toBe(t.conductorId);
+        expect(after.revision).toBe(before.revision);
+        expect(wakes().filter((w) => w.agentId === t.conductorId)).toEqual([]);
+      },
+    );
+
+    it("a grouped child reopens by conditional PATCH after its parent is done (the lane wake)", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      await request(app()).patch(`/api/issues/${lane.id}`).send({ status: "done" }).expect(200);
+      await request(app()).patch(`/api/issues/${t.ticketId}`).send({ status: "done" }).expect(200);
+      const done = (await request(app()).get(`/api/issues/${lane.id}`).expect(200)).body;
+      await quiet();
+      await request(app()).patch(`/api/issues/${lane.id}`).send({
+        status: "todo", description: "brief 2", comment: "<!-- delivery:v1 {\"token\":\"w2\"} -->",
+        expected: { revision: done.revision, status: "done" },
+      }).expect(200);
+      await vi.waitFor(() => expect(wakes().filter((w) => w.agentId === t.conductorId)).toHaveLength(1));
+      await settle();
+      expect(wakes().filter((w) => w.agentId === t.conductorId)).toHaveLength(1);
+      expect(wakes().filter((w) => w.agentId === t.engineerId)).toEqual([]);
+    });
+
+    it("the parent cannot be deleted while a grouped child references it; the child is untouched", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      await request(app()).delete(`/api/issues/${t.ticketId}`).expect(409);
+      const after = (await request(app()).get(`/api/issues/${lane.id}`).expect(200)).body;
+      expect(after.parentId).toBe(t.ticketId);
+      expect(after.status).toBe("todo");
+    });
+  });
+
+  describe("pins flow depends on", () => {
+    it("parentId is mutable by PATCH, and a grouped child keeps its flag when re-parented", async () => {
+      const t = await seedTicket();
+      const other = await request(app()).post(`/api/companies/${t.companyId}/issues`)
+        .send({ title: "other ticket", status: "todo", allowDuplicate: true }).expect(201);
+      const lane = await createChild(t, { groupedChild: true });
+      const orphan = await request(app()).post(`/api/companies/${t.companyId}/issues`)
+        .send({ title: "seeded lane", status: "todo", allowDuplicate: true, assigneeAgentId: t.conductorId }).expect(201);
+      const moved = await request(app()).patch(`/api/issues/${lane.id}`).send({ parentId: other.body.id }).expect(200);
+      expect(moved.body.parentId).toBe(other.body.id);
+      expect(moved.body.groupedChild).toBe(true);
+      const adopted = await request(app()).patch(`/api/issues/${orphan.body.id}`).send({ parentId: t.ticketId }).expect(200);
+      expect(adopted.body.parentId).toBe(t.ticketId);
+      expect(adopted.body.groupedChild).toBe(false);
+    });
+
+    it.each(["done", "blocked"] as const)(
+      "comment + todo in one conditional PATCH from %s wakes the assignee exactly once",
+      async (from) => {
+        const t = await seedTicket();
+        const lane = await createChild(t, { groupedChild: true });
+        await request(app()).patch(`/api/issues/${lane.id}`).send({
+          status: from,
+          ...(from === "blocked" ? { unblockDescriptor: { owner: "board", action: "lane parked" } } : {}),
+        }).expect(200);
+        const parked = (await request(app()).get(`/api/issues/${lane.id}`).expect(200)).body;
+        await quiet();
+        await request(app()).patch(`/api/issues/${lane.id}`).send({
+          status: "todo", description: "brief 2", comment: "<!-- delivery:v1 {\"token\":\"w\"} -->",
+          expected: { revision: parked.revision, status: from },
+        }).expect(200);
+        await vi.waitFor(() => expect(wakes().filter((w) => w.agentId === t.conductorId)).toHaveLength(1));
+        await settle();
+        expect(wakes()).toHaveLength(1);
+        expect(wakes()[0]!.payload?.issueId).toBe(lane.id);
+      },
+    );
+  });
 });
