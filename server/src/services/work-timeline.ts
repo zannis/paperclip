@@ -65,6 +65,7 @@ type IssueRow = {
   projectId: string | null;
   goalId: string | null;
   parentId: string | null;
+  groupedChild: boolean;
   identifier: string | null;
   title: string | null;
   createdByAgentId: string | null;
@@ -320,6 +321,7 @@ export function workTimelineService(db: Db) {
         projectId: issues.projectId,
         goalId: issues.goalId,
         parentId: issues.parentId,
+        groupedChild: issues.groupedChild,
         identifier: issues.identifier,
         title: issues.title,
         createdByAgentId: issues.createdByAgentId,
@@ -410,14 +412,15 @@ export function workTimelineService(db: Db) {
     while (changed) {
       changed = false;
       for (const issue of rows) {
-        if (issue.parentId && selected.has(issue.parentId) && !selected.has(issue.id)) {
+        if (issue.parentId && !issue.groupedChild && selected.has(issue.parentId) && !selected.has(issue.id)) {
           selected.add(issue.id);
           changed = true;
         }
       }
     }
 
-    return rows.filter((issue) => selected.has(issue.id) || byId.get(issue.parentId ?? "") && selected.has(issue.parentId ?? ""));
+    return rows.filter((issue) => selected.has(issue.id)
+      || (!issue.groupedChild && byId.get(issue.parentId ?? "") && selected.has(issue.parentId ?? "")));
   }
 
   async function loadActorMaps(companyId: string, actorIds: Set<string>) {

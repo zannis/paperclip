@@ -94,6 +94,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     title: string;
     status: string;
     parentId?: string | null;
+    groupedChild?: boolean;
     assigneeAgentId?: string | null;
     assigneeUserId?: string | null;
     originKind?: string | null;
@@ -111,6 +112,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
       status: input.status,
       priority: "medium",
       parentId: input.parentId ?? null,
+      groupedChild: input.groupedChild ?? false,
       assigneeAgentId: input.assigneeAgentId ?? null,
       assigneeUserId: input.assigneeUserId ?? null,
       originKind: input.originKind ?? "manual",
@@ -260,6 +262,36 @@ describeEmbeddedPostgres("issue blocker attention", () => {
       coveredBlockerCount: 1,
       attentionBlockerCount: 1,
       sampleBlockerIdentifier: "PBM-3",
+    });
+  });
+
+  it("ignores open grouped children and their descendants when counting unresolved blocker attention", async () => {
+    const { companyId, agentId } = await createCompany("PBG");
+    const parentId = await insertIssue({ companyId, identifier: "PBG-1", title: "Parent", status: "blocked" });
+    const dependencyId = await insertIssue({
+      companyId, identifier: "PBG-2", title: "Running dependency", status: "todo", assigneeAgentId: agentId,
+    });
+    const liveLaneId = await insertIssue({
+      companyId, identifier: "PBG-3", title: "Live lane", status: "todo", parentId, groupedChild: true, assigneeAgentId: agentId,
+    });
+    const strandedLaneId = await insertIssue({
+      companyId, identifier: "PBG-4", title: "Stranded lane", status: "todo", parentId, groupedChild: true,
+    });
+    await insertIssue({ companyId, identifier: "PBG-5", title: "Lane leaf", status: "todo", parentId: strandedLaneId });
+    await block({ companyId, blockerIssueId: dependencyId, blockedIssueId: parentId });
+    await activeRun({ companyId, agentId, issueId: dependencyId });
+    await activeRun({ companyId, agentId, issueId: liveLaneId });
+
+    const parent = (await svc.list(companyId, { status: "blocked" })).find((issue) => issue.id === parentId);
+
+    expect(parent?.blockerAttention).toMatchObject({
+      state: "covered",
+      reason: "active_dependency",
+      unresolvedBlockerCount: 1,
+      coveredBlockerCount: 1,
+      stalledBlockerCount: 0,
+      attentionBlockerCount: 0,
+      sampleBlockerIdentifier: "PBG-2",
     });
   });
 

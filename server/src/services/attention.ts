@@ -992,6 +992,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
           .where(and(
             eq(issues.companyId, companyId),
             inArray(issues.parentId, chunk),
+            eq(issues.groupedChild, false),
             isNull(issues.hiddenAt),
             notInArray(issues.status, ["done", "cancelled"]),
           ))
