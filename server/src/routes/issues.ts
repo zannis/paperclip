@@ -14171,6 +14171,7 @@ export function issueRoutes(
           : (updateFields.parentId as string | null);
       const shouldRelayStop =
         Boolean(nextParentId) &&
+        !existing.groupedChild &&
         existing.status !== updateFields.status &&
         (updateFields.status === "blocked" ||
           updateFields.status === "cancelled") &&
@@ -15644,7 +15645,7 @@ export function issueRoutes(
           });
           await destroyReusableSandboxLeasesForTerminalIssue(issue);
         }
-        if (becameTerminal && issue.parentId) {
+        if (becameTerminal && issue.parentId && !issue.groupedChild) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
             issue.parentId,
           );
@@ -19105,7 +19106,7 @@ export function issueRoutes(
           });
           await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
         }
-        if (becameTerminal && currentIssue.parentId) {
+        if (becameTerminal && currentIssue.parentId && !currentIssue.groupedChild) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
             currentIssue.parentId,
           );

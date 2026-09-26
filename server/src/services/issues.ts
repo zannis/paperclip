@@ -9273,6 +9273,7 @@ export function issueService(db: Db) {
           and(
             eq(issues.companyId, parent.companyId),
             eq(issues.parentId, parentIssueId),
+            eq(issues.groupedChild, false),
           ),
         )
         .orderBy(asc(issues.issueNumber), asc(issues.createdAt));

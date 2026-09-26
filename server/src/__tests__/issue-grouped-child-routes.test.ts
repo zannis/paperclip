@@ -149,4 +149,75 @@ d("grouped child issues", () => {
       expect(replay.body.groupedChild).toBe(true);
     });
   });
+
+  describe("child to parent", () => {
+    it.each(["done", "cancelled"] as const)(
+      "a grouped child moving to %s does not wake the parent's assignee, even with every sibling finished",
+      async (status) => {
+        const t = await seedTicket();
+        const finished = await createChild(t);
+        await request(app()).patch(`/api/issues/${finished.id}`).send({ status: "done" }).expect(200);
+        const lane = await createChild(t, { groupedChild: true });
+        await quiet();
+        await request(app()).patch(`/api/issues/${lane.id}`).send({ status }).expect(200);
+        await settle();
+        expect(wakes().filter((w) => w.agentId === t.engineerId)).toEqual([]);
+        expect(wakes().filter((w) => w.reason === "issue_children_completed")).toEqual([]);
+      },
+    );
+
+    it.each(["done", "cancelled"] as const)(
+      "an ordinary child moving to %s still wakes the parent's assignee with issue_children_completed",
+      async (status) => {
+        const t = await seedTicket();
+        const plain = await createChild(t);
+        await quiet();
+        await request(app()).patch(`/api/issues/${plain.id}`).send({ status }).expect(200);
+        await vi.waitFor(() => expect(wakes().filter((w) => w.reason === "issue_children_completed")).toHaveLength(1));
+        const [wake] = wakes().filter((w) => w.reason === "issue_children_completed");
+        expect(wake!.agentId).toBe(t.engineerId);
+        expect(wake!.payload?.completedChildIssueId).toBe(plain.id);
+      },
+    );
+
+    it("an open grouped sibling neither holds back nor joins the parent's children-completed wake", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      const plain = await createChild(t);
+      await quiet();
+      await request(app()).patch(`/api/issues/${plain.id}`).send({ status: "done" }).expect(200);
+      await vi.waitFor(() => expect(wakes().filter((w) => w.reason === "issue_children_completed")).toHaveLength(1));
+      const [wake] = wakes().filter((w) => w.reason === "issue_children_completed");
+      expect(wake!.payload?.childIssueIds).toEqual([plain.id]);
+      expect(JSON.stringify(wake!.payload)).not.toContain(lane.id);
+    });
+
+    it.each(["blocked", "cancelled"] as const)(
+      "a grouped child moving to %s posts no stop relay on a low-trust parent; an ordinary one does",
+      async (status) => {
+        const t = await seedTicket();
+        const lane = await createChild(t, { groupedChild: true });
+        const plain = await createChild(t);
+        await db.update(issues).set({ executionPolicy: { trustPreset: "low_trust_review" } })
+          .where(eq(issues.parentId, t.ticketId));
+        await quiet();
+        const body = (s: string) => ({
+          status: s,
+          ...(s === "blocked" ? { unblockDescriptor: { owner: "board", action: "lane parked" } } : {}),
+        });
+        await request(app()).patch(`/api/issues/${lane.id}`).send(body(status)).expect(200);
+        await settle();
+        const relaysAfterLane = await db.select().from(issueComments)
+          .where(and(eq(issueComments.issueId, t.ticketId), eq(issueComments.authorType, "system")));
+        expect(relaysAfterLane).toEqual([]);
+        expect(wakes().filter((w) => w.agentId === t.engineerId)).toEqual([]);
+
+        await request(app()).patch(`/api/issues/${plain.id}`).send(body(status)).expect(200);
+        const relaysAfterPlain = await db.select().from(issueComments)
+          .where(and(eq(issueComments.issueId, t.ticketId), eq(issueComments.authorType, "system")));
+        expect(relaysAfterPlain).toHaveLength(1);
+        expect(relaysAfterPlain[0]!.body).toContain(`transitioned to \`${status}\``);
+      },
+    );
+  });
 });
