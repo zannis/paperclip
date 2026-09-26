@@ -1,0 +1,20 @@
+server/src/__tests__/issue-watchdogs-routes.test.ts
+  s_49f62545611f8e::t_474de01d2e89d7 1724-1725,1729
+  s_49f62545611f8e::t_04e8fb8d9c4cf2 1797-1798,1802
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "210caa48325264bceb9a867a1bbc132e341840c4",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
