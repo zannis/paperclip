@@ -1941,7 +1941,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         let frontier = [root.id];
         while (frontier.length > 0) {
           const children = [...issues.values()]
-            .filter((issue) => issue.companyId === companyId && frontier.includes(issue.parentId ?? ""))
+            .filter((issue) => issue.companyId === companyId && !issue.groupedChild && frontier.includes(issue.parentId ?? ""))
             .map((issue) => issue.id)
             .filter((id) => !allIds.includes(id));
           allIds.push(...children);
@@ -1972,7 +1972,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             let frontier = [root.id];
             while (frontier.length > 0) {
               const children = [...issues.values()]
-                .filter((issue) => issue.companyId === input.companyId && frontier.includes(issue.parentId ?? ""))
+                .filter((issue) => issue.companyId === input.companyId && !issue.groupedChild && frontier.includes(issue.parentId ?? ""))
                 .map((issue) => issue.id)
                 .filter((id) => !subtreeIssueIds.includes(id));
               subtreeIssueIds.push(...children);
