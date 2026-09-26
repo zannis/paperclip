@@ -835,6 +835,54 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     expect(finalState?.status).toBe("archived");
   }, 30_000);
 
+  async function workspaceStatus(executionWorkspaceId: string) {
+    const [row] = await db
+      .select({ status: executionWorkspaces.status })
+      .from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, executionWorkspaceId));
+    return row?.status ?? null;
+  }
+
+  async function addGroupedChildTree(seeded: { companyId: string; projectId: string; sourceIssueId: string }) {
+    const laneId = randomUUID();
+    await db.insert(issues).values({
+      id: laneId, companyId: seeded.companyId, projectId: seeded.projectId, parentId: seeded.sourceIssueId,
+      groupedChild: true, title: "Lane", status: "todo", priority: "medium",
+    });
+    await db.insert(issues).values({
+      id: randomUUID(), companyId: seeded.companyId, projectId: seeded.projectId, parentId: laneId,
+      title: "Lane child", status: "todo", priority: "medium",
+    });
+    return laneId;
+  }
+
+  it("archives a terminal workspace whose only open descendants sit under a grouped child", async () => {
+    const grouped = await seedTerminalWorkspace({ mergedPr: true });
+    await addGroupedChildTree(grouped);
+    const ordinary = await seedTerminalWorkspace({ mergedPr: true, childStatus: "todo" });
+
+    const sweep = await svc.sweepTerminalWorkspaces();
+
+    expect(sweep).toMatchObject({ archived: 1, skippedNonTerminalTree: 1, skippedRace: 0 });
+    expect(await workspaceStatus(grouped.executionWorkspaceId)).toBe("archived");
+    expect(await workspaceStatus(ordinary.executionWorkspaceId)).toBe("active");
+  }, 20_000);
+
+  it("still walks the subtree of a grouped source issue", async () => {
+    const seeded = await seedTerminalWorkspace({ mergedPr: true, childStatus: "todo" });
+    const parentId = randomUUID();
+    await db.insert(issues).values({
+      id: parentId, companyId: seeded.companyId, projectId: seeded.projectId,
+      title: "Ticket", status: "todo", priority: "medium",
+    });
+    await db.update(issues).set({ parentId, groupedChild: true }).where(eq(issues.id, seeded.sourceIssueId));
+
+    const sweep = await svc.sweepTerminalWorkspaces();
+
+    expect(sweep).toMatchObject({ archived: 0, skippedNonTerminalTree: 1 });
+    expect(await workspaceStatus(seeded.executionWorkspaceId)).toBe("active");
+  }, 20_000);
+
   describe("reaper cooldown", () => {
     const DAY_MS = 24 * 60 * 60 * 1000;
     const nowMs = Date.UTC(2026, 5, 1);
@@ -893,6 +941,29 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
 
       expect(sweep).toMatchObject({ archived: 1, skippedCooldown: 0 });
       expect(await statusOf(seeded.executionWorkspaceId)).toBe("archived");
+    }, 20_000);
+
+    it("ignores a grouped child's recent completion but not an ordinary child's", async () => {
+      const seedAged = async (groupedChild: boolean) => {
+        const seeded = await seedTerminalWorkspace({ mergedPr: true });
+        await db.update(executionWorkspaces).set({ updatedAt: new Date(nowMs - DAY_MS) })
+          .where(eq(executionWorkspaces.id, seeded.executionWorkspaceId));
+        await db.update(issues).set({ completedAt: new Date(nowMs - 10 * DAY_MS) })
+          .where(eq(issues.id, seeded.sourceIssueId));
+        await db.insert(issues).values({
+          id: randomUUID(), companyId: seeded.companyId, projectId: seeded.projectId, parentId: seeded.sourceIssueId,
+          groupedChild, title: "Recent child", status: "done", priority: "medium", completedAt: new Date(nowMs - DAY_MS),
+        });
+        return seeded;
+      };
+      const grouped = await seedAged(true);
+      const ordinary = await seedAged(false);
+
+      const sweep = await cooldownService(7).sweepTerminalWorkspaces();
+
+      expect(sweep).toMatchObject({ archived: 1, skippedCooldown: 1, skippedRace: 0 });
+      expect(await statusOf(grouped.executionWorkspaceId)).toBe("archived");
+      expect(await statusOf(ordinary.executionWorkspaceId)).toBe("active");
     }, 20_000);
 
     it("archives immediately when the cooldown is zero", async () => {
