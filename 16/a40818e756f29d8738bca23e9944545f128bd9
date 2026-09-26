@@ -1,0 +1,33 @@
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_044b2d431bb942 19109
+  s_49f62545611f8e::t_fbad7a51c423d1 15648
+  s_49f62545611f8e::t_024437a2867e45 14174
+server/src/__tests__/issue-grouped-child-routes.test.ts
+  s_49f62545611f8e::t_e78b45430781d9 152-222
+server/src/services/issues.ts
+  s_bd1cc0642b09f0::t_238b0f250e3cc0 9276
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "16a40818e756f29d8738bca23e9944545f128bd9",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_bd1cc0642b09f0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-aed627a8c5b8eee9f",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
