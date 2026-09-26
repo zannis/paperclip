@@ -726,6 +726,7 @@ describe("issue update comment wakeups", () => {
     "completed_explicit_resume", "completed_parent_reference", "completed_mixed_reference",
     "completed_delegation_without_blocker", "completed_foreign_company", "completed_unrelated_child", "completed_other_assignee", "completed_lookup_failure",
     "unrelated_child", "foreign_company", "stopped_run", "foreign_run", "unrelated_run", "lookup_failure",
+    "grouped_child", "completed_grouped_child",
   ].map((scenario) => ({ method, scenario }))))("routes $method mentions correctly for $scenario", async ({ method, scenario }) => {
     const existing = makeIssue({ assigneeAgentId: ASSIGNEE_AGENT_ID, assigneeUserId: null, status: "blocked", executionRunId: SOURCE_RUN_ID });
     const child = makeIssue({
@@ -753,6 +754,7 @@ describe("issue update comment wakeups", () => {
     if (scenario === "unrelated_child" || scenario === "completed_unrelated_child") child.parentId = "other-parent";
     if (scenario === "foreign_company" || scenario === "completed_foreign_company") child.companyId = "other-company";
     if (scenario === "completed_other_assignee") child.assigneeAgentId = "other-agent";
+    if (scenario === "grouped_child" || scenario === "completed_grouped_child") Object.assign(child, { groupedChild: true });
     mockIssueService.getById.mockImplementation(async (id) => {
       if (id === child.id && scenario === "lookup_failure") throw new Error("temporary read failure");
       if (id === secondChild.id) return secondChild;

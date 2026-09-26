@@ -3821,7 +3821,7 @@ export function issueRoutes(
           ? await svc.getByIdentifier(identifier)
           : blocker ? await svc.getById(blocker.id) : null;
         if (
-          !candidate || candidate.companyId !== parent.companyId ||
+          !candidate || candidate.companyId !== parent.companyId || candidate.groupedChild ||
           candidate.parentId !== parent.id || candidate.assigneeAgentId !== mentionedAgentId
         ) continue;
         // Do not choose an arbitrary task when the comment names several.
