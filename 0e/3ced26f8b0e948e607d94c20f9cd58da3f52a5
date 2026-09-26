@@ -1,0 +1,21 @@
+server/src/services/native-runtime/status-decision-committer.ts
+  s_49f62545611f8e::t_17e51c1d24181a 1924
+server/src/services/native-runtime/grouped-child-native-completion.test.ts
+  s_49f62545611f8e::t_c82fdbcc9d540b 1-107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0e3ced26f8b0e948e607d94c20f9cd58da3f52a5",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
