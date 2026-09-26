@@ -177,7 +177,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     "mixed_human_comments", "mixed_other_run_comments", "mixed_unrelated_comments",
     "no_reference", "code_reference", "ambiguous_children", "child_open", "child_cancelled",
     "foreign_child", "unrelated_child", "other_child_assignee", "parent_open",
-    "source_other_task", "source_other_agent", "wrong_company", "wrong_run",
+    "source_other_task", "source_other_agent", "wrong_company", "wrong_run", "grouped_child",
   ])("proves completed delegation from transactional comment and child rows (%s)", async (scenario) => {
     const companyId = await seedCompany();
     const otherCompanyId = await seedCompany();
@@ -191,12 +191,13 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       status: "succeeded", contextSnapshot: { issueId: scenario === "source_other_task" ? otherIssueId : issueId } });
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
     const otherRunId = await seedRun({ companyId, agentId: leadId, status: "succeeded", contextSnapshot: { issueId } });
-    await seedIssue({
+    const childId = await seedIssue({
       companyId: scenario === "foreign_child" ? otherCompanyId : companyId,
       identifier: "QA-2", parentId: scenario === "unrelated_child" ? otherIssueId : issueId,
       assigneeAgentId: scenario === "foreign_child" ? foreignAgentId : scenario === "other_child_assignee" ? leadId : workerId,
       status: scenario === "child_open" ? "in_progress" : scenario === "child_cancelled" ? "cancelled" : "done",
     });
+    if (scenario === "grouped_child") await db.update(issues).set({ groupedChild: true }).where(eq(issues.id, childId));
     if (scenario === "ambiguous_children") {
       await seedIssue({ companyId, identifier: "QA-3", parentId: issueId, assigneeAgentId: workerId, status: "done" });
     }

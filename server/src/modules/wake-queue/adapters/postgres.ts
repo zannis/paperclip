@@ -406,6 +406,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
       const children = await tx.select({ identifier: issues.identifier, status: issues.status })
         .from(issues).where(and(
           eq(issues.companyId, companyId), eq(issues.parentId, issueId),
+          eq(issues.groupedChild, false),
           eq(issues.assigneeAgentId, wakeAgentId), inArray(issues.identifier, identifiers),
         ));
       return referencesByComment.every((references) => {
