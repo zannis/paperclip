@@ -1,0 +1,22 @@
+server/src/__tests__/execution-workspaces-service.test.ts
+  s_49f62545611f8e::t_dd060347cf830e 838-885
+  s_49f62545611f8e::t_0bf3f562590dcd 946-968
+server/src/services/execution-workspaces.ts
+  s_49f62545611f8e::t_ee8b3be109ef23 1346,2791,2812
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2feb1d0434c4ed52f41413c72b1edfaa6c757412",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
