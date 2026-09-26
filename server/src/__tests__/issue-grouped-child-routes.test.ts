@@ -95,7 +95,7 @@ d("grouped child issues", () => {
       title: `child ${randomUUID().slice(0, 6)}`, status: "todo", allowDuplicate: true,
       parentId: t.ticketId, assigneeAgentId: t.conductorId, ...extra,
     }).expect(201);
-    return res.body as { id: string; groupedChild: boolean; parentId: string };
+    return res.body as { id: string; title: string; groupedChild: boolean; parentId: string };
   };
   const quiet = async () => { await settle(); wakeupSpy.mockClear(); };
 
@@ -139,18 +139,21 @@ d("grouped child issues", () => {
       expect((await request(app()).get(`/api/issues/${plain.id}`).expect(200)).body.groupedChild).toBe(false);
     });
 
-    it("cannot be changed through the issue service either, in both directions", async () => {
+    it("cannot be written through the issue service at all, changed or not", async () => {
       const t = await seedTicket();
       const lane = await createChild(t, { groupedChild: true });
       const plain = await createChild(t);
       const svc = issueService(db);
       await expect(svc.update(lane.id, { groupedChild: false })).rejects.toThrow("groupedChild is fixed at creation");
       await expect(svc.update(plain.id, { groupedChild: true })).rejects.toThrow("groupedChild is fixed at creation");
-      await svc.update(lane.id, { groupedChild: true, title: "same flag" });
+      await expect(svc.update(lane.id, { groupedChild: true, title: "same flag" }))
+        .rejects.toThrow("groupedChild is fixed at creation");
+      await expect(svc.update(plain.id, { groupedChild: false, title: "same flag" }))
+        .rejects.toThrow("groupedChild is fixed at creation");
       const rows = Object.fromEntries((await db.select().from(issues).where(eq(issues.companyId, t.companyId)))
         .map((row) => [row.id, row]));
-      expect(rows[lane.id]).toMatchObject({ groupedChild: true, title: "same flag" });
-      expect(rows[plain.id]?.groupedChild).toBe(false);
+      expect(rows[lane.id]).toMatchObject({ groupedChild: true, title: lane.title });
+      expect(rows[plain.id]).toMatchObject({ groupedChild: false, title: plain.title });
     });
 
     it("is refused on the child-create helper route", async () => {
