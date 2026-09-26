@@ -6020,6 +6020,168 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toBe(true);
   });
 
+  it("excludes an open grouped child from the dependency wait, but still blocks on an ordinary open sibling", async () => {
+    const { companyId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+      runError: "Continuation parked: issue is waiting on review/approval",
+    });
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const groupedChildId = randomUUID();
+    const ordinaryChildId = randomUUID();
+
+    await db.insert(issues).values([
+      {
+        id: groupedChildId,
+        companyId,
+        parentId: issueId,
+        title: "Lane child still open",
+        status: "todo",
+        priority: "medium",
+        issueNumber: 10,
+        identifier: `${issuePrefix}-10`,
+        groupedChild: true,
+      },
+      {
+        id: ordinaryChildId,
+        companyId,
+        parentId: issueId,
+        title: "Ordinary child still open",
+        status: "todo",
+        priority: "medium",
+        issueNumber: 11,
+        identifier: `${issuePrefix}-11`,
+      },
+    ]);
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.waitingOnReviewResolved).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const umbrella = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(umbrella?.status).toBe("blocked");
+
+    // Only the ordinary open child becomes a blocker; the grouped one is invisible.
+    const blockers = await sourceBlockerIssueIds(companyId, issueId);
+    expect(blockers).toEqual([ordinaryChildId]);
+
+    const comments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain(`${issuePrefix}-11`);
+    expect(comments[0]?.body).not.toContain(`${issuePrefix}-10`);
+  });
+
+  it("treats an open grouped child as no blocker at all, falling through the same as having no children", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+      runError: "Continuation parked: issue is waiting on review/approval",
+    });
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const groupedChildId = randomUUID();
+
+    await db.insert(issues).values({
+      id: groupedChildId,
+      companyId,
+      parentId: issueId,
+      title: "Lane child still open",
+      status: "todo",
+      priority: "medium",
+      issueNumber: 10,
+      identifier: `${issuePrefix}-10`,
+      groupedChild: true,
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    // Same outcome as the "no target exists" case below: the grouped child
+    // does not establish a dependency wait, so this falls through to the
+    // disposition-repair requeue path instead of blocking.
+    expect(result.waitingOnReviewResolved).toBe(0);
+    expect(result.continuationRequeued).toBe(1);
+    expect(result.dispositionRepairRequeued).toBe(1);
+    expect(result.escalated).toBe(0);
+    await expect(sourceBlockerIssueIds(companyId, issueId)).resolves.toEqual(
+      [],
+    );
+
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(sourceIssue).toMatchObject({
+      status: "in_progress",
+      assigneeAgentId: agentId,
+    });
+  });
+
+  it("leaves the disposition-repair fingerprint unchanged by a grouped child, but not by an ordinary one", async () => {
+    const { companyId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+    });
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    const sourceIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]!);
+    const stateOf = () => collectDispositionRepairSourceState(db, { issue: sourceIssue });
+    const before = await stateOf();
+
+    const groupedChildId = randomUUID();
+    await db.insert(issues).values({
+      id: groupedChildId,
+      companyId,
+      parentId: issueId,
+      title: "Lane child",
+      status: "todo",
+      priority: "medium",
+      issueNumber: 10,
+      identifier: `${issuePrefix}-10`,
+      groupedChild: true,
+    });
+    const withLane = await stateOf();
+    await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, groupedChildId));
+    const afterLaneTransition = await stateOf();
+
+    expect(withLane.fingerprint).toBe(before.fingerprint);
+    expect(afterLaneTransition.fingerprint).toBe(before.fingerprint);
+    expect(afterLaneTransition.dependencyIssueIds).not.toContain(groupedChildId);
+
+    const ordinaryChildId = randomUUID();
+    await db.insert(issues).values({
+      id: ordinaryChildId,
+      companyId,
+      parentId: issueId,
+      title: "Ordinary child",
+      status: "todo",
+      priority: "medium",
+      issueNumber: 11,
+      identifier: `${issuePrefix}-11`,
+    });
+    const withOrdinary = await stateOf();
+    expect(withOrdinary.fingerprint).not.toBe(before.fingerprint);
+    expect(withOrdinary.dependencyIssueIds).toContain(ordinaryChildId);
+  });
+
   it("converts a continuation parked for review into a dependency wait on its existing blockers", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",

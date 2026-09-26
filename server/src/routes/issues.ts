@@ -357,6 +357,7 @@ import {
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInWakePayload,
 } from "../services/issue-queued-comment-queue.js";
+import { blockerCountsFor, relationBlockerCounts } from "../services/grouped-child-blocker-edge.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -3821,7 +3822,7 @@ export function issueRoutes(
           ? await svc.getByIdentifier(identifier)
           : blocker ? await svc.getById(blocker.id) : null;
         if (
-          !candidate || candidate.companyId !== parent.companyId ||
+          !candidate || candidate.companyId !== parent.companyId || candidate.groupedChild ||
           candidate.parentId !== parent.id || candidate.assigneeAgentId !== mentionedAgentId
         ) continue;
         // Do not choose an arbitrary task when the comment names several.
@@ -6708,6 +6709,7 @@ export function issueRoutes(
         and(
           eq(issueRows.companyId, parent.companyId),
           eq(issueRows.parentId, parent.id),
+          eq(issueRows.groupedChild, false),
           inArray(issueRows.status, [
             "todo",
             "in_progress",
@@ -9975,6 +9977,7 @@ export function issueRoutes(
                 eq(issueRelations.companyId, existing.companyId),
                 eq(issueRelations.relatedIssueId, existing.id),
                 eq(issueRelations.type, "blocks"),
+                relationBlockerCounts(),
                 notInArray(issueRows.status, ["done", "cancelled"]),
               ),
             )
@@ -12185,6 +12188,9 @@ export function issueRoutes(
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
+      if (req.body.groupedChild !== undefined && req.actor.type !== "board") {
+        throw forbidden("Only the board can create a grouped child issue");
+      }
       if (isSkillTestScopedActor(req)) {
         res.status(403).json({
           error: "Skill-test run tokens cannot create issues.",
@@ -13950,6 +13956,7 @@ export function issueRoutes(
                 and(
                   eq(issueRows.companyId, existing.companyId),
                   inArray(issueRows.id, requestedBlockerIds),
+                  blockerCountsFor(issueRows, existing.id),
                   notInArray(issueRows.status, ["done", "cancelled"]),
                 ),
               )
@@ -14168,6 +14175,7 @@ export function issueRoutes(
           : (updateFields.parentId as string | null);
       const shouldRelayStop =
         Boolean(nextParentId) &&
+        !existing.groupedChild &&
         existing.status !== updateFields.status &&
         (updateFields.status === "blocked" ||
           updateFields.status === "cancelled") &&
@@ -15641,7 +15649,7 @@ export function issueRoutes(
           });
           await destroyReusableSandboxLeasesForTerminalIssue(issue);
         }
-        if (becameTerminal && issue.parentId) {
+        if (becameTerminal && issue.parentId && !issue.groupedChild) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
             issue.parentId,
           );
@@ -19102,7 +19110,7 @@ export function issueRoutes(
           });
           await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
         }
-        if (becameTerminal && currentIssue.parentId) {
+        if (becameTerminal && currentIssue.parentId && !currentIssue.groupedChild) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
             currentIssue.parentId,
           );

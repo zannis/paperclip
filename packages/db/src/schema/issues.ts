@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   unique,
   bigint,
+  boolean,
   check,
 } from "drizzle-orm/pg-core";
 import { agents } from "./agents.js";
@@ -37,6 +38,7 @@ export const issues = pgTable(
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
+    groupedChild: boolean("grouped_child").notNull().default(false),
     title: text("title").notNull(),
     description: text("description"),
     status: text("status").notNull().default("backlog"),

@@ -73,6 +73,7 @@ import type { IncomingMessage, RequestOptions as HttpRequestOptions } from "node
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { forbidden } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
@@ -1079,7 +1080,11 @@ export function buildHostServices(
       const children = await db
         .select({ id: issuesTable.id })
         .from(issuesTable)
-        .where(and(eq(issuesTable.companyId, companyId), inArray(issuesTable.parentId, frontier)));
+        .where(and(
+          eq(issuesTable.companyId, companyId),
+          inArray(issuesTable.parentId, frontier),
+          eq(issuesTable.groupedChild, false),
+        ));
       frontier = children.map((child) => child.id).filter((id) => !seen.has(id));
       for (const id of frontier) seen.add(id);
     }
@@ -1915,6 +1920,10 @@ export function buildHostServices(
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
+        // Grouped children are board-only; a plugin is never a board actor.
+        if ("groupedChild" in params) {
+          throw forbidden("Plugins cannot set groupedChild");
+        }
         const { actorAgentId, actorUserId, actorRunId, originKind, surfaceVisibility, ...issueInput } = params;
         const normalizedOriginKind = normalizePluginOriginKind(
           surfaceVisibility === "plugin_operation" && !originKind

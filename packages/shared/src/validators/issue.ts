@@ -683,6 +683,10 @@ const createIssueBaseSchema = z.object({
   projectWorkspaceId: z.string().guid().optional().nullable(),
   goalId: z.string().guid().optional().nullable(),
   parentId: z.string().guid().optional().nullable(),
+  groupedChild: z
+    .boolean()
+    .describe("Board only, create only: this child's completion and stop never reach its parent")
+    .optional(),
   blockedByIssueIds: z.array(z.string().guid()).optional(),
   unblockDescriptor: z
     .object({
@@ -819,6 +823,7 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(
         .max(20)
         .optional(),
       blockParentUntilDone: z.boolean().optional().default(false),
+      groupedChild: z.never().optional(),
     }),
 ).superRefine(requireBlockedStatusForUnblockDescriptor);
 
@@ -885,6 +890,7 @@ export const updateIssueSchema = objectWithoutDefaults(
     deferWakeForGoal: z.boolean().optional(),
     hiddenAt: z.string().datetime().nullable().optional(),
     expected: issueUpdateExpectationSchema.optional(),
+    groupedChild: z.never().optional(),
   });
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;

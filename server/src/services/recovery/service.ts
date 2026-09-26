@@ -148,6 +148,7 @@ import {
   type RunOutputSilenceSummary,
   type WatchdogDecisionActor,
 } from "../../modules/active-run-watchdog/index.js";
+import { relationBlockerCounts } from "../grouped-child-blocker-edge.js";
 
 const EXECUTION_PATH_HEARTBEAT_RUN_STATUSES = [
   "queued",
@@ -1528,6 +1529,7 @@ export function recoveryService(
           eq(issueRelations.companyId, issue.companyId),
           eq(issueRelations.relatedIssueId, issue.id),
           eq(issueRelations.type, "blocks"),
+          relationBlockerCounts(),
           eq(issues.companyId, issue.companyId),
           notInArray(issues.status, ["done", "cancelled"]),
           isNull(issues.hiddenAt),
@@ -2222,6 +2224,7 @@ export function recoveryService(
       .where(
         and(
           eq(issueRelations.type, "blocks"),
+          relationBlockerCounts(),
           inArray(issues.status, ["todo", "blocked"]),
           isNull(issues.assigneeAgentId),
           isNull(issues.assigneeUserId),
@@ -2954,6 +2957,7 @@ export function recoveryService(
           eq(issueRelations.companyId, companyId),
           eq(issueRelations.relatedIssueId, issueId),
           eq(issueRelations.type, "blocks"),
+          relationBlockerCounts(),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
       );
@@ -2976,6 +2980,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          eq(issues.groupedChild, false),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
@@ -2991,6 +2996,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          eq(issues.groupedChild, false),
           ...(sameWorkspaceOnly ? [eq(issues.projectWorkspaceId, issue.projectWorkspaceId!)] : []),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
@@ -5423,6 +5429,7 @@ export function recoveryService(
           eq(issueRelations.type, "blocks"),
           eq(issueRelations.issueId, opts.blockerIssueId),
           eq(issueRelations.relatedIssueId, issues.id),
+          relationBlockerCounts(),
         );
         return db
           .select({

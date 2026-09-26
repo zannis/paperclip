@@ -196,6 +196,7 @@ import {
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import { relationBlockerCounts, blockerCountsFor } from "./grouped-child-blocker-edge.js";
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -2649,6 +2650,7 @@ async function listIssueDependencyReadinessMap(
       and(
         eq(issueRelations.companyId, companyId),
         eq(issueRelations.type, "blocks"),
+        relationBlockerCounts(),
         inArray(issueRelations.relatedIssueId, uniqueIssueIds),
       ),
     );
@@ -2747,6 +2749,7 @@ async function listUnresolvedBlockerDetails(
 async function listUnresolvedBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
+  dependentIssueId: string,
   blockerIssueIds: string[],
 ) {
   const uniqueBlockerIssueIds = [...new Set(blockerIssueIds.filter(Boolean))];
@@ -2758,6 +2761,7 @@ async function listUnresolvedBlockerIssueIds(
       and(
         eq(issues.companyId, companyId),
         inArray(issues.id, uniqueBlockerIssueIds),
+        blockerCountsFor(issues, dependentIssueId),
         // Cancelled blockers intentionally remain unresolved until the relation changes.
         ne(issues.status, "done"),
       ),
@@ -3515,8 +3519,8 @@ async function liveDescendantCountMapForIssues(
         target_issues(issue_id) AS (
           VALUES ${sql.join(targetRows, sql`, `)}
         ),
-        live_issues(live_issue_id, parent_id) AS (
-          SELECT DISTINCT live_issue.id, live_issue.parent_id
+        live_issues(live_issue_id, parent_id, grouped_child) AS (
+          SELECT DISTINCT live_issue.id, live_issue.parent_id, live_issue.grouped_child
           FROM issues live_issue
           JOIN heartbeat_runs live_run ON live_run.id = live_issue.execution_run_id
           WHERE live_issue.company_id = ${companyId}
@@ -3525,7 +3529,7 @@ async function liveDescendantCountMapForIssues(
             AND live_run.company_id = ${companyId}
             AND live_run.status IN ('queued', 'running')
           UNION
-          SELECT DISTINCT live_issue.id, live_issue.parent_id
+          SELECT DISTINCT live_issue.id, live_issue.parent_id, live_issue.grouped_child
           FROM heartbeat_runs live_run
           JOIN issues live_issue ON live_issue.id::text = (live_run.context_snapshot ->> 'issueId')
           WHERE live_issue.company_id = ${companyId}
@@ -3534,11 +3538,12 @@ async function liveDescendantCountMapForIssues(
             AND live_run.company_id = ${companyId}
             AND live_run.status IN ('queued', 'running')
         ),
-        live_ancestors(live_issue_id, ancestor_id, next_parent_id, visited_issue_ids) AS (
-          SELECT live_issues.live_issue_id, parent.id, parent.parent_id, ARRAY[live_issues.live_issue_id, parent.id]
+        live_ancestors(live_issue_id, ancestor_id, next_parent_id, ancestor_grouped_child, visited_issue_ids) AS (
+          SELECT live_issues.live_issue_id, parent.id, parent.parent_id, parent.grouped_child, ARRAY[live_issues.live_issue_id, parent.id]
           FROM live_issues
           JOIN issues parent ON parent.id = live_issues.parent_id
           WHERE parent.company_id = ${companyId}
+            AND NOT live_issues.grouped_child
             AND parent.hidden_at IS NULL
             AND parent.harness_kind IS NULL
           UNION ALL
@@ -3546,10 +3551,12 @@ async function liveDescendantCountMapForIssues(
             live_ancestors.live_issue_id,
             parent.id,
             parent.parent_id,
+            parent.grouped_child,
             live_ancestors.visited_issue_ids || parent.id
           FROM live_ancestors
           JOIN issues parent ON parent.id = live_ancestors.next_parent_id
           WHERE parent.company_id = ${companyId}
+            AND NOT live_ancestors.ancestor_grouped_child
             AND parent.hidden_at IS NULL
             AND parent.harness_kind IS NULL
             AND NOT parent.id = ANY(live_ancestors.visited_issue_ids)
@@ -3688,6 +3695,7 @@ async function terminalExplicitBlockersByRoot(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             inArray(issueRelations.relatedIssueId, chunk),
             eq(issues.companyId, companyId),
             ne(issues.status, "done"),
@@ -3809,6 +3817,7 @@ async function listIssueBlockerAttentionMap(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             inArray(issueRelations.relatedIssueId, chunk),
             eq(issues.companyId, companyId),
           ),
@@ -3832,6 +3841,7 @@ async function listIssueBlockerAttentionMap(
           and(
             eq(issues.companyId, companyId),
             inArray(issues.parentId, chunk),
+            eq(issues.groupedChild, false),
             notInArray(
               issues.status,
               BLOCKER_ATTENTION_CHILD_TERMINAL_STATUSES,
@@ -4900,6 +4910,7 @@ const issueListSelect = {
   projectWorkspaceId: issues.projectWorkspaceId,
   goalId: issues.goalId,
   parentId: issues.parentId,
+  groupedChild: issues.groupedChild,
   title: issues.title,
   description: sql<string | null>`
     CASE
@@ -5593,6 +5604,7 @@ async function listIssueBlockedInboxAttentionMap(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
           ),
         ),
       dbOrTx
@@ -8657,6 +8669,7 @@ export function issueService(db: Db) {
           and(
             eq(issueRelations.companyId, issue.companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             eq(issueRelations.relatedIssueId, issue.id),
             eq(issues.companyId, issue.companyId),
           ),
@@ -8900,6 +8913,7 @@ export function issueService(db: Db) {
           WHERE child.company_id = ${issue.companyId}
             AND child.hidden_at IS NULL
             AND child.harness_kind IS NULL
+            AND child.grouped_child = false
             AND issue_tree.depth < ${maxDepth + 1}
             AND NOT child.id = ANY(issue_tree.path)
         )
@@ -8989,6 +9003,7 @@ export function issueService(db: Db) {
               AND blocker.company_id = ${issue.companyId}
               AND blocker.hidden_at IS NULL
               AND blocker.harness_kind IS NULL
+              AND NOT (blocker.grouped_child AND blocker.parent_id IS NOT DISTINCT FROM relation.related_issue_id)
               AND relation.related_issue_id::text IN (${nodeIdValues})
           )
           SELECT *
@@ -9194,6 +9209,7 @@ export function issueService(db: Db) {
           and(
             eq(issueRelations.companyId, blockerIssue.companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             eq(issueRelations.issueId, blockerIssueId),
             isNull(issues.conversationAgentId),
           ),
@@ -9272,6 +9288,7 @@ export function issueService(db: Db) {
           and(
             eq(issues.companyId, parent.companyId),
             eq(issues.parentId, parentIssueId),
+            eq(issues.groupedChild, false),
           ),
         )
         .orderBy(asc(issues.issueNumber), asc(issues.createdAt));
@@ -9403,6 +9420,7 @@ export function issueService(db: Db) {
           and(
             eq(issues.companyId, parent.companyId),
             eq(issues.parentId, parent.id),
+            eq(issues.groupedChild, false),
           ),
         );
       if (childCount >= MAX_CHILD_ISSUES_CREATED_BY_HELPER) {
@@ -10003,6 +10021,7 @@ export function issueService(db: Db) {
                 issueData.parentId
                   ? eq(issues.parentId, issueData.parentId)
                   : isNull(issues.parentId),
+                eq(issues.groupedChild, issueData.groupedChild ?? false),
                 isNull(issues.hiddenAt),
                 notInArray(issues.status, ["done", "cancelled"]),
                 gte(
@@ -10763,6 +10782,9 @@ export function issueService(db: Db) {
         .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
       assertIssueExpectation(existing, data.expected); // fail fast, before any validation work
+      if (data.groupedChild !== undefined) {
+        throw unprocessable("groupedChild is fixed at creation");
+      }
       if (data.parentId !== undefined && data.parentId !== existing.parentId) {
         await assertExecutionTaskParent(dbOrTx, existing.companyId, data.parentId);
       }
@@ -10902,6 +10924,7 @@ export function issueService(db: Db) {
             ? await listUnresolvedBlockerIssueIds(
                 dbOrTx,
                 existing.companyId,
+                id,
                 blockedByIssueIds,
               )
             : (dependencyReadiness?.unresolvedBlockerIssueIds ?? []);

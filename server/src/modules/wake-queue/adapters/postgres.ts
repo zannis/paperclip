@@ -63,6 +63,7 @@ import type {
   WakeQueueTransaction,
 } from "../application/ports.js";
 import type { RunSummary } from "../application/types.js";
+import { relationBlockerCounts } from "../../../services/grouped-child-blocker-edge.js";
 
 const DEFERRED_WAKE_STATUS = "deferred_issue_execution";
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
@@ -405,6 +406,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
       const children = await tx.select({ identifier: issues.identifier, status: issues.status })
         .from(issues).where(and(
           eq(issues.companyId, companyId), eq(issues.parentId, issueId),
+          eq(issues.groupedChild, false),
           eq(issues.assigneeAgentId, wakeAgentId), inArray(issues.identifier, identifiers),
         ));
       return referencesByComment.every((references) => {
@@ -528,6 +530,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.relatedIssueId, issueId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             eq(issues.companyId, companyId),
             notInArray(issues.status, ["done", "cancelled"]),
             isNull(issues.hiddenAt),
