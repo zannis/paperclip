@@ -38,6 +38,7 @@ export const issues = pgTable(
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
+    groupedChild: boolean("grouped_child").notNull().default(false),
     title: text("title").notNull(),
     titleNeedsGeneration: boolean("title_needs_generation").notNull().default(false),
     description: text("description"),

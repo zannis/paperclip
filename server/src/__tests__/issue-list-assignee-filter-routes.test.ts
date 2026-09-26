@@ -942,6 +942,59 @@ describeEmbeddedPostgres("issue list routes assigneeAgentId filter", () => {
     });
   });
 
+  it("does not count live grouped children or their descendants in the live descendant summary", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const parentIssueId = randomUUID();
+    const plainChildId = randomUUID();
+    const laneId = randomUUID();
+    const laneChildId = randomUUID();
+    const runIds = [randomUUID(), randomUUID(), randomUUID()];
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: uniqueIssuePrefix(),
+      requireBoardApprovalForNewAgents: false,
+    });
+    await seedCloudTenantMember(companyId);
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Assignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values([plainChildId, laneId, laneChildId].map((issueId, index) => ({
+      id: runIds[index]!,
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId },
+    })));
+    await db.insert(issues).values([
+      { id: parentIssueId, companyId, title: "Ticket", status: "blocked", priority: "medium", assigneeAgentId: agentId },
+      { id: plainChildId, companyId, title: "Live child", status: "in_progress", priority: "medium",
+        parentId: parentIssueId, executionRunId: runIds[0], assigneeAgentId: agentId },
+      { id: laneId, companyId, title: "Live lane", status: "in_progress", priority: "medium",
+        parentId: parentIssueId, groupedChild: true, executionRunId: runIds[1], assigneeAgentId: agentId },
+      { id: laneChildId, companyId, title: "Live lane leaf", status: "in_progress", priority: "medium",
+        parentId: laneId, executionRunId: runIds[2], assigneeAgentId: agentId },
+    ]);
+
+    const res = await request(createApp(companyId))
+      .get(`/api/companies/${companyId}/issues`)
+      .query({ status: "blocked", includeLiveDescendantSummary: "true", limit: "20" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({ id: parentIssueId, liveDescendantCount: 1 });
+  });
+
   it("does not recurse forever when live descendant summaries encounter a parent cycle", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

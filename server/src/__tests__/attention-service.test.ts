@@ -160,6 +160,7 @@ describeEmbeddedPostgres("attention service", () => {
     status: string;
     priority?: string;
     parentId?: string | null;
+    groupedChild?: boolean;
     assigneeAgentId?: string | null;
     assigneeUserId?: string | null;
     originKind?: string;
@@ -185,6 +186,7 @@ describeEmbeddedPostgres("attention service", () => {
       priority: input.priority ?? "medium",
       reviewPolicy: input.reviewPolicy ?? null,
       parentId: input.parentId ?? null,
+      groupedChild: input.groupedChild ?? false,
       projectId: input.projectId ?? null,
       projectWorkspaceId: input.projectWorkspaceId ?? null,
       assigneeAgentId: input.assigneeAgentId ?? null,
@@ -1478,6 +1480,28 @@ describeEmbeddedPostgres("attention service", () => {
       detail: { kind: "blocker", blockingIssue: null, blockedTaskCount: 3 },
     });
     expect(rows[0]?.subject.id).not.toBe(blockedId);
+  });
+
+  it("does not count a blocked issue's grouped children or their descendants as blocked work", async () => {
+    const { companyId } = await seedCompany("ATG");
+    const terminalId = await insertIssue({ companyId, identifier: "ATG-1", title: "Choose owner", status: "todo" });
+    const blockedId = await insertIssue({ companyId, identifier: "ATG-2", title: "Blocked ticket", status: "blocked" });
+    await insertIssue({ companyId, identifier: "ATG-3", title: "Open child", status: "todo", parentId: blockedId });
+    const laneId = await insertIssue({
+      companyId, identifier: "ATG-4", title: "Open lane", status: "todo", parentId: blockedId, groupedChild: true,
+    });
+    await insertIssue({ companyId, identifier: "ATG-5", title: "Lane leaf", status: "todo", parentId: laneId });
+    await db.insert(issueRelations).values({ companyId, issueId: terminalId, relatedIssueId: blockedId, type: "blocks" });
+
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    const rows = feed.items.filter((item) => item.sourceKind === "blocker_attention");
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      subject: { id: terminalId },
+      whyNow: "Blocks 2 tasks and needs human attention.",
+      detail: { kind: "blocker", blockedTaskCount: 2 },
+    });
   });
 
   it("orders terminal blockers by blocked-work weight descending", async () => {

@@ -1346,6 +1346,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               FROM ${issues} child
               JOIN issue_tree parent ON child.parent_id = parent.id
               WHERE child.company_id = ${workspace.companyId}
+                AND child.grouped_child = false
             )
             SELECT id FROM issue_tree
           )
@@ -2790,6 +2791,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
                   FROM ${issues} child
                   JOIN issue_tree parent ON child.parent_id = parent.id
                   WHERE child.company_id = ${workspace.companyId}
+                    AND child.grouped_child = false
                 )
                 SELECT 1 FROM issue_tree WHERE status NOT IN ('done', 'cancelled')
               )`,
@@ -2810,6 +2812,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
                   FROM ${issues} child
                   JOIN cooldown_tree parent ON child.parent_id = parent.id
                   WHERE child.company_id = ${workspace.companyId}
+                    AND child.grouped_child = false
                 )
                 SELECT 1 FROM cooldown_tree
                 WHERE COALESCE(

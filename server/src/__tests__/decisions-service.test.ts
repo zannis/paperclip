@@ -316,6 +316,32 @@ describePg("decisionService", () => {
     expect((await db.select().from(issues).where(eq(issues.id, unreviewedChildId)))[0]?.status).toBe("todo");
   });
 
+  it("cancels the ordinary subtree but leaves grouped children and their descendants alone", async () => {
+    const plainChildId = randomUUID(); const laneId = randomUUID(); const laneChildId = randomUUID();
+    await db.insert(issues).values([
+      { id: plainChildId, companyId, title: "Plain child", status: "todo", priority: "medium",
+        parentId: targetIssueId, responsibleUserId: decidedByUserId },
+      { id: laneId, companyId, title: "Lane", status: "todo", priority: "medium",
+        parentId: targetIssueId, groupedChild: true, responsibleUserId: decidedByUserId },
+      { id: laneChildId, companyId, title: "Lane child", status: "todo", priority: "medium",
+        parentId: laneId, responsibleUserId: decidedByUserId },
+    ]);
+    const created = await service().create({
+      companyId, actor: agentActor(), agentId, runId, title: "Cancel tree?", body: "Body",
+      options: [{ id: "cancel", label: "Cancel", style: "destructive", effects: [{
+        type: "cancel_issue_tree", targetIssueId, staleness: "strict", reasonComment: "cleanup",
+      }] }],
+    });
+
+    expect((created.targetSnapshots as Record<string, { descendantIds: string[] }>)[targetIssueId]?.descendantIds)
+      .toEqual([plainChildId]);
+    const result = await service().decide({ id: created.id, optionId: "cancel", decidedByUserId, userActor: boardActor() });
+    expect(result.executions[0]).toMatchObject({ status: "executed", result: { cancelledIssueIds: [plainChildId, targetIssueId] } });
+    const statuses = Object.fromEntries((await db.select({ id: issues.id, status: issues.status }).from(issues)
+      .where(eq(issues.companyId, companyId))).map((row) => [row.id, row.status]));
+    expect(statuses).toMatchObject({ [targetIssueId]: "cancelled", [plainChildId]: "cancelled", [laneId]: "todo", [laneChildId]: "todo" });
+  });
+
   it("bounds cyclic issue traversal for snapshots and cancel-tree execution", async () => {
     const childId = randomUUID();
     await db.insert(issues).values({ id: childId, companyId, title: "Cycle child", status: "todo", priority: "medium",
