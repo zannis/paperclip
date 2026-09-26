@@ -2976,6 +2976,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          eq(issues.groupedChild, false),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
@@ -2991,6 +2992,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          eq(issues.groupedChild, false),
           ...(sameWorkspaceOnly ? [eq(issues.projectWorkspaceId, issue.projectWorkspaceId!)] : []),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
