@@ -8913,6 +8913,7 @@ export function issueService(db: Db) {
           WHERE child.company_id = ${issue.companyId}
             AND child.hidden_at IS NULL
             AND child.harness_kind IS NULL
+            AND child.grouped_child = false
             AND issue_tree.depth < ${maxDepth + 1}
             AND NOT child.id = ANY(issue_tree.path)
         )
@@ -9419,6 +9420,7 @@ export function issueService(db: Db) {
           and(
             eq(issues.companyId, parent.companyId),
             eq(issues.parentId, parent.id),
+            eq(issues.groupedChild, false),
           ),
         );
       if (childCount >= MAX_CHILD_ISSUES_CREATED_BY_HELPER) {
@@ -10019,6 +10021,7 @@ export function issueService(db: Db) {
                 issueData.parentId
                   ? eq(issues.parentId, issueData.parentId)
                   : isNull(issues.parentId),
+                eq(issues.groupedChild, issueData.groupedChild ?? false),
                 isNull(issues.hiddenAt),
                 notInArray(issues.status, ["done", "cancelled"]),
                 gte(

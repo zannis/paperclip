@@ -6709,6 +6709,7 @@ export function issueRoutes(
         and(
           eq(issueRows.companyId, parent.companyId),
           eq(issueRows.parentId, parent.id),
+          eq(issueRows.groupedChild, false),
           inArray(issueRows.status, [
             "todo",
             "in_progress",

@@ -425,4 +425,84 @@ d("grouped child issues", () => {
       },
     );
   });
+
+  describe("parent-side operations skip grouped children", () => {
+    const post = (t: Awaited<ReturnType<typeof seedTicket>>, body: Record<string, unknown>) =>
+      request(app()).post(`/api/companies/${t.companyId}/issues`)
+        .send({ status: "todo", parentId: t.ticketId, ...body }).expect((res) => {
+          if (res.status !== 200 && res.status !== 201) throw new Error(`unexpected ${res.status}`);
+        });
+
+    it("recent-title deduplication never crosses the grouped flag", async () => {
+      const t = await seedTicket();
+      const lane = (await post(t, { title: "Review", groupedChild: true })).body;
+      const plain = (await post(t, { title: "Review" })).body;
+      expect(plain.id).not.toBe(lane.id);
+      expect(plain.groupedChild).toBe(false);
+      expect((await post(t, { title: "review " })).body.id).toBe(plain.id);
+      expect((await post(t, { title: "Review", groupedChild: true })).body.id).toBe(lane.id);
+      const otherLane = (await post(t, { title: "Build", groupedChild: false })).body;
+      const buildLane = (await post(t, { title: "Build", groupedChild: true })).body;
+      expect(buildLane.id).not.toBe(otherLane.id);
+      expect(buildLane.groupedChild).toBe(true);
+    });
+
+    it("grouped children do not count toward the child-create helper's cap", async () => {
+      const t = await seedTicket();
+      const svc = issueService(db);
+      await db.insert(issues).values(Array.from({ length: 25 }, (_, index) => ({
+        companyId: t.companyId, parentId: t.ticketId, groupedChild: true, title: `lane ${index}`, status: "todo" as const,
+      })));
+      const { issue } = await svc.createChild(t.ticketId, { title: "ordinary", status: "todo", allowDuplicate: true } as never);
+      expect(issue.parentId).toBe(t.ticketId);
+      await db.insert(issues).values(Array.from({ length: 24 }, (_, index) => ({
+        companyId: t.companyId, parentId: t.ticketId, title: `plain ${index}`, status: "todo" as const,
+      })));
+      await expect(svc.createChild(t.ticketId, { title: "one too many", status: "todo", allowDuplicate: true } as never))
+        .rejects.toThrow("maximum 25 child issues");
+    });
+
+    it("subtree diagnostics stop at a grouped child unless it is the root", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      const plain = await createChild(t);
+      const laneChild = (await request(app()).post(`/api/companies/${t.companyId}/issues`).send({
+        title: "lane child", status: "todo", allowDuplicate: true, parentId: lane.id,
+      }).expect(201)).body;
+      const svc = issueService(db);
+      const fromTicket = await svc.getSubtreeDiagnostics(t.ticketId);
+      expect(fromTicket.nodes.map((node) => node.id).sort()).toEqual([t.ticketId, plain.id].sort());
+      const fromLane = await svc.getSubtreeDiagnostics(lane.id);
+      expect(fromLane.nodes.map((node) => node.id).sort()).toEqual([lane.id, laneChild.id].sort());
+    });
+
+    it("watchdog follow-up serialization never blocks on a grouped child", async () => {
+      const t = await seedTicket();
+      const seedWatchdogParent = async () => {
+        const [row] = await db.insert(issues).values({
+          companyId: t.companyId, title: `watchdog ${randomUUID().slice(0, 6)}`, status: "in_progress",
+          originKind: "task_watchdog", originId: randomUUID(),
+        }).returning();
+        return row!.id;
+      };
+      const blockersOf = async (issueId: string) =>
+        (await issueService(db).getRelationSummaries(issueId)).blockedBy.map((relation) => relation.id);
+
+      const groupedParent = await seedWatchdogParent();
+      await request(app()).post(`/api/companies/${t.companyId}/issues`).send({
+        title: "lane", status: "todo", allowDuplicate: true, parentId: groupedParent, groupedChild: true,
+      }).expect(201);
+      const followUp = (await request(app()).post(`/api/issues/${groupedParent}/children`)
+        .send({ title: "follow-up", status: "todo" }).expect(201)).body;
+      expect(await blockersOf(groupedParent)).toEqual([followUp.id]);
+
+      const ordinaryParent = await seedWatchdogParent();
+      const existing = (await request(app()).post(`/api/companies/${t.companyId}/issues`).send({
+        title: "existing", status: "todo", allowDuplicate: true, parentId: ordinaryParent,
+      }).expect(201)).body;
+      await request(app()).post(`/api/issues/${ordinaryParent}/children`)
+        .send({ title: "follow-up", status: "todo" }).expect(201);
+      expect(await blockersOf(ordinaryParent)).toEqual([existing.id]);
+    });
+  });
 });
