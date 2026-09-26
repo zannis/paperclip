@@ -1,0 +1,41 @@
+server/src/services/grouped-child-blocker-edge.ts
+  s_49f62545611f8e::t_0b38a64c3e84de 1-22
+server/src/__tests__/issue-blocker-attention.test.ts
+  s_49f62545611f8e::t_fddc6c74fa491d 298-320
+server/src/__tests__/issue-grouped-child-routes.test.ts
+  s_49f62545611f8e::t_e87d8424b72313 64,67,250-341
+server/src/modules/wake-queue/adapters/postgres.ts
+  s_49f62545611f8e::t_b60a5e5a3c24a4 66,532
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_5f4d610ed7e473 360,9979,13958
+server/src/services/attention.ts
+  s_49f62545611f8e::t_bf1b377fe0ea80 68,939,982
+server/src/services/heartbeat.ts
+  s_49f62545611f8e::t_892e03312ac597 37,5654,13425
+server/src/services/issues.ts
+  s_49f62545611f8e::t_6e60d7fd47767b 199,2653,2752,2764,3698,3820,5607,8672,9005,9211,10924
+server/src/services/native-runtime/grouped-child-native-completion.test.ts
+  s_49f62545611f8e::t_0cd08e2293bca1 11,41-44,54,59,61-63,103,114-121
+server/src/services/recovery/disposition-repair.ts
+  s_49f62545611f8e::t_d4e4c1dc5205bd 15,102
+server/src/services/recovery/service.ts
+  s_49f62545611f8e::t_00f2f33ed44d48 151,1532,2227,2960,5432
+server/src/services/task-watchdogs.ts
+  s_49f62545611f8e::t_6b56bf3e149b5d 32,1549
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b08ecbbb52843d77fe1a0d6af9ecb893607d0560",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
