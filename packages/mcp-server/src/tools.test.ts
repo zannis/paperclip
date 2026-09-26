@@ -130,6 +130,19 @@ describe("paperclip MCP tools", () => {
     });
   });
 
+  it("does not offer the board-only grouped child flag on issue create", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockJsonResponse({ id: "issue-1", status: "todo" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const tool = getTool("paperclipCreateIssue");
+    expect(Object.keys(tool.schema.shape)).not.toContain("groupedChild");
+    expect(Object.keys(tool.schema.shape)).toContain("parentId");
+    await tool.execute({ title: "Lane", groupedChild: true });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).not.toHaveProperty("groupedChild");
+  });
+
   it("defaults issue document format to markdown", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       mockJsonResponse({ key: "plan", latestRevisionNumber: 2 }),
