@@ -1,0 +1,22 @@
+server/src/__tests__/issue-grouped-child-tree-control.test.ts
+  s_49f62545611f8e::t_b93f3b0396919f 1-80
+server/src/services/issue-tree-control.ts
+  s_49f62545611f8e::t_6c17c67a6264ce 438
+  s_49f62545611f8e::t_1e69c1b52807f4 613-614,618
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b16a5f644d41a5f2ffbddd94e786ad30302908bf",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
