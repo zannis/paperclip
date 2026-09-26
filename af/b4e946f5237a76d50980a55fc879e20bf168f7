@@ -1,0 +1,21 @@
+server/src/__tests__/issue-grouped-child-routes.test.ts
+  s_49f62545611f8e::t_45747d43c29036 98,142,149-152,155-156
+server/src/services/issues.ts
+  s_49f62545611f8e::t_f0c0d796013c36 10772
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "afb4e946f5237a76d50980a55fc879e20bf168f7",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
