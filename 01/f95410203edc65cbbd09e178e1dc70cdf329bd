@@ -1,0 +1,24 @@
+server/src/services/native-runtime/paperclip-control-plane-port.test.ts
+  s_49f62545611f8e::t_fd6f4e9ca30c51 1413-1440
+  s_49f62545611f8e::t_a44d0e12610d56 1364-1375
+server/src/services/native-runtime/child-review-outcomes.ts
+  s_49f62545611f8e::t_34f7047cdac402 43
+server/src/services/native-runtime/paperclip-runner-tool-authority.ts
+  s_49f62545611f8e::t_ee301d746f8e31 406
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "01f95410203edc65cbbd09e178e1dc70cdf329bd",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
