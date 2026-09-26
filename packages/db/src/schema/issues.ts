@@ -41,6 +41,7 @@ export const issues = pgTable(
     visibility: text("visibility").notNull().default("open"),
     privacyRootIssueId: uuid("privacy_root_issue_id").references((): AnyPgColumn => issues.id),
     privacyParentIssueId: uuid("privacy_parent_issue_id").references((): AnyPgColumn => issues.id, { onDelete: "set null" }),
+    groupedChild: boolean("grouped_child").notNull().default(false),
     title: text("title").notNull(),
     titleNeedsGeneration: boolean("title_needs_generation").notNull().default(false),
     description: text("description"),

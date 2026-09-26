@@ -23,7 +23,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { taskWatchdogService } from "../services/task-watchdogs.ts";
-import { resolveTaskWatchdogMutationScope } from "../services/task-watchdog-scope.ts";
+import { issueIsInTaskWatchdogSubtree, resolveTaskWatchdogMutationScope } from "../services/task-watchdog-scope.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -104,6 +104,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       identifier: overrides.identifier ?? `WDOG-${Math.floor(Math.random() * 10_000)}`,
       issueNumber: overrides.issueNumber ?? Math.floor(Math.random() * 10_000),
       parentId: overrides.parentId,
+      groupedChild: overrides.groupedChild,
       assigneeAgentId: overrides.assigneeAgentId,
       originKind: overrides.originKind,
       originId: overrides.originId,
@@ -330,6 +331,44 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     expect(watchdogIssues).toHaveLength(0);
   });
 
+  it("does not let a grouped child's live work hold back its parent's watchdog", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-LANE", status: "in_progress" });
+    const laneId = await seedIssue(companyId, { parentId: sourceId, groupedChild: true, status: "in_progress" });
+    const laneChildId = await seedIssue(companyId, { parentId: laneId, status: "in_progress" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    await db.insert(heartbeatRuns).values([laneId, laneChildId].map((issueId) => ({
+      companyId,
+      agentId,
+      status: "queued",
+      invocationSource: "assignment",
+      contextSnapshot: { issueId },
+    })));
+    const { service, wakes } = createService();
+
+    const result = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(result).toMatchObject({ checked: 1, triggered: 1, live: 0 });
+    expect(wakes).toHaveLength(1);
+    const wakeContext = JSON.stringify(wakes[0]?.opts?.contextSnapshot);
+    expect(wakeContext).not.toContain(laneId);
+    expect(wakeContext).not.toContain(laneChildId);
+  });
+
+  it("keeps grouped children and their descendants outside the watched mutation subtree", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { status: "in_progress" });
+    const plainChildId = await seedIssue(companyId, { parentId: sourceId, status: "in_progress" });
+    const laneId = await seedIssue(companyId, { parentId: sourceId, groupedChild: true, status: "in_progress" });
+    const laneChildId = await seedIssue(companyId, { parentId: laneId, status: "in_progress" });
+
+    expect(await issueIsInTaskWatchdogSubtree(db, companyId, plainChildId, sourceId)).toBe(true);
+    expect(await issueIsInTaskWatchdogSubtree(db, companyId, laneId, sourceId)).toBe(false);
+    expect(await issueIsInTaskWatchdogSubtree(db, companyId, laneChildId, sourceId)).toBe(false);
+    expect(await issueIsInTaskWatchdogSubtree(db, companyId, laneChildId, laneId)).toBe(true);
+  });
+
   it("does not trigger while a descendant has a queued assignment wake", async () => {
     const companyId = await seedCompany();
     const sourceId = await seedIssue(companyId, { identifier: "WDOG-WAKE", status: "in_progress" });
@@ -401,6 +440,20 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
 
     expect(result).toMatchObject({ checked: 1, triggered: 1 });
     expect(wakes).toHaveLength(1);
+  });
+
+  it("does not reconcile a parent's watchdog for a grouped child or its descendants", async () => {
+    const companyId = await seedCompany();
+    const sourceId = await seedIssue(companyId, { identifier: "WDOG-LANE-ANCESTOR", status: "done" });
+    const laneId = await seedIssue(companyId, { parentId: sourceId, groupedChild: true, status: "done" });
+    const laneChildId = await seedIssue(companyId, { parentId: laneId, status: "done" });
+    const agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    const { service, wakes } = createService();
+
+    expect(await service.reconcileForIssueAndAncestors(companyId, laneId)).toMatchObject({ checked: 0, triggered: 0 });
+    expect(await service.reconcileForIssueAndAncestors(companyId, laneChildId)).toMatchObject({ checked: 0, triggered: 0 });
+    expect(wakes).toHaveLength(0);
   });
 
   it("marks a completed watchdog fingerprint reviewed, then reuses the same issue for a later stopped state", async () => {

@@ -1,4 +1,5 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { relationBlockerCounts } from "../grouped-child-blocker-edge.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import {
@@ -288,6 +289,7 @@ async function listUnresolvedBlockerSummaries(
       and(
         eq(issueRelations.companyId, companyId),
         eq(issueRelations.type, "blocks"),
+        relationBlockerCounts(),
         eq(issueRelations.relatedIssueId, issueId),
         inArray(issues.id, ids),
       ),

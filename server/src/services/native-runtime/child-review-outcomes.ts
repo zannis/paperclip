@@ -43,6 +43,7 @@ export async function childReviewOutcomes(
       eq(issues.companyId, companyId),
       eq(issues.parentId, parentIssueId),
       actor ? await issueReadSqlCondition(db, actor) : undefined,
+      eq(issues.groupedChild, false),
       eq(issueThreadInteractions.kind, "request_confirmation"),
       inArray(issueThreadInteractions.status, ["accepted", "rejected"]),
       sql`${issueThreadInteractions.payload}->'target'->>'type' = 'custom'`,

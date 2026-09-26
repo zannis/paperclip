@@ -254,4 +254,27 @@ describe("plugin SDK orchestration contract", () => {
       harness.ctx.issues.requestWakeup(blockedIssueId, companyId),
     ).rejects.toThrow("Issue is blocked by unresolved blockers");
   });
+
+  it("stops test harness subtrees at grouped children unless one is the root", async () => {
+    const companyId = randomUUID();
+    const [rootId, plainId, laneId, laneChildId] = Array.from({ length: 4 }, () => randomUUID());
+    const harness = createTestHarness({
+      manifest: manifest(["issue.subtree.read", "issues.orchestration.read"]),
+    });
+    harness.seed({
+      issues: [
+        issue({ id: rootId, companyId, title: "Root" }),
+        issue({ id: plainId, companyId, title: "Plain", parentId: rootId }),
+        issue({ id: laneId, companyId, title: "Lane", parentId: rootId, groupedChild: true }),
+        issue({ id: laneChildId, companyId, title: "Lane child", parentId: laneId }),
+      ],
+    });
+
+    expect((await harness.ctx.issues.getSubtree(rootId, companyId)).issueIds).toEqual([rootId, plainId]);
+    expect((await harness.ctx.issues.getSubtree(laneId, companyId)).issueIds).toEqual([laneId, laneChildId]);
+    const summary = await harness.ctx.issues.summaries.getOrchestration({ issueId: rootId, companyId, includeSubtree: true });
+    expect(summary.subtreeIssueIds).toEqual([rootId, plainId]);
+    const laneSummary = await harness.ctx.issues.summaries.getOrchestration({ issueId: laneId, companyId, includeSubtree: true });
+    expect(laneSummary.subtreeIssueIds).toEqual([laneId, laneChildId]);
+  });
 });

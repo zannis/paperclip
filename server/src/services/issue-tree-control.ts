@@ -435,7 +435,7 @@ export function issueTreeControlService(db: Db) {
 
       const nextFrontier: typeof frontier = [];
       for (const child of children) {
-        if (visited.has(child.id)) continue;
+        if (visited.has(child.id) || child.groupedChild) continue;
         const depth = (depthByParentId.get(child.parentId ?? "") ?? 0) + 1;
         visited.add(child.id);
         result.push({ ...child, depth });
@@ -610,12 +610,12 @@ export function issueTreeControlService(db: Db) {
         };
       }
 
-      const parent: { parentId: string | null } | null = await db
-        .select({ parentId: issues.parentId })
+      const current: { parentId: string | null; groupedChild: boolean } | null = await db
+        .select({ parentId: issues.parentId, groupedChild: issues.groupedChild })
         .from(issues)
         .where(and(eq(issues.id, currentIssueId), eq(issues.companyId, companyId)))
         .then((rows) => rows[0] ?? null);
-      currentIssueId = parent?.parentId ?? null;
+      currentIssueId = current && !current.groupedChild ? current.parentId : null;
     }
 
     return null;

@@ -2058,7 +2058,7 @@ export async function commitNativeStatusDecision(input: {
             ? summary.trim()
             : null;
         });
-      const parent = issue.parentId
+      const parent = issue.parentId && !issue.groupedChild
         ? await issueSvc.getWakeableParentAfterChildCompletion(issue.parentId, {
             issueId: input.issueId,
             summary: completedResultSummary,
