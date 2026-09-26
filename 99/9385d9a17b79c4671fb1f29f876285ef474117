@@ -1,0 +1,40 @@
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_67a7dd6129677f 12188-12190
+packages/db/src/schema/issues.ts
+  s_49f62545611f8e::t_03e8609f9240f2 14
+  s_49f62545611f8e::t_c2d3471cf927d9 41
+server/src/__tests__/issue-grouped-child-routes.test.ts
+  s_49f62545611f8e::t_a67b4480be644c 1-152
+packages/shared/src/validators/issue.ts
+  s_49f62545611f8e::t_ec5a9a6e015a0b 686-689
+  s_49f62545611f8e::t_95de015c66dbba 893
+  s_49f62545611f8e::t_b00c36dc3a3abf 826
+packages/db/src/migrations/0286_issue_grouped_child.sql
+  s_49f62545611f8e::t_24757d6c481db5 1
+server/src/services/issues.ts
+  s_8272d8b0a27987::t_096c6aea0f7c9c 4903
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "999385d9a17b79c4671fb1f29f876285ef474117",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_8272d8b0a27987": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-ac2cc3fd01824ee1b",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
