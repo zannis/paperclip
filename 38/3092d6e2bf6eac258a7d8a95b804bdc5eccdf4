@@ -1,0 +1,19 @@
+server/src/routes/openapi.ts
+  s_49f62545611f8e::t_4adc9b2e3fc9e3 9083-9143
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "383092d6e2bf6eac258a7d8a95b804bdc5eccdf4",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
