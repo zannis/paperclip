@@ -351,7 +351,7 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
     let apiMessage = "Direct Railway service, log, and deployment tools are available.";
     try {
       const railwayOptions = {
-        authorization: headers.Authorization ?? "",
+        authorization: headers.authorization ?? "",
         request: (url: string, init: RequestInit) => requestRemoteHttpEndpoint(new URL(url), init),
         signal: AbortSignal.timeout(15_000),
       };

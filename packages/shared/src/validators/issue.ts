@@ -744,6 +744,10 @@ const createIssueBaseSchema = z.object({
   goalId: z.string().guid().optional().nullable(),
   visibility: z.enum(["open", "private"]).optional().default("open"),
   parentId: z.string().guid().optional().nullable(),
+  groupedChild: z
+    .boolean()
+    .describe("Board only, create only: this child's completion and stop never reach its parent")
+    .optional(),
   blockedByIssueIds: z.array(z.string().guid()).optional(),
   unblockDescriptor: z
     .object({
@@ -901,6 +905,7 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(
         .max(20)
         .optional(),
       blockParentUntilDone: z.boolean().optional().default(false),
+      groupedChild: z.never().optional(),
     }),
 ).superRefine(requireBlockedStatusForUnblockDescriptor).superRefine(requireTitleOrDescription);
 
@@ -971,6 +976,7 @@ export const updateIssueSchema = objectWithoutDefaults(
     deferWakeForGoal: z.boolean().optional(),
     hiddenAt: z.string().datetime().nullable().optional(),
     expected: issueUpdateExpectationSchema.optional(),
+    groupedChild: z.never().optional(),
   });
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;

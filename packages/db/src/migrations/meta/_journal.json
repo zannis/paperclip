@@ -2626,6 +2626,13 @@
       "when": 1792713110844,
       "tag": "0376_issue_idempotency_key_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1792713110845,
+      "tag": "0377_issue_grouped_child",
+      "breakpoints": true
     }
   ]
 }

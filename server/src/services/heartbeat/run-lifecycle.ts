@@ -19,6 +19,7 @@ import { CONFIGURATION_INCOMPLETE_FAILURE_CODE } from "./run-preparation.js";
 import { WORKSPACE_VALIDATION_FAILURE_CODE } from "./workspaces.js";
 import { boundHeartbeatRunEventPayloadForStorage } from "./run-log.js";
 import { preserveWorkspaceRestoreRecoveryMetadata } from "../workspace-restore-recovery-state.js";
+import { relationBlockerCounts } from "../grouped-child-blocker-edge.js";
 import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
 import {
@@ -1790,6 +1791,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
                 eq(issueRelations.companyId, issue.companyId),
                 eq(issueRelations.relatedIssueId, issue.id),
                 eq(issueRelations.type, "blocks"),
+                relationBlockerCounts(),
                 sql`exists (
                 select 1
                 from issues blocker

@@ -147,7 +147,8 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
     const queue = [rootId]; const visited = new Set([rootId]); const result: string[] = [];
     while (queue.length) {
       const parentId = queue.shift()!;
-      const children = await dbOrTx.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.parentId, parentId)));
+      const children = await dbOrTx.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, companyId),
+        eq(issues.parentId, parentId), eq(issues.groupedChild, false)));
       for (const child of children) {
         if (visited.has(child.id)) continue;
         visited.add(child.id);

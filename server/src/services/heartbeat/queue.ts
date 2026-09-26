@@ -3,6 +3,7 @@ import { assertTaskRetryConversationAllowed, readTaskRetryIntent, retireSupersed
 import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { relationBlockerCounts } from "../grouped-child-blocker-edge.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
@@ -295,6 +296,7 @@ async function listUnresolvedBlockerSummaries(
       and(
         eq(issueRelations.companyId, companyId),
         eq(issueRelations.type, "blocks"),
+        relationBlockerCounts(),
         eq(issueRelations.relatedIssueId, issueId),
         inArray(issues.id, ids),
       ),

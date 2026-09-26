@@ -662,6 +662,7 @@ export class PaperclipRunnerToolAuthority {
           .where(and(
             eq(issues.companyId, this.binding.companyId),
             eq(issues.parentId, this.binding.issueId),
+            eq(issues.groupedChild, false),
             isNull(issues.hiddenAt),
             await issueReadSqlCondition(this.db, this.#privacyActor(context.run)),
           ))

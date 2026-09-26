@@ -66,6 +66,7 @@ import {
   decisionRetentionService,
   DEFAULT_DECISION_SHELF_DAYS,
 } from "./decision-retention.js";
+import { relationBlockerCounts } from "./grouped-child-blocker-edge.js";
 
 const ATTENTION_SOURCE_KINDS: AttentionSourceKind[] = [
   "approval",
@@ -967,6 +968,7 @@ async function blockingIssueMap(
       eq(issueRelations.companyId, companyId),
       eq(issues.companyId, companyId),
       eq(issueRelations.type, "blocks"),
+      relationBlockerCounts(),
       inArray(issueRelations.relatedIssueId, ids),
       isNull(issues.hiddenAt),
       readCondition,
@@ -1010,6 +1012,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
         .where(and(
           eq(issueRelations.companyId, companyId),
           eq(issueRelations.type, "blocks"),
+          relationBlockerCounts(),
           inArray(issueRelations.issueId, chunk),
           eq(issues.companyId, companyId),
           isNull(issues.hiddenAt),
@@ -1025,6 +1028,7 @@ async function blockedWorkCountMap(db: Db, companyId: string, blockerIssueIds: s
           .where(and(
             eq(issues.companyId, companyId),
             inArray(issues.parentId, chunk),
+            eq(issues.groupedChild, false),
             isNull(issues.hiddenAt),
             notInArray(issues.status, ["done", "cancelled"]),
           ))

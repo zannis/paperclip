@@ -866,6 +866,8 @@ export interface Issue {
   privacyRootIssueId?: string | null;
   /** Immediate task from which private access flows downward, including chat handoffs. */
   privacyParentIssueId?: string | null;
+  /** Board-set at creation and immutable: a grouped child never reaches its parent. */
+  groupedChild?: boolean;
   ancestors?: IssueAncestor[];
   /** Detail responses only: access-checked creation provenance, or null. */
   createdFrom?: IssueCreationSource | null;
