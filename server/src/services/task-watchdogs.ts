@@ -1425,6 +1425,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         FROM issues child
         JOIN watched_issues ON child.parent_id = watched_issues.id
         WHERE child.company_id = ${companyId}
+          AND child.grouped_child = false
           AND child.hidden_at IS NULL
           AND child.harness_kind IS NULL
           AND child.origin_kind <> ${TASK_WATCHDOG_ORIGIN_KIND}
@@ -2119,18 +2120,19 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
   async function activeWatchdogsForIssueAndAncestors(companyId: string, issueId: string) {
     const ancestorRows = await db.execute(sql`
-      WITH RECURSIVE ancestors(id, parent_id, depth) AS (
-        SELECT id, parent_id, 0
+      WITH RECURSIVE ancestors(id, parent_id, grouped_child, depth) AS (
+        SELECT id, parent_id, grouped_child, 0
         FROM issues
         WHERE company_id = ${companyId}
           AND id = ${issueId}
           AND hidden_at IS NULL
           AND harness_kind IS NULL
         UNION ALL
-        SELECT parent.id, parent.parent_id, ancestors.depth + 1
+        SELECT parent.id, parent.parent_id, parent.grouped_child, ancestors.depth + 1
         FROM issues parent
         JOIN ancestors ON parent.id = ancestors.parent_id
         WHERE parent.company_id = ${companyId}
+          AND ancestors.grouped_child = false
           AND parent.hidden_at IS NULL
           AND parent.harness_kind IS NULL
           AND ancestors.depth < ${TASK_WATCHDOG_SUBTREE_MAX_DEPTH - 1}
