@@ -9080,6 +9080,67 @@ registry.registerPath({
   },
 });
 
+const issueIdempotencyKeyParamsSchema = z.object({
+  companyId: z.string(),
+  key: z.string().trim().min(1).max(255),
+});
+
+const issueIdempotencyKeyLookupResponseSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("absent") }),
+  z.object({
+    state: z.literal("created"),
+    issue: z.record(z.string(), z.unknown()),
+  }),
+  z.object({ state: z.literal("deleted") }),
+  z.object({ state: z.literal("void") }),
+]);
+
+const issueIdempotencyKeyVoidResponseSchema = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("created"),
+    issue: z.record(z.string(), z.unknown()),
+  }),
+  z.object({ state: z.literal("deleted") }),
+  z.object({ state: z.literal("void") }),
+]);
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/issue-idempotency-keys/{key}",
+  tags: ["issues"],
+  summary: "Look up an issue create idempotency key",
+  description:
+    "Reports whether the key is unused (absent), bound to a created issue (created, with the " +
+    "issue), bound to an issue that no longer exists (deleted), or permanently voided (void).",
+  request: { params: issueIdempotencyKeyParamsSchema },
+  responses: {
+    200: r.ok(issueIdempotencyKeyLookupResponseSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/issue-idempotency-keys/{key}/void",
+  tags: ["issues"],
+  summary: "Void an issue create idempotency key",
+  description:
+    "Permanently voids the key so it can never be reused to create an issue. A key already bound " +
+    "to a created issue is retained rather than cleared, and the response reports that issue " +
+    "(created, with the issue) or the fact that it was deleted; the route never reports absent.",
+  request: { params: issueIdempotencyKeyParamsSchema },
+  responses: {
+    200: r.ok(issueIdempotencyKeyVoidResponseSchema),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/api/issues/{id}/external-objects/refresh",
