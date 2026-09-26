@@ -311,6 +311,23 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     ).rejects.toThrow("Plugin may only use originKind values under plugin:paperclip.missions");
   });
 
+  it("cannot create a grouped child or flip the flag on an existing issue", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+    const parent = await services.issues.create({ companyId, title: "Parent" });
+
+    const child = await services.issues.create({
+      companyId, title: "Child", parentId: parent.id, groupedChild: true,
+    } as Parameters<typeof services.issues.create>[0]);
+    const stored = await db.select().from(issues).where(eq(issues.id, child.id)).then((rows) => rows[0]);
+    expect(stored).toMatchObject({ parentId: parent.id, groupedChild: false });
+
+    await expect(services.issues.update({
+      issueId: child.id, companyId, patch: { groupedChild: true } as Record<string, unknown>,
+    })).rejects.toThrow("groupedChild is fixed at creation");
+    expect((await db.select().from(issues).where(eq(issues.id, child.id)))[0]?.groupedChild).toBe(false);
+  });
+
   it("creates plugin operation issues with the generic operation origin", async () => {
     const { companyId } = await seedCompanyAndAgent();
     const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());

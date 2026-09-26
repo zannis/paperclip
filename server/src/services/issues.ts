@@ -10765,6 +10765,9 @@ export function issueService(db: Db) {
         .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
       if (!existing) return null;
       assertIssueExpectation(existing, data.expected); // fail fast, before any validation work
+      if (data.groupedChild !== undefined && data.groupedChild !== existing.groupedChild) {
+        throw unprocessable("groupedChild is fixed at creation");
+      }
       if (data.parentId !== undefined && data.parentId !== existing.parentId) {
         await assertExecutionTaskParent(dbOrTx, existing.companyId, data.parentId);
       }

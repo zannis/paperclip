@@ -1915,7 +1915,9 @@ export function buildHostServices(
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        const { actorAgentId, actorUserId, actorRunId, originKind, surfaceVisibility, ...issueInput } = params;
+        // Grouped children are board-only; a plugin is never a board actor.
+        const { actorAgentId, actorUserId, actorRunId, originKind, surfaceVisibility, groupedChild: _groupedChild, ...issueInput } =
+          params as typeof params & { groupedChild?: unknown };
         const normalizedOriginKind = normalizePluginOriginKind(
           surfaceVisibility === "plugin_operation" && !originKind
             ? pluginOperationIssueOriginKind(pluginKey)

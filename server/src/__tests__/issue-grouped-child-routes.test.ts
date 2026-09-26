@@ -17,6 +17,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { actorMiddleware } from "../middleware/auth.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
+import { issueService } from "../services/issues.js";
 
 const wakeupSpy = vi.hoisted(() => vi.fn(async () => null));
 vi.mock("../services/heartbeat.js", async (importOriginal) => {
@@ -128,6 +129,20 @@ d("grouped child issues", () => {
       await request(app()).patch(`/api/issues/${plain.id}`).send({ groupedChild: value }).expect(400);
       expect((await request(app()).get(`/api/issues/${lane.id}`).expect(200)).body.groupedChild).toBe(true);
       expect((await request(app()).get(`/api/issues/${plain.id}`).expect(200)).body.groupedChild).toBe(false);
+    });
+
+    it("cannot be changed through the issue service either, in both directions", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      const plain = await createChild(t);
+      const svc = issueService(db);
+      await expect(svc.update(lane.id, { groupedChild: false })).rejects.toThrow("groupedChild is fixed at creation");
+      await expect(svc.update(plain.id, { groupedChild: true })).rejects.toThrow("groupedChild is fixed at creation");
+      await svc.update(lane.id, { groupedChild: true, title: "same flag" });
+      const rows = Object.fromEntries((await db.select().from(issues).where(eq(issues.companyId, t.companyId)))
+        .map((row) => [row.id, row]));
+      expect(rows[lane.id]).toMatchObject({ groupedChild: true, title: "same flag" });
+      expect(rows[plain.id]?.groupedChild).toBe(false);
     });
 
     it("is refused on the child-create helper route", async () => {
