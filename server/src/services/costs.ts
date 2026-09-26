@@ -154,6 +154,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             FROM ${issues}
             WHERE ${issues.companyId} = ${companyId}
               AND ${issues.parentId} = ${issueId}
+              AND ${issues.groupedChild} = false
               AND ${issues.hiddenAt} IS NULL
               AND ${issues.harnessKind} IS NULL
           `
@@ -172,6 +173,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             FROM ${issues}
             WHERE ${issues.companyId} = ${companyId}
               AND ${issues.parentId} = ${issueId}
+              AND ${issues.groupedChild} = false
               AND ${issues.hiddenAt} IS NULL
               AND ${issues.harnessKind} IS NULL
           `
@@ -193,6 +195,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
             FROM ${issues} ${childIssues}
             JOIN issue_tree ON ${childIssues.parentId} = issue_tree.id
             WHERE ${childIssues.companyId} = ${companyId}
+              AND ${childIssues.groupedChild} = false
               AND ${childIssues.hiddenAt} IS NULL
               AND ${childIssues.harnessKind} IS NULL
           )
@@ -208,6 +211,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           FROM ${issues} ${childIssues}
           JOIN issue_tree ON (${childIssues.parentId})::text = issue_tree.id
           WHERE ${childIssues.companyId} = ${companyId}
+            AND ${childIssues.groupedChild} = false
             AND ${childIssues.hiddenAt} IS NULL
             AND ${childIssues.harnessKind} IS NULL
         )

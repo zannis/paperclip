@@ -1,0 +1,1 @@
+ALTER TABLE "issues" ADD COLUMN "grouped_child" boolean DEFAULT false NOT NULL;

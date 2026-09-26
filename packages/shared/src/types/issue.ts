@@ -792,6 +792,8 @@ export interface Issue {
   projectWorkspaceId: string | null;
   goalId: string | null;
   parentId: string | null;
+  /** Board-set at creation and immutable: a grouped child never reaches its parent. */
+  groupedChild?: boolean;
   ancestors?: IssueAncestor[];
   title: string;
   description: string | null;

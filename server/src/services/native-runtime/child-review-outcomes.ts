@@ -40,6 +40,7 @@ export async function childReviewOutcomes(
     .where(and(
       eq(issues.companyId, companyId),
       eq(issues.parentId, parentIssueId),
+      eq(issues.groupedChild, false),
       eq(issueThreadInteractions.kind, "request_confirmation"),
       inArray(issueThreadInteractions.status, ["accepted", "rejected"]),
       sql`${issueThreadInteractions.payload}->'target'->>'type' = 'custom'`,

@@ -435,6 +435,38 @@ describeEmbeddedPostgres("work timeline aggregation", () => {
     expect(result.events.map((event) => event.issueId)).not.toContain(unrelatedIssueId);
   });
 
+  it("does not extend the user lens into grouped children or their descendants", async () => {
+    const { companyId, userId, agentAId, agentBId } = await seedBase();
+    const rootIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const laneIssueId = randomUUID();
+    const laneChildIssueId = randomUUID();
+    const at = (hour: number) => new Date(`2026-03-03T${String(hour).padStart(2, "0")}:00:00Z`);
+
+    await db.insert(issues).values([
+      { id: rootIssueId, companyId, title: "User root", status: "todo", priority: "medium",
+        createdByUserId: userId, assigneeAgentId: agentAId, createdAt: at(10), updatedAt: at(10) },
+      { id: childIssueId, companyId, title: "Delegated child", status: "todo", priority: "medium", parentId: rootIssueId,
+        createdByAgentId: agentAId, assigneeAgentId: agentBId, createdAt: at(11), updatedAt: at(11) },
+      { id: laneIssueId, companyId, title: "Lane", status: "todo", priority: "medium", parentId: rootIssueId,
+        groupedChild: true, assigneeAgentId: agentBId, createdAt: at(12), updatedAt: at(12) },
+      { id: laneChildIssueId, companyId, title: "Lane child", status: "todo", priority: "medium", parentId: laneIssueId,
+        assigneeAgentId: agentBId, createdAt: at(13), updatedAt: at(13) },
+    ]);
+
+    const result = await workTimelineService(db).getTimeline({
+      companyId,
+      userId,
+      from: new Date("2026-03-03T00:00:00Z"),
+      to: new Date("2026-03-04T00:00:00Z"),
+    });
+
+    const issueIds = result.events.map((event) => event.issueId);
+    expect(issueIds).toEqual(expect.arrayContaining([rootIssueId, childIssueId]));
+    expect(issueIds).not.toContain(laneIssueId);
+    expect(issueIds).not.toContain(laneChildIssueId);
+  });
+
   it("filters unreadable issues before emitting timeline rows", async () => {
     const { companyId, agentAId } = await seedBase();
     const visibleIssueId = randomUUID();

@@ -205,14 +205,15 @@ export async function issueIsInTaskWatchdogSubtree(
     if (seen.has(currentId)) return false;
     seen.add(currentId);
 
-    const parent: { id: string; companyId: string; parentId: string | null; originKind: string | null } | null = await db
-      .select({ id: issues.id, companyId: issues.companyId, parentId: issues.parentId, originKind: issues.originKind })
+    const parent: { id: string; companyId: string; parentId: string | null; originKind: string | null; groupedChild: boolean } | null = await db
+      .select({ id: issues.id, companyId: issues.companyId, parentId: issues.parentId, originKind: issues.originKind, groupedChild: issues.groupedChild })
       .from(issues)
       .where(and(eq(issues.id, currentId), eq(issues.companyId, companyId)))
       .then((rows) => rows[0] ?? null);
     if (!parent) return false;
     if (parent.originKind === TASK_WATCHDOG_ORIGIN_KIND) return false;
     if (currentId === watchedIssueId) return true;
+    if (parent.groupedChild) return false;
     currentId = parent.parentId ?? null;
   }
 

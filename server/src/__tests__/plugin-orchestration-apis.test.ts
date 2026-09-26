@@ -311,6 +311,28 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     ).rejects.toThrow("Plugin may only use originKind values under plugin:paperclip.missions");
   });
 
+  it("cannot create a grouped child or flip the flag on an existing issue", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+    const parent = await services.issues.create({ companyId, title: "Parent" });
+
+    for (const groupedChild of [true, false]) {
+      await expect(services.issues.create({
+        companyId, title: "Grouped", parentId: parent.id, groupedChild,
+      } as Parameters<typeof services.issues.create>[0])).rejects.toThrow("Plugins cannot set groupedChild");
+    }
+    expect(await db.select().from(issues).where(eq(issues.parentId, parent.id))).toEqual([]);
+
+    const child = await services.issues.create({ companyId, title: "Child", parentId: parent.id });
+    const stored = await db.select().from(issues).where(eq(issues.id, child.id)).then((rows) => rows[0]);
+    expect(stored).toMatchObject({ parentId: parent.id, groupedChild: false });
+
+    await expect(services.issues.update({
+      issueId: child.id, companyId, patch: { groupedChild: true } as Record<string, unknown>,
+    })).rejects.toThrow("groupedChild is fixed at creation");
+    expect((await db.select().from(issues).where(eq(issues.id, child.id)))[0]?.groupedChild).toBe(false);
+  });
+
   it("creates plugin operation issues with the generic operation origin", async () => {
     const { companyId } = await seedCompanyAndAgent();
     const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
@@ -777,6 +799,29 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       cachedInputTokens: 3,
       outputTokens: 6,
     });
+  });
+
+  it("stops orchestration subtrees at grouped children unless one is the root", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const [rootId, plainId, plainChildId, laneId, laneChildId] = Array.from({ length: 5 }, () => randomUUID());
+    await db.insert(issues).values([
+      { id: rootId, companyId, title: "Root", status: "todo", priority: "medium" },
+      { id: plainId, companyId, parentId: rootId, title: "Plain", status: "todo", priority: "medium" },
+      { id: plainChildId, companyId, parentId: plainId, title: "Plain child", status: "todo", priority: "medium" },
+      { id: laneId, companyId, parentId: rootId, groupedChild: true, title: "Lane", status: "todo", priority: "medium" },
+      { id: laneChildId, companyId, parentId: laneId, title: "Lane child", status: "todo", priority: "medium" },
+    ]);
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+
+    const rootSummary = await services.issues.getOrchestrationSummary({ companyId, issueId: rootId, includeSubtree: true });
+    expect(new Set(rootSummary.subtreeIssueIds)).toEqual(new Set([rootId, plainId, plainChildId]));
+    const laneSummary = await services.issues.getOrchestrationSummary({ companyId, issueId: laneId, includeSubtree: true });
+    expect(new Set(laneSummary.subtreeIssueIds)).toEqual(new Set([laneId, laneChildId]));
+
+    const rootSubtree = await services.issues.getSubtree({ companyId, issueId: rootId });
+    expect(new Set(rootSubtree.issueIds)).toEqual(new Set([rootId, plainId, plainChildId]));
+    const laneSubtree = await services.issues.getSubtree({ companyId, issueId: laneId });
+    expect(new Set(laneSubtree.issueIds)).toEqual(new Set([laneId, laneChildId]));
   });
 
   it("rejects a human-attributed plugin comment when actorUserId is not an active company member", async () => {

@@ -130,7 +130,7 @@ const upsertDocumentToolSchema = z.object({
 
 const createIssueToolSchema = z.object({
   companyId: companyIdOptional,
-}).merge(createIssueInputSchema);
+}).merge(createIssueInputSchema.omit({ groupedChild: true }));
 
 const updateIssueToolSchema = z.object({
   issueId: issueIdSchema,

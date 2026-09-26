@@ -702,6 +702,63 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     });
   });
 
+  it("leaves grouped children and their descendants out of an issue's cost subtree", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const rootIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    const laneIssueId = randomUUID();
+    const laneChildIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Cost Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: rootIssueId, companyId, title: "Root", status: "in_progress", priority: "medium", issueNumber: 1, identifier: "TST-1" },
+      { id: childIssueId, companyId, parentId: rootIssueId, title: "Child", status: "done", priority: "medium",
+        issueNumber: 2, identifier: "TST-2" },
+      { id: laneIssueId, companyId, parentId: rootIssueId, groupedChild: true, title: "Lane", status: "done",
+        priority: "medium", issueNumber: 3, identifier: "TST-3" },
+      { id: laneChildIssueId, companyId, parentId: laneIssueId, title: "Lane child", status: "done", priority: "medium",
+        issueNumber: 4, identifier: "TST-4" },
+    ]);
+    await db.insert(costEvents).values(
+      ([[rootIssueId, 100], [childIssueId, 200], [laneIssueId, 400], [laneChildIssueId, 800]] as const).map(([issueId, costCents]) => ({
+        companyId,
+        agentId,
+        issueId,
+        provider: "openai",
+        biller: "openai",
+        billingType: "metered_api",
+        model: "gpt-5",
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        costCents,
+        occurredAt: new Date("2026-04-10T00:00:00.000Z"),
+      })),
+    );
+
+    expect(await costs.issueTreeSummary(companyId, rootIssueId)).toMatchObject({ issueCount: 2, costCents: 300 });
+    expect(await costs.issueTreeSummary(companyId, rootIssueId, { excludeRoot: true }))
+      .toMatchObject({ issueCount: 1, costCents: 200 });
+    expect(await costs.issueTreeSummary(companyId, laneIssueId)).toMatchObject({ issueCount: 2, costCents: 1200 });
+  });
+
   it("aggregates run wall-clock duration across the recursive issue tree", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
