@@ -109,6 +109,7 @@ export async function collectDispositionRepairSourceState(
           and(
             eq(issues.companyId, issue.companyId),
             eq(issues.parentId, issue.id),
+            eq(issues.groupedChild, false),
             notInArray(issues.status, ["done", "cancelled"]),
             sql`${issues.hiddenAt} is null`,
           ),
