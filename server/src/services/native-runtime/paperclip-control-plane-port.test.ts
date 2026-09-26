@@ -1361,7 +1361,18 @@ describe("PaperclipControlPlanePort conformance", () => {
     await db.update(issues).set({ parentId: null }).where(eq(issues.id, issueId));
     await expect(parentAuthority.execute({ tool: "get_task_context", callId: "review-unrelated-context", arguments: {} }))
       .resolves.toMatchObject({ childReviewOutcomes: [] });
-    await db.update(issues).set({ parentId }).where(eq(issues.id, issueId));
+    await db.update(issues).set({ parentId, groupedChild: true }).where(eq(issues.id, issueId));
+    await expect(childReviewOutcomes(db, identity.companyId, parentId)).resolves.toEqual([]);
+    const groupedContext = await parentAuthority.execute({ tool: "get_task_context", callId: "review-grouped-context", arguments: {} }) as {
+      childReviewOutcomes: unknown[]; childTasks: Array<{ id: string }>;
+    };
+    expect(groupedContext.childReviewOutcomes).toEqual([]);
+    expect(groupedContext.childTasks.map((task) => task.id)).not.toContain(issueId);
+    const groupedContinuation = await buildExecutionContinuation({ db, companyId: identity.companyId,
+      issueId: parentId, agentId: reviewerAgentId, runId: parentRunId,
+      context: { wakeReason: "issue_blockers_resolved" }, summary: null, exposeLowTrustRaw: false });
+    expect(groupedContinuation.interactionOutcomes).not.toContainEqual(expect.objectContaining({ id: agentReview.id }));
+    await db.update(issues).set({ groupedChild: false }).where(eq(issues.id, issueId));
     const otherCompanyId = "38000000-0000-4000-8000-000000000024";
     await db.insert(companies).values({ id: otherCompanyId, name: "Unrelated company", issuePrefix: "P6R" });
     await expect(childReviewOutcomes(db, otherCompanyId, parentId)).resolves.toEqual([]);
@@ -1397,6 +1408,34 @@ describe("PaperclipControlPlanePort conformance", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_review");
     await db.update(heartbeatRuns).set({ wakeupRequestId: null }).where(eq(heartbeatRuns.id, reviewRunId));
 
+  });
+
+  it("keeps grouped children out of the task context child list and its limit", async () => {
+    const identity = CONTROL_PLANE_CONFORMANCE_OPEN.identity;
+    const parentId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(issues).values({ id: parentId, companyId: identity.companyId,
+      title: "Context parent", status: "in_progress", assigneeAgentId: identity.agentId });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: identity.companyId,
+      agentId: identity.agentId, nativeIssueId: parentId, status: "running", runtimeMode: "native" });
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, parentId));
+    const base = Date.now() - 1_000_000;
+    const plainIds = Array.from({ length: 100 }, () => randomUUID());
+    await db.insert(issues).values(plainIds.map((id, index) => ({
+      id, companyId: identity.companyId, parentId, title: `Plain ${index}`, status: "todo" as const,
+      createdAt: new Date(base + index * 1_000),
+    })));
+    const laneId = randomUUID();
+    await db.insert(issues).values({ id: laneId, companyId: identity.companyId, parentId, groupedChild: true,
+      title: "Lane", status: "todo", createdAt: new Date(base + 200_000) });
+    const authority = new PaperclipRunnerToolAuthority(db, {
+      companyId: identity.companyId, issueId: parentId, agentId: identity.agentId, runId,
+    });
+    const context = await authority.execute({ tool: "get_task_context", callId: "grouped-limit", arguments: {} }) as {
+      childTasks: Array<{ id: string }>; childTasksTruncated: boolean;
+    };
+    expect(context.childTasksTruncated).toBe(false);
+    expect(context.childTasks.map((task) => task.id).sort()).toEqual([...plainIds].sort());
   });
 
   it("completes DOT-29-style low-risk work with an environment caveat and no corrective run", async () => {
