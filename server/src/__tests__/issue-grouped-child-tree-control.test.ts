@@ -77,4 +77,21 @@ d("tree control and grouped children", () => {
     await svc.createHold(s.companyId, s.laneId, { mode: "pause", reason: "lane pause", actor });
     expect((await svc.getActivePauseHoldGate(s.companyId, s.laneId))?.rootIssueId).toBe(s.laneId);
   });
+
+  it("an ordinary issue under the grouped child sits outside a ticket-rooted hold, unlike an ordinary grandchild", async () => {
+    const s = await seed();
+    const laneGrandchildId = randomUUID();
+    const plainGrandchildId = randomUUID();
+    await db.insert(issues).values([
+      { id: laneGrandchildId, companyId: s.companyId, parentId: s.laneId, title: "lane grandchild", status: "todo", priority: "medium" },
+      { id: plainGrandchildId, companyId: s.companyId, parentId: s.plainId, title: "plain grandchild", status: "todo", priority: "medium" },
+    ]);
+    const svc = issueTreeControlService(db);
+    const pause = await svc.createHold(s.companyId, s.ticketId, { mode: "pause", reason: "operator pause", actor });
+    const previewIds = pause.preview.issues.map((i) => i.id);
+    expect(previewIds).not.toContain(laneGrandchildId);
+    expect(previewIds).toContain(plainGrandchildId);
+    expect(await svc.getActivePauseHoldGate(s.companyId, laneGrandchildId)).toBeNull();
+    expect(await svc.getActivePauseHoldGate(s.companyId, plainGrandchildId)).not.toBeNull();
+  });
 });
