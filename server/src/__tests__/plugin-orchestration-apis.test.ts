@@ -801,6 +801,29 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     });
   });
 
+  it("stops orchestration subtrees at grouped children unless one is the root", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const [rootId, plainId, plainChildId, laneId, laneChildId] = Array.from({ length: 5 }, () => randomUUID());
+    await db.insert(issues).values([
+      { id: rootId, companyId, title: "Root", status: "todo", priority: "medium" },
+      { id: plainId, companyId, parentId: rootId, title: "Plain", status: "todo", priority: "medium" },
+      { id: plainChildId, companyId, parentId: plainId, title: "Plain child", status: "todo", priority: "medium" },
+      { id: laneId, companyId, parentId: rootId, groupedChild: true, title: "Lane", status: "todo", priority: "medium" },
+      { id: laneChildId, companyId, parentId: laneId, title: "Lane child", status: "todo", priority: "medium" },
+    ]);
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+
+    const rootSummary = await services.issues.getOrchestrationSummary({ companyId, issueId: rootId, includeSubtree: true });
+    expect(new Set(rootSummary.subtreeIssueIds)).toEqual(new Set([rootId, plainId, plainChildId]));
+    const laneSummary = await services.issues.getOrchestrationSummary({ companyId, issueId: laneId, includeSubtree: true });
+    expect(new Set(laneSummary.subtreeIssueIds)).toEqual(new Set([laneId, laneChildId]));
+
+    const rootSubtree = await services.issues.getSubtree({ companyId, issueId: rootId });
+    expect(new Set(rootSubtree.issueIds)).toEqual(new Set([rootId, plainId, plainChildId]));
+    const laneSubtree = await services.issues.getSubtree({ companyId, issueId: laneId });
+    expect(new Set(laneSubtree.issueIds)).toEqual(new Set([laneId, laneChildId]));
+  });
+
   it("rejects a human-attributed plugin comment when actorUserId is not an active company member", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const issueId = randomUUID();

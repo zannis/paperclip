@@ -1080,7 +1080,11 @@ export function buildHostServices(
       const children = await db
         .select({ id: issuesTable.id })
         .from(issuesTable)
-        .where(and(eq(issuesTable.companyId, companyId), inArray(issuesTable.parentId, frontier)));
+        .where(and(
+          eq(issuesTable.companyId, companyId),
+          inArray(issuesTable.parentId, frontier),
+          eq(issuesTable.groupedChild, false),
+        ));
       frontier = children.map((child) => child.id).filter((id) => !seen.has(id));
       for (const id of frontier) seen.add(id);
     }
