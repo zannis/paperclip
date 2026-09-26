@@ -357,6 +357,7 @@ import {
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInWakePayload,
 } from "../services/issue-queued-comment-queue.js";
+import { blockerCountsFor, relationBlockerCounts } from "../services/grouped-child-blocker-edge.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -9975,6 +9976,7 @@ export function issueRoutes(
                 eq(issueRelations.companyId, existing.companyId),
                 eq(issueRelations.relatedIssueId, existing.id),
                 eq(issueRelations.type, "blocks"),
+                relationBlockerCounts(),
                 notInArray(issueRows.status, ["done", "cancelled"]),
               ),
             )
@@ -13953,6 +13955,7 @@ export function issueRoutes(
                 and(
                   eq(issueRows.companyId, existing.companyId),
                   inArray(issueRows.id, requestedBlockerIds),
+                  blockerCountsFor(issueRows, existing.id),
                   notInArray(issueRows.status, ["done", "cancelled"]),
                 ),
               )

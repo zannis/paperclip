@@ -12,6 +12,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import { parseIssueExecutionState } from "../issue-execution-policy.js";
+import { relationBlockerCounts } from "../grouped-child-blocker-edge.js";
 
 const ACTIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 
@@ -98,6 +99,7 @@ export async function collectDispositionRepairSourceState(
             eq(issueRelations.companyId, issue.companyId),
             eq(issueRelations.relatedIssueId, issue.id),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             notInArray(issues.status, ["done", "cancelled"]),
             sql`${issues.hiddenAt} is null`,
           ),

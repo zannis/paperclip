@@ -29,6 +29,7 @@ import {
   TASK_WATCHDOG_TERMINAL_RUN_STATUSES,
   TASK_WATCHDOG_WAKE_ORIGIN_RUN_ID_KEY,
 } from "./task-watchdog-scope.js";
+import { relationBlockerCounts } from "./grouped-child-blocker-edge.js";
 
 const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
@@ -1545,6 +1546,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         .where(and(
           eq(issueRelations.companyId, companyId),
           eq(issueRelations.type, "blocks"),
+          relationBlockerCounts(),
           inArray(issueRelations.relatedIssueId, subtreeIssueIds),
         )),
       db

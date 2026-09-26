@@ -196,6 +196,7 @@ import {
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import { relationBlockerCounts, blockerCountsFor } from "./grouped-child-blocker-edge.js";
 
 const ALL_ISSUE_STATUSES = [
   "backlog",
@@ -2649,6 +2650,7 @@ async function listIssueDependencyReadinessMap(
       and(
         eq(issueRelations.companyId, companyId),
         eq(issueRelations.type, "blocks"),
+        relationBlockerCounts(),
         inArray(issueRelations.relatedIssueId, uniqueIssueIds),
       ),
     );
@@ -2747,6 +2749,7 @@ async function listUnresolvedBlockerDetails(
 async function listUnresolvedBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
+  dependentIssueId: string,
   blockerIssueIds: string[],
 ) {
   const uniqueBlockerIssueIds = [...new Set(blockerIssueIds.filter(Boolean))];
@@ -2758,6 +2761,7 @@ async function listUnresolvedBlockerIssueIds(
       and(
         eq(issues.companyId, companyId),
         inArray(issues.id, uniqueBlockerIssueIds),
+        blockerCountsFor(issues, dependentIssueId),
         // Cancelled blockers intentionally remain unresolved until the relation changes.
         ne(issues.status, "done"),
       ),
@@ -3691,6 +3695,7 @@ async function terminalExplicitBlockersByRoot(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             inArray(issueRelations.relatedIssueId, chunk),
             eq(issues.companyId, companyId),
             ne(issues.status, "done"),
@@ -3812,6 +3817,7 @@ async function listIssueBlockerAttentionMap(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             inArray(issueRelations.relatedIssueId, chunk),
             eq(issues.companyId, companyId),
           ),
@@ -5598,6 +5604,7 @@ async function listIssueBlockedInboxAttentionMap(
           and(
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
           ),
         ),
       dbOrTx
@@ -8662,6 +8669,7 @@ export function issueService(db: Db) {
           and(
             eq(issueRelations.companyId, issue.companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             eq(issueRelations.relatedIssueId, issue.id),
             eq(issues.companyId, issue.companyId),
           ),
@@ -8994,6 +9002,7 @@ export function issueService(db: Db) {
               AND blocker.company_id = ${issue.companyId}
               AND blocker.hidden_at IS NULL
               AND blocker.harness_kind IS NULL
+              AND NOT (blocker.grouped_child AND blocker.parent_id IS NOT DISTINCT FROM relation.related_issue_id)
               AND relation.related_issue_id::text IN (${nodeIdValues})
           )
           SELECT *
@@ -9199,6 +9208,7 @@ export function issueService(db: Db) {
           and(
             eq(issueRelations.companyId, blockerIssue.companyId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             eq(issueRelations.issueId, blockerIssueId),
             isNull(issues.conversationAgentId),
           ),
@@ -10911,6 +10921,7 @@ export function issueService(db: Db) {
             ? await listUnresolvedBlockerIssueIds(
                 dbOrTx,
                 existing.companyId,
+                id,
                 blockedByIssueIds,
               )
             : (dependencyReadiness?.unresolvedBlockerIssueIds ?? []);

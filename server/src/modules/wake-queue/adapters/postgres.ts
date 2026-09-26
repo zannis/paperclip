@@ -63,6 +63,7 @@ import type {
   WakeQueueTransaction,
 } from "../application/ports.js";
 import type { RunSummary } from "../application/types.js";
+import { relationBlockerCounts } from "../../../services/grouped-child-blocker-edge.js";
 
 const DEFERRED_WAKE_STATUS = "deferred_issue_execution";
 const DEFERRED_WAKE_CONTEXT_KEY = "_paperclipWakeContext";
@@ -528,6 +529,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
             eq(issueRelations.companyId, companyId),
             eq(issueRelations.relatedIssueId, issueId),
             eq(issueRelations.type, "blocks"),
+            relationBlockerCounts(),
             eq(issues.companyId, companyId),
             notInArray(issues.status, ["done", "cancelled"]),
             isNull(issues.hiddenAt),

@@ -8,6 +8,7 @@ import {
   completionContracts,
   createDb,
   heartbeatRuns,
+  issueRelations,
   issues,
   nativeRunFinalizations,
   nativeRunResults,
@@ -37,7 +38,10 @@ d("native completion of a grouped child", () => {
   }, 30_000);
   afterAll(async () => { await tempDb?.cleanup(); });
 
-  async function completeNativeChild(groupedChild: boolean) {
+  async function completeNativeChild(
+    groupedChild: boolean,
+    { blocksParent = false, reason = "issue_children_completed" }: { blocksParent?: boolean; reason?: string } = {},
+  ) {
     const engineerId = randomUUID();
     await db.insert(agents).values({ id: engineerId, companyId, name: "Engineer", adapterType: "codex_local", status: "idle" });
     const ticketId = randomUUID();
@@ -47,13 +51,16 @@ d("native completion of a grouped child", () => {
     const resultId = randomUUID();
     const assessmentId = randomUUID();
     await db.insert(issues).values([
-      { id: ticketId, companyId, title: "ticket", status: "in_progress", assigneeAgentId: engineerId, workMode: "standard" },
+      { id: ticketId, companyId, title: "ticket", status: blocksParent ? "blocked" : "in_progress", assigneeAgentId: engineerId, workMode: "standard" },
       {
         id: childId, companyId, parentId: ticketId, groupedChild, title: "child", status: "in_progress",
         assigneeAgentId: workerId, workMode: "standard",
       },
-      { companyId, parentId: ticketId, title: "finished sibling", status: "done", workMode: "standard" },
+      { companyId, parentId: ticketId, title: "sibling", status: blocksParent ? "todo" : "done", workMode: "standard" },
     ]);
+    if (blocksParent) {
+      await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: ticketId, type: "blocks" });
+    }
     await db.insert(completionContracts).values({
       id: contractId, companyId, issueId: childId, revision: 1,
       schemaVersion: "paperclip.completion-contract.v1", policyVersion: "grouped-v1", risk: "standard",
@@ -93,7 +100,7 @@ d("native completion of a grouped child", () => {
     return db.select().from(agentWakeupRequests).where(and(
       eq(agentWakeupRequests.companyId, companyId),
       eq(agentWakeupRequests.agentId, engineerId),
-      eq(agentWakeupRequests.reason, "issue_children_completed"),
+      eq(agentWakeupRequests.reason, reason),
     ));
   }
 
@@ -103,5 +110,13 @@ d("native completion of a grouped child", () => {
 
   it("still enqueues it for an ordinary child", async () => {
     expect(await completeNativeChild(false)).toHaveLength(1);
+  });
+
+  it("does not enqueue issue_blockers_resolved for a parent the grouped child explicitly blocks", async () => {
+    expect(await completeNativeChild(true, { blocksParent: true, reason: "issue_blockers_resolved" })).toEqual([]);
+  });
+
+  it("still enqueues issue_blockers_resolved when an ordinary child blocks its parent", async () => {
+    expect(await completeNativeChild(false, { blocksParent: true, reason: "issue_blockers_resolved" })).toHaveLength(1);
   });
 });

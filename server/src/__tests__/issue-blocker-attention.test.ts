@@ -295,6 +295,29 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     });
   });
 
+  it("ignores a grouped child's explicit blocker edge to its own parent", async () => {
+    const { companyId, agentId } = await createCompany("PBE");
+    const parentId = await insertIssue({ companyId, identifier: "PBE-1", title: "Parent", status: "blocked" });
+    const dependencyId = await insertIssue({
+      companyId, identifier: "PBE-2", title: "Running dependency", status: "todo", assigneeAgentId: agentId,
+    });
+    const laneId = await insertIssue({
+      companyId, identifier: "PBE-3", title: "Stranded lane", status: "todo", parentId, groupedChild: true,
+    });
+    await block({ companyId, blockerIssueId: dependencyId, blockedIssueId: parentId });
+    await block({ companyId, blockerIssueId: laneId, blockedIssueId: parentId });
+    await activeRun({ companyId, agentId, issueId: dependencyId });
+
+    const parent = (await svc.list(companyId, { status: "blocked" })).find((issue) => issue.id === parentId);
+
+    expect(parent?.blockerAttention).toMatchObject({
+      state: "covered",
+      unresolvedBlockerCount: 1,
+      attentionBlockerCount: 0,
+      sampleBlockerIdentifier: "PBE-2",
+    });
+  });
+
   it("ignores cancelled direct children when counting unresolved blocker attention", async () => {
     const { companyId, agentId } = await createCompany("PBD");
     const parentId = await insertIssue({ companyId, identifier: "PBD-1", title: "Parent", status: "blocked" });

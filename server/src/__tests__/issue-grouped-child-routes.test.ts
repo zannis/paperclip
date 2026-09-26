@@ -61,10 +61,10 @@ d("grouped child issues", () => {
     a.use(actorMiddleware(db, { deploymentMode: "local_trusted" }));
     return mount(a);
   };
-  const agentApp = (agentId: string, companyId: string) => {
+  const agentApp = (agentId: string, companyId: string, runId?: string) => {
     const a = express(); a.use(express.json());
     a.use((req, _res, next) => {
-      req.actor = { type: "agent", agentId, companyId, source: "agent_jwt" } as Express.Request["actor"];
+      req.actor = { type: "agent", agentId, companyId, source: "agent_jwt", ...(runId ? { runId } : {}) } as Express.Request["actor"];
       next();
     });
     return mount(a);
@@ -245,6 +245,98 @@ d("grouped child issues", () => {
         expect(relaysAfterPlain[0]!.body).toContain(`transitioned to \`${status}\``);
       },
     );
+  });
+
+  describe("explicit blocker edges", () => {
+    const blockBy = (issueId: string, blockerId: string) =>
+      request(app()).patch(`/api/issues/${issueId}`).send({
+        status: "blocked", blockedByIssueIds: [blockerId], unblockDescriptor: { owner: "board", action: "wait on the blocker" },
+      }).expect(200);
+    const blockersResolved = () => wakes().filter((w) => w.reason === "issue_blockers_resolved");
+    const reviewBy = async (issueId: string, reviewerId: string) => {
+      const stageId = randomUUID();
+      await db.update(issues).set({
+        status: "in_review",
+        assigneeAgentId: reviewerId,
+        executionPolicy: {
+          mode: "normal", commentRequired: true,
+          stages: [{ id: stageId, type: "review", approvalsNeeded: 1, participants: [{ id: randomUUID(), type: "agent", agentId: reviewerId }] }],
+        },
+        executionState: {
+          status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+          currentParticipant: { type: "agent", agentId: reviewerId }, returnAssignee: { type: "agent", agentId: reviewerId },
+          completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+        },
+      }).where(eq(issues.id, issueId));
+    };
+
+    it.each([
+      [true, 0],
+      [false, 1],
+    ] as const)("a child (grouped: %s) blocking its own parent: PATCH to done wakes the parent %i time(s)", async (grouped, count) => {
+      const t = await seedTicket();
+      const child = await createChild(t, grouped ? { groupedChild: true } : {});
+      await createChild(t); // an open sibling keeps issue_children_completed out of the picture
+      await blockBy(t.ticketId, child.id);
+      await quiet();
+      await request(app()).patch(`/api/issues/${child.id}`).send({ status: "done" }).expect(200);
+      if (count > 0) await vi.waitFor(() => expect(blockersResolved()).toHaveLength(count));
+      await settle();
+      expect(blockersResolved().filter((w) => w.agentId === t.engineerId)).toHaveLength(count);
+    });
+
+    it.each([
+      [true, 0],
+      [false, 1],
+    ] as const)("a child (grouped: %s) blocking its own parent: a review-approval comment wakes the parent %i time(s)", async (grouped, count) => {
+      const t = await seedTicket();
+      const child = await createChild(t, grouped ? { groupedChild: true } : {});
+      await createChild(t); // an open sibling keeps issue_children_completed out of the picture
+      await blockBy(t.ticketId, child.id);
+      await reviewBy(child.id, t.conductorId);
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: runId, companyId: t.companyId, agentId: t.conductorId, invocationSource: "assignment",
+        triggerDetail: "system", status: "running", contextSnapshot: { issueId: child.id, wakeReason: "issue_assigned" },
+      });
+      await quiet();
+      await request(agentApp(t.conductorId, t.companyId, runId)).post(`/api/issues/${child.id}/comments`)
+        .send({ body: "## Review: APPROVED\n\nLooks good." }).expect((r) => expect(r.status, JSON.stringify(r.body)).toBe(201));
+      expect((await request(app()).get(`/api/issues/${child.id}`).expect(200)).body.status).toBe("done");
+      if (count > 0) await vi.waitFor(() => expect(blockersResolved()).toHaveLength(count));
+      await settle();
+      expect(blockersResolved().filter((w) => w.agentId === t.engineerId)).toHaveLength(count);
+    });
+
+    it("a grouped child blocking an unrelated issue still wakes that issue", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      const other = await request(app()).post(`/api/companies/${t.companyId}/issues`)
+        .send({ title: "unrelated", status: "todo", allowDuplicate: true, assigneeAgentId: t.engineerId }).expect(201);
+      await blockBy(other.body.id, lane.id);
+      await quiet();
+      await request(app()).patch(`/api/issues/${lane.id}`).send({ status: "done" }).expect(200);
+      await vi.waitFor(() => expect(blockersResolved()).toHaveLength(1));
+      expect(blockersResolved()[0]!.payload?.issueId).toBe(other.body.id);
+    });
+
+    it("an open grouped child does not hold its parent; an open ordinary child does", async () => {
+      const t = await seedTicket();
+      const lane = await createChild(t, { groupedChild: true });
+      const plain = await createChild(t);
+      const svc = issueService(db);
+      await blockBy(t.ticketId, lane.id);
+      expect((await svc.listDependencyReadiness(t.companyId, [t.ticketId])).get(t.ticketId))
+        .toMatchObject({ isDependencyReady: true, blockerIssueIds: [], unresolvedBlockerIssueIds: [] });
+      await request(app()).patch(`/api/issues/${t.ticketId}`).send({ status: "in_progress" }).expect(200);
+      await request(app()).patch(`/api/issues/${t.ticketId}`)
+        .send({ status: "in_progress", blockedByIssueIds: [lane.id] }).expect(200);
+
+      await blockBy(t.ticketId, plain.id);
+      expect((await svc.listDependencyReadiness(t.companyId, [t.ticketId])).get(t.ticketId))
+        .toMatchObject({ isDependencyReady: false, unresolvedBlockerIssueIds: [plain.id] });
+      await request(app()).patch(`/api/issues/${t.ticketId}`).send({ status: "in_progress" }).expect(422);
+    });
   });
 
   describe("parent to child", () => {

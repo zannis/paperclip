@@ -34,6 +34,7 @@ import {
 } from "./adapter-execution-control.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
+import { relationBlockerCounts } from "./grouped-child-blocker-edge.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
@@ -5650,6 +5651,7 @@ async function listUnresolvedBlockerSummaries(
       and(
         eq(issueRelations.companyId, companyId),
         eq(issueRelations.type, "blocks"),
+        relationBlockerCounts(),
         eq(issueRelations.relatedIssueId, issueId),
         inArray(issues.id, ids),
       ),
@@ -13420,6 +13422,7 @@ export function heartbeatService(
                 eq(issueRelations.companyId, issue.companyId),
                 eq(issueRelations.relatedIssueId, issue.id),
                 eq(issueRelations.type, "blocks"),
+                relationBlockerCounts(),
                 sql`exists (
                 select 1
                 from issues blocker
