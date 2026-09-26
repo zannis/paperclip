@@ -112,13 +112,21 @@ d("grouped child issues", () => {
         .toEqual({ [lane.id]: true, [plain.id]: false });
     });
 
-    it("is refused for an agent actor", async () => {
+    it.each([true, false])("is refused for an agent actor whatever its value (groupedChild: %s)", async (value) => {
       const t = await seedTicket();
       const res = await request(agentApp(t.engineerId, t.companyId)).post(`/api/companies/${t.companyId}/issues`)
-        .send({ title: "sneaky", status: "todo", parentId: t.ticketId, groupedChild: true });
+        .send({ title: "sneaky", status: "todo", parentId: t.ticketId, groupedChild: value });
       expect(res.status).toBe(403);
       const children = await db.select().from(issues).where(eq(issues.parentId, t.ticketId));
       expect(children).toEqual([]);
+    });
+
+    it("an agent create that omits the flag still succeeds", async () => {
+      const t = await seedTicket();
+      const res = await request(agentApp(t.engineerId, t.companyId)).post(`/api/companies/${t.companyId}/issues`)
+        .send({ title: "plain", status: "todo", parentId: t.ticketId });
+      expect(res.status).toBe(201);
+      expect(res.body.groupedChild).toBe(false);
     });
 
     it.each([true, false])("cannot be changed by PATCH (groupedChild: %s is a 400)", async (value) => {

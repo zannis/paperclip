@@ -12185,7 +12185,7 @@ export function issueRoutes(
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertCompanyAccess(req, companyId);
-      if (req.body.groupedChild === true && req.actor.type !== "board") {
+      if (req.body.groupedChild !== undefined && req.actor.type !== "board") {
         throw forbidden("Only the board can create a grouped child issue");
       }
       if (isSkillTestScopedActor(req)) {
