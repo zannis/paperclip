@@ -395,8 +395,8 @@ jobs:
   # and manual Docker dispatches call the same implementation, preserving the
   # release tags and the canary promotion dependency below.
   build-and-push-cloud:
-    # The fork patch queue publishes only the self-hosted image.
-    if: github.ref != 'refs/heads/patches/onlybots' && (github.event_name != 'push' || github.ref != 'refs/heads/master')
+    # Pushes to the fork patch queue publish only the self-hosted image.
+    if: github.event_name != 'push' || github.ref != 'refs/heads/master' && github.ref != 'refs/heads/patches/onlybots'
     uses: ./.github/workflows/docker-cloud.yml
     permissions:
       contents: read
