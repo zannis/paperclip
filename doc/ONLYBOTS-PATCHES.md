@@ -50,6 +50,7 @@ Local recovery references:
 | Lockfile sync | Upstream `4b8ec588f` has bumped the codex and claude-agent-sdk overrides and the codex-acp patch without refreshing `pnpm-lock.yaml`. The git installer runs a frozen install, so this commit syncs it. Retire it when upstream's refreshed lockfile arrives |
 | Lane task primitives | Conditional issue PATCH (`expected` preconditions on revision, status, assignee and description hash; atomic status and comment; no self-wake on a conditional park) and a durable idempotency key registry (retain, void, delete tombstones) with board lookup and void routes. Migrations 0284–0285. For flow's lane-task reuse. Fork-only, not proposed upstream |
 | Grouped lane children | Create-only, board-only `groupedChild` issue flag (migration 0286). A grouped child's completion never wakes its parent (`issue_children_completed`, including native completions), it never relays a stop comment, it is not counted as the parent's open child (including by recovery), and parent subtree holds (cancel, pause, restore) skip it and its descendants. For flow's lane tasks. Fork-only, not proposed upstream |
+| Fork image publishing | `docker.yml` also triggers on pushes to `patches/onlybots`; only `zannis/paperclip` builds that ref, publishing the multi-arch (amd64, arm64) production image as `ghcr.io/zannis/paperclip:sha-<short>` with upstream's OCI and schema labels. The cloud image, full-SHA tag and standard-image attestation stay upstream-master-only and are skipped. Fork-only, not proposed upstream |
 
 ## Completed fixes and exclusions
 
