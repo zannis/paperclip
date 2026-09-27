@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "master"
+      # Fork patch queue (zannis/paperclip): publishes ghcr.io/zannis/paperclip:sha-<short>.
+      - "patches/onlybots"
     tags:
       - "v*"
       - "nightly/v*"
@@ -56,6 +58,8 @@ jobs:
   # digest; `merge` assembles the manifest list. Both architectures remain
   # available to self-hosted installations and downstream image composers.
   build-and-push:
+    # patches/onlybots publishes only from the fork that owns it.
+    if: github.ref != 'refs/heads/patches/onlybots' || github.repository == 'zannis/paperclip'
     strategy:
       # Independent legs: one architecture failing should still publish
       # nothing, but it must not also hide the other's logs behind a
