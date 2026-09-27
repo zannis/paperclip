@@ -1,0 +1,45 @@
+doc/ONLYBOTS-PATCHES.md
+  s_49f62545611f8e::t_65d13e1966d539 53
+docker/daytona-runner/Dockerfile
+  s_49f62545611f8e::t_20c6e0e473bb57 137
+docker/daytona-runner/README.md
+  s_49f62545611f8e::t_cb0505728f94cb 17-18
+package.json
+  s_49f62545611f8e::t_00e0d345a74a60 120
+packages/adapters/claude-local/package.json
+  s_49f62545611f8e::t_3f24f98a549afc 57
+packages/paperclip-runner/runner/crates/runner-core/src/acpx_provider_backend.rs
+  s_49f62545611f8e::t_425c65d5720da4 154,1855
+packages/paperclip-runner/src/backends/native-backend-factory.test.ts
+  s_49f62545611f8e::t_3f6e3057f60dcc 104
+packages/paperclip-runner/src/drivers/acpx/installation-integrity.test.ts
+  s_49f62545611f8e::t_ce51a394422660 448
+packages/paperclip-runner/src/drivers/acpx/installation-integrity.ts
+  s_49f62545611f8e::t_a9227e489750dc 48,50-51,54,62,67,95-96
+packages/paperclip-runner/src/drivers/acpx/qualified-profiles.test.ts
+  s_49f62545611f8e::t_e05ff9f1d1f8f9 44
+packages/paperclip-runner/src/drivers/acpx/qualified-profiles.ts
+  s_49f62545611f8e::t_0cd5600171f16a 59
+packages/paperclip-runner/test/acpx-codex-package-contract.test.mjs
+  s_49f62545611f8e::t_fe9a64581a853c 63
+pnpm-lock.yaml
+  s_49f62545611f8e::t_9b1f409c1eda21 9,177,179-180,502,1294-1295,1299-1300,1304-1305,1309-1310,1314-1315,1319-1320,1324-1325,1329-1330,1334-1335,1342-1343,9021,9024,9052,9055,9058,9061,9064,9067,9070,9073,9076,9078,9082-9091
+pnpm-workspace.yaml
+  s_49f62545611f8e::t_4f474c90e451a9 36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "7be2d831a8bed18724a56381a6ef68f197f88412",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
