@@ -14,8 +14,8 @@ image that this Dockerfile can extend directly.
 
 ## Harness versions
 
-The September 22, 2026 refresh pins Codex 0.156.0, Claude Agent SDK
-0.3.280 (Claude Code 2.1.280), and OpenCode 1.18.32 in the shared provider
+The September 28, 2026 refresh pins Codex 0.156.0, Claude Agent SDK
+0.3.283 (Claude Code 2.1.283), and OpenCode 1.18.32 in the shared provider
 pack. Claude Code 2.1.280 is the minimum for
 [Opus 5.5](https://code.claude.com/docs/en/model-config); it also supports
 Fable 5.1. Codex uses the current
