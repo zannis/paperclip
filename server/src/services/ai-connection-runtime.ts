@@ -257,8 +257,9 @@ export async function prepareManagedAiRuntime(
     // Anthropic joins the file topology only when the stored credential is a
     // Claude credential document the CLI can refresh. Connections saved before
     // this change hold a bare token, and a `claude setup-token` credential has
-    // no refresh token; both keep the env-var delivery, so an upgrade never
-    // writes a non-refreshable value into `.credentials.json`.
+    // no refresh token; both keep the env-var delivery, as does a document
+    // without a readable expiry, so `.credentials.json` only ever holds a
+    // document the write-back can compare.
     const subscriptionFile =
       subscriptionSelected &&
       (input.binding.provider !== "anthropic" || isRefreshableClaudeDocument(value));

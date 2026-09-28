@@ -28,12 +28,18 @@ const document = (oauth: Oauth = {}, root: Record<string, unknown> = {}) =>
 const decide = (refreshed: string, stored: string) => decideClaudeAuthMerge(refreshed, stored, NOW);
 
 describe("isRefreshableClaudeDocument", () => {
-  it("requires both an access token and a refresh token", () => {
+  it("requires an access token, a refresh token and a readable expiry", () => {
     expect(isRefreshableClaudeDocument(document())).toBe(true);
     // A `claude setup-token` credential: long-lived, nothing to refresh.
     expect(isRefreshableClaudeDocument(document({ refreshToken: undefined }))).toBe(false);
     expect(isRefreshableClaudeDocument(document({ refreshToken: " " }))).toBe(false);
     expect(isRefreshableClaudeDocument(document({ accessToken: "" }))).toBe(false);
+    // Without a readable expiry the write-back can never prove a refreshed
+    // copy newer, so the document would freeze at sign-in.
+    expect(isRefreshableClaudeDocument(document({ expiresAt: undefined }))).toBe(false);
+    expect(isRefreshableClaudeDocument(document({ expiresAt: "tomorrow" }))).toBe(false);
+    expect(isRefreshableClaudeDocument(document({ expiresAt: new Date(NOW).toISOString() }))).toBe(true);
+    expect(isRefreshableClaudeDocument(document({ expiresAt: NOW / 1000 }))).toBe(true);
   });
 
   it("rejects a bare token and malformed input", () => {
@@ -73,10 +79,18 @@ describe("decideClaudeAuthMerge", () => {
       expect(decide(document({ expiresAt: later }, { account: { uuid: "b" } }), document({}, { account: { uuid: "a" } }))).toBe(KEEP_DESTINATION);
     });
 
-    it("compares only the identity fields present on both sides", () => {
+    it("accepts a document that repeats every identity field of the stored one", () => {
       expect(decide(document({ expiresAt: later, subscriptionType: "max" }, { account: { uuid: "a" } }), document({ subscriptionType: "max" }, { account: { uuid: "a" } }))).toBe(USE_SOURCE);
+      // A field the stored document does not carry is not required.
       expect(decide(document({ expiresAt: later, subscriptionType: "max" }), document())).toBe(USE_SOURCE);
-      expect(decide(document({ expiresAt: later }), document({}, { account: { uuid: "a" } }))).toBe(USE_SOURCE);
+    });
+
+    it("refuses a document that leaves out an identity field of the stored one", () => {
+      // The agent process can write the refreshed copy, so omitting a field
+      // must not pass as a match.
+      expect(decide(document({ expiresAt: later }), document({}, { account: { uuid: "a" } }))).toBe(KEEP_DESTINATION);
+      expect(decide(document({ expiresAt: later }), document({ subscriptionType: "max" }))).toBe(KEEP_DESTINATION);
+      expect(decide(document({ expiresAt: later, subscriptionType: "" }), document({ subscriptionType: "max" }))).toBe(KEEP_DESTINATION);
     });
   });
 

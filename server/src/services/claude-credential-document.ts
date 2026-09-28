@@ -30,42 +30,6 @@ function parseDocument(value: string): ParsedDocument | null {
 const nonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.trim().length > 0;
 
-/**
- * A document the CLI can refresh: it carries both an access token and a
- * refresh token. A `claude setup-token` credential holds a long-lived access
- * token and no refresh token. It gains nothing from the file, so it stays on
- * `CLAUDE_CODE_OAUTH_TOKEN`, the delivery that token is documented for.
- */
-export function isRefreshableClaudeDocument(value: string): boolean {
-  const document = parseDocument(value);
-  return (
-    !!document &&
-    nonEmptyString(document.oauth.accessToken) &&
-    nonEmptyString(document.oauth.refreshToken)
-  );
-}
-
-// Identity fields compared when both sides carry them. A refresh keeps the
-// account, so a mismatch means the run's provider home, which the agent
-// process can write, holds a different account's credential.
-const IDENTITY_FIELDS: ReadonlyArray<(document: ParsedDocument) => unknown> = [
-  (document) => document.oauth.subscriptionType,
-  (document) => {
-    const account = document.root.account;
-    return account && typeof account === "object" && !Array.isArray(account)
-      ? (account as { uuid?: unknown }).uuid
-      : undefined;
-  },
-];
-
-function sameIdentity(source: ParsedDocument, destination: ParsedDocument): boolean {
-  return IDENTITY_FIELDS.every((read) => {
-    const left = read(source);
-    const right = read(destination);
-    return !nonEmptyString(left) || !nonEmptyString(right) || left === right;
-  });
-}
-
 const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 // Below this magnitude a numeric expiry is epoch seconds, at or above it epoch
 // milliseconds. The same threshold the Codex and Grok predicates use.
@@ -86,6 +50,48 @@ function readExpiry(raw: unknown): Expiry {
   return { present: true, ms: null };
 }
 
+function hasBothTokens(document: ParsedDocument): boolean {
+  return nonEmptyString(document.oauth.accessToken) && nonEmptyString(document.oauth.refreshToken);
+}
+
+/**
+ * A document the CLI can refresh and the write-back can compare: it carries an
+ * access token, a refresh token and a readable expiry. A `claude setup-token`
+ * credential holds a long-lived access token and no refresh token. It gains
+ * nothing from the file, so it stays on `CLAUDE_CODE_OAUTH_TOKEN`, the delivery
+ * that token is documented for. A document with no readable expiry stays there
+ * too: the write-back could never prove a refreshed copy newer, so the file
+ * would freeze at sign-in exactly like the environment variable.
+ */
+export function isRefreshableClaudeDocument(value: string): boolean {
+  const document = parseDocument(value);
+  if (!document || !hasBothTokens(document)) return false;
+  const expiry = readExpiry(document.oauth.expiresAt);
+  return expiry.present && expiry.ms !== null;
+}
+
+// Identity fields of the stored document. A refresh keeps the account, so a
+// refreshed document must repeat every identity field the stored one carries.
+// A missing field counts as a mismatch: the refreshed copy comes from the run's
+// own provider home, which the agent process can write, so it must not be able
+// to pass the check by leaving the field out.
+const IDENTITY_FIELDS: ReadonlyArray<(document: ParsedDocument) => unknown> = [
+  (document) => document.oauth.subscriptionType,
+  (document) => {
+    const account = document.root.account;
+    return account && typeof account === "object" && !Array.isArray(account)
+      ? (account as { uuid?: unknown }).uuid
+      : undefined;
+  },
+];
+
+function sameIdentity(source: ParsedDocument, destination: ParsedDocument): boolean {
+  return IDENTITY_FIELDS.every((read) => {
+    const stored = read(destination);
+    return !nonEmptyString(stored) || read(source) === stored;
+  });
+}
+
 // The exit-code contract shared with the Codex and Grok predicates.
 /** Replace the stored credential with the refreshed one. */
 export const USE_SOURCE = 10;
@@ -100,8 +106,9 @@ export const MAX_PLAUSIBLE_EXPIRY_MS = 400 * 24 * 60 * 60 * 1000;
 /**
  * The Claude counterpart of the Codex and Grok write-back predicates, with the
  * same guard order. First match wins:
- *   1. Either side is not a refreshable document, or an identity field present
- *      on both sides differs -> KEEP_DESTINATION.
+ *   1. Either side lacks an access token or a refresh token, or the refreshed
+ *      document does not repeat an identity field of the stored one
+ *      -> KEEP_DESTINATION.
  *   2. Either expiry is absent -> KEEP_DESTINATION.
  *   3. Either expiry is present but unreadable -> UNREADABLE_EXPIRY.
  *   4. The refreshed expiry sits more than MAX_PLAUSIBLE_EXPIRY_MS ahead of
@@ -122,8 +129,8 @@ export function decideClaudeAuthMerge(
   if (
     !source ||
     !destination ||
-    !isRefreshableClaudeDocument(refreshed) ||
-    !isRefreshableClaudeDocument(stored) ||
+    !hasBothTokens(source) ||
+    !hasBothTokens(destination) ||
     !sameIdentity(source, destination)
   )
     return KEEP_DESTINATION;

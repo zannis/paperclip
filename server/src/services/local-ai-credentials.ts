@@ -22,7 +22,8 @@ export async function readVerifiedLocalAiCredential(provider: AiProvider, loginH
       // can refresh. Claude Code rotates the short-lived access token in place,
       // so keeping only the token discards the refresh token that carries the
       // connection past the token's expiry. A document without a refresh token
-      // (a `claude setup-token` credential) keeps the bare-token shape.
+      // (a `claude setup-token` credential) or without a readable expiry keeps
+      // the bare-token shape.
       let document: string | null = null;
       if (loginHome) {
         for (const name of [".credentials.json", "credentials.json"]) {
@@ -43,7 +44,7 @@ export async function readVerifiedLocalAiCredential(provider: AiProvider, loginH
       if (!token) throw new Error("Missing login");
       await fetchClaudeQuota(token);
       // A keychain or host login yields no document. Those, and a document
-      // with no refresh token, keep the legacy bare-token shape and the
+      // the CLI cannot refresh, keep the legacy bare-token shape and the
       // env-var delivery that goes with it.
       return document ?? token;
     }
