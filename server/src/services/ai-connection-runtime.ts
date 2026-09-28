@@ -15,6 +15,10 @@ import { decideCodexAuthMerge } from "@paperclipai/adapter-codex-local/server";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 import { decideGrokAuthMerge } from "@paperclipai/adapter-grok-local/server";
+import {
+  decideClaudeAuthMerge,
+  isRefreshableClaudeDocument,
+} from "./claude-credential-document.js";
 
 export function isAiConnectionBusy(error: unknown): error is HttpError {
   return error instanceof HttpError && error.status === 422 &&
@@ -192,44 +196,6 @@ export function managedAiSessionFingerprintConfig(
   return { ...config, env };
 }
 
-/** The Claude credential document that Claude Code writes and rotates in place. */
-function claudeOauthBlock(
-  value: string,
-): { accessToken?: unknown; expiresAt?: unknown } | null {
-  try {
-    const parsed = JSON.parse(value) as { claudeAiOauth?: unknown };
-    const oauth = parsed?.claudeAiOauth;
-    return oauth && typeof oauth === "object" && !Array.isArray(oauth)
-      ? (oauth as { accessToken?: unknown; expiresAt?: unknown })
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function isClaudeCredentialDocument(value: string): boolean {
-  const oauth = claudeOauthBlock(value);
-  return typeof oauth?.accessToken === "string" && oauth.accessToken.length > 0;
-}
-
-/**
- * The Claude counterpart of the Codex and Grok write-back predicates. It keeps
- * whichever copy expires later, so a concurrent run that refreshed afterwards
- * wins and a stale write-back never replaces a newer credential. It returns the
- * decision codes the other predicates use: only 10 writes back.
- */
-export function decideClaudeAuthMerge(refreshed: string, current: string): number {
-  const next = claudeOauthBlock(refreshed);
-  if (typeof next?.accessToken !== "string" || !next.accessToken.length) return 20;
-  const nextExpiry = typeof next.expiresAt === "number" ? next.expiresAt : null;
-  if (nextExpiry === null) return 20;
-  const previous = claudeOauthBlock(current);
-  const previousExpiry =
-    typeof previous?.expiresAt === "number" ? previous.expiresAt : null;
-  if (previousExpiry !== null && nextExpiry <= previousExpiry) return 22;
-  return 10;
-}
-
 export async function prepareManagedAiRuntime(
   db: Db,
   input: {
@@ -289,13 +255,13 @@ export async function prepareManagedAiRuntime(
       );
     const value = await service.credential(selection);
     // Anthropic joins the file topology only when the stored credential is a
-    // whole Claude credential document. Connections saved before this change
-    // hold a bare token, which has no file for the CLI to rotate; they keep the
-    // env-var delivery so an upgrade never writes a non-document into
-    // `.credentials.json`.
+    // Claude credential document the CLI can refresh. Connections saved before
+    // this change hold a bare token, and a `claude setup-token` credential has
+    // no refresh token; both keep the env-var delivery, so an upgrade never
+    // writes a non-refreshable value into `.credentials.json`.
     const subscriptionFile =
       subscriptionSelected &&
-      (input.binding.provider !== "anthropic" || isClaudeCredentialDocument(value));
+      (input.binding.provider !== "anthropic" || isRefreshableClaudeDocument(value));
     home = await mkdtemp(
       path.join(
         os.tmpdir(),

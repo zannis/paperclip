@@ -41,14 +41,21 @@ describe("explicit local subscription import", () => {
     expect(mocks.claude).not.toHaveBeenCalled();
   });
   it("prefers the credentials file over the Keychain for an isolated login", async () => {
-    const document = JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } });
+    const document = JSON.stringify({ claudeAiOauth: { accessToken: "file-token", refreshToken: "file-refresh" } });
     mocks.credentialFile.mockResolvedValue(document);
     mocks.claudeIsolatedKeychain.mockResolvedValue("keychain-token");
     await expect(readVerifiedLocalAiCredential("anthropic", "/isolated/claude")).resolves.toBe(document);
     expect(mocks.claudeIsolatedKeychain).not.toHaveBeenCalled();
   });
+  it("keeps the bare token for a document with no refresh token", async () => {
+    // A `claude setup-token` credential is long-lived and has nothing for the
+    // CLI to refresh. It stays on CLAUDE_CODE_OAUTH_TOKEN, where it works.
+    mocks.credentialFile.mockResolvedValue(JSON.stringify({ claudeAiOauth: { accessToken: "setup-token" } }));
+    await expect(readVerifiedLocalAiCredential("anthropic", "/isolated/claude")).resolves.toBe("setup-token");
+    expect(mocks.claudeQuota).toHaveBeenCalledWith("setup-token");
+  });
   it("tries the alternate Claude filename after malformed JSON", async () => {
-    const document = JSON.stringify({ claudeAiOauth: { accessToken: "alternate-token" } });
+    const document = JSON.stringify({ claudeAiOauth: { accessToken: "alternate-token", refreshToken: "alternate-refresh" } });
     mocks.credentialFile.mockResolvedValueOnce("malformed").mockResolvedValueOnce(document);
     await expect(readVerifiedLocalAiCredential("anthropic", "/isolated/claude")).resolves.toBe(document);
     expect(mocks.credentialFile).toHaveBeenLastCalledWith("/isolated/claude/credentials.json");
