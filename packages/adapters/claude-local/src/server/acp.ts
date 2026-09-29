@@ -480,7 +480,7 @@ async function commandIsResolvable(
           // command must remain an actionable setup failure.
           ...(target.transport === "sandbox" && trimmed === "claude-agent-acp" &&
             !firstNonEmptyString(input?.config.agentCommand, input?.config.acpAgentCommand)
-            ? { installCommand: "npm install -g @agentclientprotocol/claude-agent-acp@0.73.0", timeoutSec: 120 }
+            ? { installCommand: "npm install -g @agentclientprotocol/claude-agent-acp@0.81.2", timeoutSec: 120 }
             : {}),
         },
       );

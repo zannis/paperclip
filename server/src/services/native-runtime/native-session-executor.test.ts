@@ -1523,7 +1523,7 @@ describe("remote provider pack manifest", () => {
         codex: "0.160.0",
         opencode: "1.18.34",
         acpx: "0.13.1",
-        claudeAcp: "0.73.0",
+        claudeAcp: "0.81.2",
         codexAcp: "1.6.2",
         grok: "1.0.13",
       },
@@ -1534,7 +1534,7 @@ describe("remote provider pack manifest", () => {
       acpxProfileDigests: {
         grok: "sha256:f0b698395a3704ed2ffaf84ea19bdb20c36c8a0a70b7c629c7b6ffe144e59e55",
         claude:
-          "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",
+          "sha256:ecfa6ff948a4241090934979179a5ba035bb0a7c3ef543752f4a304d44a267fb",
         codex:
           "sha256:443491f4e814501a5dc47347e4510e84faeec9c9382e2d4e53bfe69386d5aabc",
       },

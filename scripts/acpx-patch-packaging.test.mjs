@@ -69,7 +69,7 @@ function claudeFixture(t) {
     return location;
   };
   const bridge = writePackage(join(graph, "@agentclientprotocol/claude-agent-acp"), {
-    name: "@agentclientprotocol/claude-agent-acp", version: "0.73.0", dependencies: { "@anthropic-ai/claude-agent-sdk": "0.3.286" },
+    name: "@agentclientprotocol/claude-agent-acp", version: "0.81.2", dependencies: { "@anthropic-ai/claude-agent-sdk": "0.3.286" },
   });
   writeFileSync(join(bridge, "index.js"), "export {};\n");
   const runtime = writePackage(join(graph, "@anthropic-ai/claude-agent-sdk"), {
@@ -81,7 +81,7 @@ function claudeFixture(t) {
   });
   writeFileSync(join(producer, "claude"), "producer native fixture, never executed");
   const profiles = [{ agent: "claude", ...profileData.profiles.claude }];
-  const publish = { name: "paperclip-claude-pack-fixture", version: "1.0.0", dependencies: { "@agentclientprotocol/claude-agent-acp": "0.73.0" }, bundleDependencies: ["@agentclientprotocol/claude-agent-acp"] };
+  const publish = { name: "paperclip-claude-pack-fixture", version: "1.0.0", dependencies: { "@agentclientprotocol/claude-agent-acp": "0.81.2" }, bundleDependencies: ["@agentclientprotocol/claude-agent-acp"] };
   return { directory, graph, bridge, runtime, producer, profiles, publish, writePackage };
 }
 function codexFixture(t) {
@@ -125,7 +125,7 @@ const acpxRuntimePatch = await readFile(
   "utf8",
 );
 const claudeAcpPatch = await readFile(
-  new URL("../patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch", import.meta.url),
+  new URL("../patches/@agentclientprotocol__claude-agent-acp@0.81.2.patch", import.meta.url),
   "utf8",
 );
 
@@ -210,7 +210,7 @@ test("published Claude bridge pins its qualified SDK and provider dependency clo
     createBundledInstallManifest(published, serverPackage.bundleDependencies),
     serverPackage.bundleDependencies, rootPackage, profileData,
   );
-  assert.deepEqual(installManifest.overrides["@agentclientprotocol/claude-agent-acp@0.73.0"], {
+  assert.deepEqual(installManifest.overrides["@agentclientprotocol/claude-agent-acp@0.81.2"], {
     "@anthropic-ai/claude-agent-sdk": "0.3.286",
     "@agentclientprotocol/sdk": "1.4.0",
     zod: "4.4.3",
@@ -415,11 +415,11 @@ test("bundled esbuild cannot follow a platform payload or package namespace outs
 test("Paperclip Runner pins the qualified ACPX host callbacks", () => {
   assert.equal(rootPackage.pnpm.patchedDependencies["acpx@0.13.1"], "patches/acpx@0.13.1.patch");
   assert.equal(
-    rootPackage.pnpm.patchedDependencies["@agentclientprotocol/claude-agent-acp@0.73.0"],
-    "patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch",
+    rootPackage.pnpm.patchedDependencies["@agentclientprotocol/claude-agent-acp@0.81.2"],
+    "patches/@agentclientprotocol__claude-agent-acp@0.81.2.patch",
   );
   assert.equal(runnerPackage.dependencies.acpx, "0.13.1");
-  assert.equal(runnerPackage.dependencies["@agentclientprotocol/claude-agent-acp"], "0.73.0");
+  assert.equal(runnerPackage.dependencies["@agentclientprotocol/claude-agent-acp"], "0.81.2");
   assert.equal(runnerPackage.dependencies["@agentclientprotocol/codex-acp"], "1.6.2");
   for (const callback of [
     "spawnEnvironment", "spawnCwd", "spawnAgent", "isPlainStringEnvironment",

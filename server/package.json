@@ -47,7 +47,7 @@
     "postinstall": "node scripts/install-copilot-assets.mjs"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.73.0",
+    "@agentclientprotocol/claude-agent-acp": "0.81.2",
     "@agentclientprotocol/codex-acp": "1.6.2",
     "@ai-sdk/amazon-bedrock": "5.0.113",
     "@ai-sdk/anthropic": "4.0.78",

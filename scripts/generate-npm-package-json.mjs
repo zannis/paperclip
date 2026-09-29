@@ -17,6 +17,7 @@ import { createRequire } from "node:module";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundledCliNpmDependencies } from "./cli-bundled-npm-dependencies.mjs";
+import { npmOverridesFrom } from "./npm-overrides.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -116,6 +117,11 @@ const publishPkg = {
 
 if (Object.keys(sortedOptDeps).length > 0) {
   publishPkg.optionalDependencies = sortedOptDeps;
+}
+
+const overrides = npmOverridesFrom(readPkg(".").pnpm?.overrides);
+if (Object.keys(overrides).length > 0) {
+  publishPkg.overrides = overrides;
 }
 
 const output = JSON.stringify(publishPkg, null, 2) + "\n";
