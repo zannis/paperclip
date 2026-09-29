@@ -19,3 +19,20 @@ export function npmOverridesFrom(pnpmOverrides) {
   }
   return out;
 }
+
+/**
+ * npm refuses (EOVERRIDE) an override keyed on a package the manifest also
+ * depends on directly unless that dependency is pinned to the override's exact
+ * version, so a range there fails the managed install on the box.
+ */
+export function assertOverridesMatchDirectPins(overrides, dependencies) {
+  for (const key of Object.keys(overrides)) {
+    const at = key.lastIndexOf("@");
+    const [name, version] = at > 0 ? [key.slice(0, at), key.slice(at + 1)] : [key, null];
+    const spec = dependencies[name];
+    if (spec === undefined || version === null) continue;
+    if (spec !== version) {
+      throw new Error(`npm override ${key} needs the direct dependency ${name} pinned to ${version}, not ${spec}`);
+    }
+  }
+}
