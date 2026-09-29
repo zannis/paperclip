@@ -10,6 +10,6 @@ permissions:
 
 jobs:
   ci:
-    # Master requires CODEOWNERS review for .github/**, including this workflow.
-    # The AWS runner group permits pr-trusted.yml@refs/heads/master.
-    uses: paperclipai/paperclip/.github/workflows/pr-trusted.yml@master
+    # The fork runs its own checks: upstream's master copy never sees the patch
+    # queue's policy changes. Without AWS_CI_ENABLED it routes to GitHub runners.
+    uses: ./.github/workflows/pr-trusted.yml
