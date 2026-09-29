@@ -1,4 +1,5 @@
 import { publicChatTaskUrl } from "../chat-task-url.js";
+import type { createAssignedMcpTools } from "./assigned-mcp-tools.js";
 import { assertAssignableAgent } from "../agent-assignability.js";
 import { authorizationService } from "../authorization.js";
 import { handoffPlanContext } from "./handoff-plan-context.js";
@@ -78,7 +79,7 @@ import {
 } from "./chat-attachment-read.js";
 
 const IMPLEMENTED_OPERATIONS = new Set([
-  "search_api", "call_api",
+  "search_api", "call_api", "hire_agent",
   "get_task_context", "get_task_history", "search_tasks", "report_progress",
   "request_human_input",
   "create_skill", "create_task", "reassign_task", "set_dependencies", "create_project", "list_project_repositories", "list_projects", "register_deliverable",
@@ -104,6 +105,7 @@ type Binding = {
   storage?: StorageService;
   /** Server-owned suppression for baseline evals; true never overrides operator opt-in. */
   connectorAssignments?: ConnectorAssignment[];
+  assignedMcpTools?: Awaited<ReturnType<typeof createAssignedMcpTools>>;
   apiToolsEnabled?: boolean;
   workMode?: "standard" | "planning" | "ask";
   workspaceRoot?: string;
@@ -180,7 +182,7 @@ export class PaperclipRunnerToolAuthority {
             this.binding.companyId,
             this.binding.apiToolsEnabled,
           ) ||
-            !["search_api", "call_api"].includes(descriptor.operationId)) &&
+            !["search_api", "call_api", "hire_agent"].includes(descriptor.operationId)) &&
           descriptor.allowedModes.includes(workMode) &&
           (descriptor.operationId !== "register_deliverable" ||
             (Boolean(this.binding.workspaceRoot) &&
@@ -223,7 +225,7 @@ export class PaperclipRunnerToolAuthority {
     definitions.push(LIST_CHAT_ATTACHMENTS_TOOL_DEFINITION);
     definitions.push(REUSE_CHAT_ATTACHMENT_TOOL_DEFINITION);
     definitions.push(READ_CHAT_ATTACHMENT_TOOL_DEFINITION);
-    return [...RUNTIME_CONNECTION_TOOL_DEFINITIONS, ...(this.binding.connectorAssignments ?? []).flatMap((assignment) => assignment.tools), ...definitions];
+    return [...RUNTIME_CONNECTION_TOOL_DEFINITIONS, ...(this.binding.connectorAssignments ?? []).flatMap((assignment) => assignment.tools), ...(this.binding.assignedMcpTools?.definitions() ?? []), ...definitions];
   }
 
   async execute(call: {
@@ -237,11 +239,15 @@ export class PaperclipRunnerToolAuthority {
         throw forbidden("This review run may only inspect the assigned task and resolve its review.");
       }
     }
+    if (this.binding.assignedMcpTools?.has(call.tool)) {
+      const current = await this.#boundContext();
+      return this.binding.assignedMcpTools.execute(call, current.issue.workMode as "standard" | "planning" | "ask");
+    }
     if (isConnectorTool(call.tool)) {
       if (!(this.binding.connectorAssignments ?? []).some((assignment) => assignment.tools.some((tool) => tool.name === call.tool))) throw forbidden("Connector tool is not available to this run");
       const { run } = await this.#boundContext();
       const snapshot = record(run.contextSnapshot);
-      if (isPaperclipExternalChatContractTurn(snapshot.paperclipWake) || String(snapshot.source ?? "").startsWith("chat:") || snapshot.paperclipExternalChatQuestionResponse) throw forbidden("Restricted chat runs cannot use email actions");
+      if (call.tool.startsWith("agentmail_") && (isPaperclipExternalChatContractTurn(snapshot.paperclipWake) || String(snapshot.source ?? "").startsWith("chat:") || snapshot.paperclipExternalChatQuestionResponse)) throw forbidden("Restricted chat runs cannot use email actions");
       return executeConnectorTool(this.db, this.binding, call.tool, call.arguments);
     }
     if (RUNTIME_CONNECTION_TOOL_DEFINITIONS.some((tool) => tool.name === call.tool)) {
@@ -253,8 +259,12 @@ export class PaperclipRunnerToolAuthority {
         run_id: this.binding.runId, responsible_user_id: run.responsibleUserId,
       };
       const connections = connectionIntentService(this.db);
-      if (call.tool === "connections_search") return connections.search(claims, connectionsSearchInputSchema.parse(call.arguments).query);
-      const result = await connections.request(claims, connectionRequestInputSchema.parse(call.arguments).service);
+      if (call.tool === "connections_search") {
+        const input = connectionsSearchInputSchema.parse(call.arguments);
+        return connections.search(claims, input.query, { retryProviderChoice: input.retryProviderChoice });
+      }
+      const input = connectionRequestInputSchema.parse(call.arguments);
+      const result = await connections.request(claims, input.service, { selectionInteractionId: input.selectionInteractionId, targetService: input.targetService });
       if (result.state === "ready" && this.binding.pinnedMcpDigest && this.binding.enqueueWakeup) {
         const current = await resolveNativeRuntimeMcpSnapshot({ db: this.db, agent: { id: this.binding.agentId, companyId: this.binding.companyId }, runId: this.binding.runId });
         if (current.digest !== this.binding.pinnedMcpDigest) {
@@ -290,7 +300,7 @@ export class PaperclipRunnerToolAuthority {
         this.binding.companyId,
         this.binding.apiToolsEnabled,
       ) &&
-      ["search_api", "call_api"].includes(call.tool)
+      ["search_api", "call_api", "hire_agent"].includes(call.tool)
     ) {
       throw new Error("paperclip_runner_tool_not_advertised");
     }
@@ -367,6 +377,30 @@ export class PaperclipRunnerToolAuthority {
           conversation: Boolean(context.issue.conversationAgentId) });
       }
       case "search_api": return searchRunnerApi(call.arguments);
+      case "hire_agent": {
+        const body: Record<string, unknown> = {
+          name: requiredString(input.name),
+          adapterType: "paperclip_runner",
+          inheritRuntimeFrom: "caller",
+          reportsTo: this.binding.agentId,
+          sourceIssueId: this.binding.issueId,
+        };
+        if (input.role !== undefined) body.role = input.role;
+        if (input.title !== undefined) body.title = input.title;
+        if (input.capabilities !== undefined) body.capabilities = input.capabilities;
+        if (typeof input.instructions === "string" && input.instructions.trim()) {
+          body.instructionsBundle = {
+            entryFile: "AGENTS.md",
+            files: { "AGENTS.md": input.instructions },
+          };
+        }
+        const { operationId, ...response } = record(await this.#callApi(call.callId, {
+          operationId: "POST /api/companies/{companyId}/agent-hires",
+          pathParams: { companyId: this.binding.companyId },
+          body,
+        }));
+        return { ...response, apiOperationId: operationId };
+      }
       case "call_api": {
         // PRP reserves operationId/callId for semantic result identity. The
         // HTTP operation is metadata, including in previously saved receipts;

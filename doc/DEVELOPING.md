@@ -368,6 +368,14 @@ pnpm test:release-smoke
 
 These browser suites are intended for targeted local verification and CI, not the default agent/human test command.
 
+The default E2E configuration builds the UI into `server/ui-dist` before starting
+its throwaway instance and serves that build with
+`PAPERCLIP_UI_DEV_MIDDLEWARE=false`. This exercises the
+shipped assets, including service-worker takeover and reload, without traversing
+the development server's unbundled module graph on each navigation. Browser
+assertion deadlines and retries remain unchanged. Use `pnpm dev` separately when
+verifying Vite/HMR behavior.
+
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
 ### Task search evaluation
@@ -682,6 +690,8 @@ When an additional repository has a configured local checkout, Paperclip seeds t
 
 Sandbox staging, including Daytona, transfers each repository's Git history and working files. Restore merges files and commits back into each local task checkout independently. Durable sandbox recovery keeps the same repository snapshots. Normal ignore and workspace exclusion rules still apply. A clone failure stops task preparation with an error so the agent does not start with only part of the project.
 
+Staging preserves relative symlink targets in secondary repositories, including skill links such as `.claude/skills/demo -> ../../skills/demo`. It does not rewrite them to host temporary paths or copy their target contents in place of the link. Daytona still rejects outbound archives with absolute or escaping link targets before extraction.
+
 If a repository is detached or its source configuration changes, its previous task copy is retained under `.paperclip-runtime/detached-repositories/` and excluded from future sandbox transfers. Referenced projects continue to use the separate read-only multi-project workspace behavior.
 
 ## Config Freshness
@@ -988,6 +998,25 @@ Managed `paperclip-dev` worktree services enable `PAPERCLIP_UI_DEV_MIDDLEWARE=tr
 In Vite middleware mode, Paperclip gives HMR a dedicated HTTP server bound to the managed runtime's loopback host. The browser still derives the HMR hostname from the public HTTPS page, and exposed runtimes use secure WebSockets, so listener containment does not break remote hot reload.
 
 When a workspace service runs Paperclip for browser OAuth QA, configure its `expose.urlTemplate` with the canonical URL the browser can reach. Paperclip preserves explicit `PAPERCLIP_PUBLIC_URL` or `BETTER_AUTH_URL` settings; otherwise it uses a valid exposed HTTPS origin (or loopback HTTP) as the managed runtime fallback for Better Auth and `/api/tools/oauth/callback`. Internal service names such as `http://paperclip-dev:<port>` are rejected unless that hostname is genuinely the browser route. Use a unique origin per isolated worktree. See [Execution Workspaces And Runtime Services](../docs/guides/board-operator/execution-workspaces-and-runtime-services.md#browser-reachable-origins-for-oauth-qa) for configuration and verification.
+
+## Wake Context Delivery
+
+Built-in adapters deliver wake context through the run prompt, including structured
+execution-continuation data. They do not export `PAPERCLIP_WAKE_PAYLOAD_JSON`. A
+large JSON environment entry can prevent the agent process from starting with
+`E2BIG`, even when the same context fits in the prompt transport. Configured values
+for this retired variable are ignored. Scalar runtime variables such as
+`PAPERCLIP_TASK_ID` and `PAPERCLIP_WAKE_REASON` remain available.
+
+Custom instructions that read the retired variable must use the wake payload in
+the prompt instead. This transport change adds no history limits or truncation;
+existing comment windows and resume-delta rendering still apply. Gateway request
+bodies and Hermes prompt-template JSON variables remain supported.
+
+This removes the duplicate environment entry, not every possible `E2BIG` cause.
+Legacy CLI paths that put prompts in command-line arguments (Gemini, Grok, Kimi,
+Pi, and Hermes) still have argument-size limits. ACP turns, SDK requests, and
+CLI paths that use stdin avoid that separate limit for the wake prompt.
 
 ## Paperclip Runner Adapter Conversion
 
@@ -1575,3 +1604,12 @@ from stored configuration problems. Verify connection transport and endpoint
 fields before disabling a connection. Verify workspace ownership, active runs,
 Git state, and runtime-service readiness before closing a workspace. A missing
 URL or old workspace timestamp alone does not prove that a row is disposable.
+
+### Browser realtime connection recovery
+
+If a browser cannot construct a WebSocket, the live-update and run transcript
+clients use their disconnected retry paths. While the company event stream is
+disconnected, visible active queries refresh every 15 seconds. This fallback
+stops when the socket opens, the tab is hidden, or the provider unmounts. A
+reconnected socket also refreshes visible queries to recover missed events.
+Run log views retain their existing HTTP polling fallback.

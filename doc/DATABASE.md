@@ -159,6 +159,12 @@ PostgreSQL backends and checks rejection, pool recovery, and transaction isolati
 Remove the patch when an upstream release passes these tests. Installs of the
 unmodified `postgres` package outside this workspace do not include the patch.
 
+Trusted-header actor synchronization retries transient connection failures,
+including `CONNECT_TIMEOUT`, at most twice. This retry applies only to the
+idempotent actor synchronization operations, not arbitrary transactions. A
+persistent outage still fails the request after the bounded retries; each
+connection attempt remains subject to the configured database connect timeout.
+
 ## Switching between modes
 
 The database mode is controlled by `DATABASE_URL`:
@@ -286,6 +292,15 @@ successor can take the lease immediately only when coordinated handoff or PID
 and process-start evidence proves the prior controller is gone, or when the
 lease expires. Recovery generation changes do not increment the independent
 provider-attempt counter.
+
+## Chat communication snapshots
+
+Chat communication guidance uses two additive columns: endpoint
+`communication_instructions` defaults to empty, and conversation
+`communication_guidance` holds the immutable initial task snapshot. Existing
+conversations retain a null snapshot; there is no backfill that changes an
+ongoing conversation. New Slack tasks receive built-in guidance even when the
+endpoint has no additional instructions.
 
 ## Telegram private draft identities
 

@@ -328,10 +328,13 @@ jobs:
         run: node --test ./scripts/__tests__/e2e-shard.test.mjs
 
       - name: Test release verify workflow wiring
-        run: node --test ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/cloud-source-verification.test.mjs
+        run: node --test ./scripts/__tests__/release-verify-workflow.test.mjs ./scripts/cloud-source-verification.test.mjs ./scripts/standard-image-contract.test.mjs
 
       - name: Test standalone package build concurrency
         run: node --test ./scripts/__tests__/build-standalone-concurrency.test.mjs
+
+      - name: Test restore scripts
+        run: node --test ./scripts/restore-verify-logs.test.mjs ./scripts/restore-verify-secrets.test.mjs ./scripts/restore-swap-db.test.mjs ./scripts/restore-smoke.test.mjs
 
       - name: Validate release package manifest
         run: node ./scripts/release-package-map.mjs check
