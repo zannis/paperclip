@@ -97,7 +97,7 @@ const acpxRuntimePatch = await readFile(
   "utf8",
 );
 const claudeAcpPatch = await readFile(
-  new URL("../patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch", import.meta.url),
+  new URL("../patches/@agentclientprotocol__claude-agent-acp@0.81.2.patch", import.meta.url),
   "utf8",
 );
 
@@ -322,11 +322,11 @@ test("bundled esbuild cannot follow a platform payload or package namespace outs
 test("Paperclip Runner pins the qualified ACPX host callbacks", () => {
   assert.equal(rootPackage.pnpm.patchedDependencies["acpx@0.13.1"], "patches/acpx@0.13.1.patch");
   assert.equal(
-    rootPackage.pnpm.patchedDependencies["@agentclientprotocol/claude-agent-acp@0.73.0"],
-    "patches/@agentclientprotocol__claude-agent-acp@0.73.0.patch",
+    rootPackage.pnpm.patchedDependencies["@agentclientprotocol/claude-agent-acp@0.81.2"],
+    "patches/@agentclientprotocol__claude-agent-acp@0.81.2.patch",
   );
   assert.equal(runnerPackage.dependencies.acpx, "0.13.1");
-  assert.equal(runnerPackage.dependencies["@agentclientprotocol/claude-agent-acp"], "0.73.0");
+  assert.equal(runnerPackage.dependencies["@agentclientprotocol/claude-agent-acp"], "0.81.2");
   assert.equal(runnerPackage.dependencies["@agentclientprotocol/codex-acp"], "1.6.2");
   for (const callback of [
     "spawnEnvironment", "spawnCwd", "spawnAgent", "isPlainStringEnvironment",

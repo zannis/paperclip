@@ -60,7 +60,7 @@ describe("cold sandbox ACP setup", () => {
       kind: "remote", transport: "sandbox", providerKey: "daytona", remoteCwd: "/work", runner,
     } as never })).resolves.toEqual({ engine: "acp", explicit: false });
     expect(commands.filter(command => command.includes("npm install"))).toHaveLength(1);
-    expect(commands.some(command => command.includes("@agentclientprotocol/claude-agent-acp@0.73.0"))).toBe(true);
+    expect(commands.some(command => command.includes("@agentclientprotocol/claude-agent-acp@0.81.2"))).toBe(true);
   });
 
   it("does not install or substitute for an operator's unavailable custom ACP command", async () => {
