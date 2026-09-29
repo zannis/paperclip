@@ -168,6 +168,29 @@ describe("managed install commands", () => {
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
   });
 
+  it("writes the CLI package's overrides into the payload root before npm resolves it", async () => {
+    const sha = "e".repeat(40);
+    const overrides = { "@agentclientprotocol/codex-acp@1.6.2": { "@openai/codex": "0.156.0" } };
+    const base = createGitCheckoutRunCommand(sha);
+    let rootAtInstall: unknown;
+    const runCommand = vi.fn(async (file: string, args: string[], options?: Parameters<CommandRunner>[2]) => {
+      const result = await base(file, args, options);
+      if (file === "tar") {
+        const cliPackage = path.join(args[args.indexOf("-C") + 1], "cli", "package.json");
+        fs.writeFileSync(cliPackage, JSON.stringify({ version: "0.3.1", overrides }));
+      }
+      return result;
+    });
+    const withRoot = vi.fn(async (file: string, args: string[], options?: Parameters<CommandRunner>[2]) => {
+      if (file === "npm" && args[0] === "install") {
+        rootAtInstall = JSON.parse(fs.readFileSync(path.join(args[args.indexOf("--prefix") + 1], "package.json"), "utf8"));
+      }
+      return runCommand(file, args, options);
+    });
+    await installGitPayload("paperclipai/paperclip", sha, withRoot, resolveInstallStorePaths());
+    expect(rootAtInstall).toEqual({ private: true, overrides });
+  });
+
   it("builds git checkouts with NODE_ENV cleared so ambient production mode keeps devDependencies", async () => {
     process.env.NODE_ENV = "production";
     const sha = "d".repeat(40);
