@@ -266,7 +266,10 @@ jobs:
           fetch-depth: 0
 
       - name: Block manual lockfile edits
+        # The fork's patch queue has no lockfile refresh job (that runs on master
+        # only), so a PR into it must carry its own lockfile.
         if: >-
+          github.base_ref != 'patches/onlybots' &&
           github.head_ref != 'chore/refresh-lockfile' &&
           github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
