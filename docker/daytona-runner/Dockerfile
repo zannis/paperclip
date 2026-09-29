@@ -137,7 +137,7 @@ RUN /bin/sh -lc 'set -eu; \
     test "$(claude --version)" = "2.1.283 (Claude Code)"; \
     test "$(opencode --version)" = "1.18.32"; \
     test "$(acpx --version)" = "0.13.1"; \
-    test "$(claude-agent-acp --version)" = "0.73.0"; \
+    test "$(claude-agent-acp --version)" = "0.81.2"; \
     test "$(codex-acp --version)" = "@agentclientprotocol/codex-acp 1.6.2"'
 
 LABEL io.paperclip.runner.content-id="${PAPERCLIP_RUNNER_CONTENT_ID}" \
