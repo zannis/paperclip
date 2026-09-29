@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { npmOverridesFrom } from "./npm-overrides.mjs";
+import { assertOverridesMatchDirectPins, npmOverridesFrom } from "./npm-overrides.mjs";
 
 test("nested pnpm overrides become npm overrides under their parent", () => {
   assert.deepEqual(
@@ -29,4 +29,14 @@ test("the workspace's provider runtime pins reach the published package", () => 
     "0.3.283",
   );
   assert.equal(overrides["@agentclientprotocol/codex-acp@1.6.2"]?.["@openai/codex"], "0.156.0");
+});
+
+test("an override on a direct dependency needs that dependency pinned to its exact version", () => {
+  const overrides = { "@agentclientprotocol/codex-acp@1.6.2": { "@openai/codex": "0.156.0" } };
+  assert.doesNotThrow(() => assertOverridesMatchDirectPins(overrides, { "@agentclientprotocol/codex-acp": "1.6.2" }));
+  assert.doesNotThrow(() => assertOverridesMatchDirectPins(overrides, {}));
+  assert.throws(
+    () => assertOverridesMatchDirectPins(overrides, { "@agentclientprotocol/codex-acp": "^1.6.2" }),
+    /needs the direct dependency @agentclientprotocol\/codex-acp pinned to 1\.6\.2, not \^1\.6\.2/,
+  );
 });
