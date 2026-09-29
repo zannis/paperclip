@@ -1,0 +1,59 @@
+scripts/npm-overrides.test.mjs
+  s_49f62545611f8e::t_41eab1b215f4de 1-32
+scripts/npm-overrides.mjs
+  s_49f62545611f8e::t_990d7127263e73 1-21
+doc/ONLYBOTS-PATCHES.md
+  s_49f62545611f8e::t_86402d548e93e7 56
+docker/daytona-runner/Dockerfile
+  s_49f62545611f8e::t_84b526afe542e1 140
+package.json
+  s_49f62545611f8e::t_ca622e15c9661a 62,108,120
+packages/adapters/claude-local/package.json
+  s_49f62545611f8e::t_36e7d9bc397cb0 56
+packages/paperclip-runner/package.json
+  s_49f62545611f8e::t_2173813f5a5bf0 166
+packages/paperclip-runner/runner/crates/runner-core/src/acpx_provider_backend.rs
+  s_49f62545611f8e::t_6b4344ece6880e 152,155,1853,1856
+packages/paperclip-runner/scripts/build-provider-pack.mjs
+  s_49f62545611f8e::t_693b0efd6dbbc0 296,311
+packages/paperclip-runner/src/backends/native-backend-factory.test.ts
+  s_49f62545611f8e::t_96b8c0ffe74196 96,110
+packages/paperclip-runner/src/drivers/acpx/installation-integrity.test.ts
+  s_49f62545611f8e::t_28abcb2823dd00 443,453,471,475-477,542,546-548
+packages/paperclip-runner/src/drivers/acpx/installation-integrity.ts
+  s_49f62545611f8e::t_b4312cc0419919 90-91,96,98,101,105-106
+packages/paperclip-runner/src/drivers/acpx/qualified-profiles.ts
+  s_49f62545611f8e::t_119f93de8e87ee 57,61
+packages/paperclip-runner/test/acpx-codex-package-contract.test.mjs
+  s_49f62545611f8e::t_a56b739b34917e 31,63,73,120,122,137
+patches/@agentclientprotocol__claude-agent-acp@0.81.2.patch
+  s_49f62545611f8e::t_ae7bdf2116126b 2,5,25,28-31,39,48-49
+pnpm-lock.yaml
+  s_49f62545611f8e::t_e549dfd348c05d 9,18-20,176-177,180,501-502,1272-1273,1291-1295,9000-9002,9028,9030-9032,9054-9057,9087,9089-9091,9102,9107,11065-11086,17258-17261,17268-17269
+pnpm-workspace.yaml
+  s_49f62545611f8e::t_26376618347255 23,36
+scripts/acpx-patch-packaging.test.mjs
+  s_49f62545611f8e::t_e6b7a9b536ebe7 48,130-131,134
+scripts/generate-npm-package-json.mjs
+  s_49f62545611f8e::t_7ed2f2fb42a627 20,122-126
+server/src/services/native-runtime/native-session-executor.test.ts
+  s_49f62545611f8e::t_8b10fe27de915a 1055,1064
+server/src/services/native-runtime/native-session-executor.ts
+  s_49f62545611f8e::t_b03dd02b72d825 9166,9171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "558ce845709df5647f9254e31cdd3e306b2957b9",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
