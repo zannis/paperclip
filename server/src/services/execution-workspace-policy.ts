@@ -653,3 +653,139 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
 
   return nextConfig;
 }
+
+/** The issue columns the `enableIsolatedWorkspaces` gate withholds. */
+export const GATED_EXECUTION_WORKSPACE_FIELDS = [
+  "executionWorkspaceId",
+  "executionWorkspacePreference",
+  "executionWorkspaceSettings",
+] as const;
+
+export type GatedExecutionWorkspaceField =
+  (typeof GATED_EXECUTION_WORKSPACE_FIELDS)[number];
+
+/**
+ * Normalizes a requested or stored value to the form the column would hold.
+ *
+ * `executionWorkspaceSettings` goes through the same parse `issueService.update`
+ * applies before writing, so callers compare against what would actually land
+ * rather than against raw request text. The parse keeps only the keys it
+ * recognises, and it returns `{}` — not `null` — for a blob whose every key is
+ * dropped. `{ environmentId }` is exactly that blob, since the service calls the
+ * parse without `includeEnvironmentId`, so the empty result is collapsed to
+ * `null` here; otherwise it could never match a stored `null`, and issue
+ * environment selection — a different feature behind a different flag — would be
+ * read as an isolated-workspaces violation.
+ */
+export function normalizeGatedExecutionWorkspaceField(
+  field: GatedExecutionWorkspaceField,
+  value: unknown,
+): unknown {
+  if (field !== "executionWorkspaceSettings") return value ?? null;
+  const parsed = parseIssueExecutionWorkspaceSettings(value);
+  return parsed && Object.keys(parsed).length > 0 ? parsed : null;
+}
+
+/**
+ * Whether a normalized value names exactly the state the gate produces: no
+ * execution workspace of the task's own, running on the shared checkout.
+ *
+ * This is the single predicate that decides what the gate can honour, and both
+ * sides of the request read it. `issueService.update` persists a baseline value
+ * and drops the rest; the PATCH route refuses exactly the rest. Sharing it is
+ * what keeps "accepted" and "written" from drifting apart — the two used to be
+ * decided independently, and a value the route let through was silently deleted
+ * one layer down.
+ *
+ * A baseline value is safe to persist while the feature is off because it
+ * *removes* execution-workspace configuration rather than introducing any: it
+ * is the posture a gated instance runs in regardless. Clearing therefore works
+ * for real, which the project picker depends on — it posts all three keys on
+ * every project change
+ * (`ui/src/components/issue-properties/IssueProperties.tsx`), including
+ * `executionWorkspaceId: null` to drop a binding the previous project's runtime
+ * may have written.
+ */
+export function isGatedExecutionWorkspaceBaseline(
+  field: GatedExecutionWorkspaceField,
+  normalized: unknown,
+): boolean {
+  if (normalized === null) return true;
+  if (field === "executionWorkspacePreference") return normalized === "shared_workspace";
+  if (field === "executionWorkspaceSettings") {
+    const settings = normalized as Record<string, unknown>;
+    return settings.mode === "shared_workspace" && Object.keys(settings).length === 1;
+  }
+  // `executionWorkspaceId` admits only `null`, never a real id: pointing a task
+  // at a workspace is the write the gate exists to withhold.
+  return false;
+}
+
+/**
+ * Names the gated fields present in a patch that ask for more than the gate can
+ * give — a real workspace id, or an isolated/worktree posture.
+ *
+ * The complement is honoured: `undefined` (absent) and baseline values.
+ */
+export function unhonourableGatedExecutionWorkspaceFields(
+  patch: Record<string, unknown>,
+): GatedExecutionWorkspaceField[] {
+  return GATED_EXECUTION_WORKSPACE_FIELDS.filter(
+    (field) =>
+      Object.prototype.hasOwnProperty.call(patch, field) &&
+      patch[field] !== undefined &&
+      !isGatedExecutionWorkspaceBaseline(
+        field,
+        normalizeGatedExecutionWorkspaceField(field, patch[field]),
+      ),
+  );
+}
+
+/**
+ * Names the gated fields a patch cannot carry into the row while the gate is
+ * off, so `issueService.update` can drop exactly those.
+ *
+ * This is deliberately *wider* than `unhonourableGatedExecutionWorkspaceFields`,
+ * by exactly one field: a baseline `executionWorkspaceSettings` is accepted by
+ * the route and still not written. Persisting it destroys configuration the
+ * caller never named, in two proven ways:
+ *
+ * - **It overwrites the column.** `update()` stores
+ *   `parseIssueExecutionWorkspaceSettings(...)`, which drops the keys it does not
+ *   recognise. `{ environmentId }` — issue environment selection, a different
+ *   feature behind a different flag — parses to `{}`, so writing it replaces a
+ *   stored blob and takes `networkEgress` with it. Normalizing to nothing means
+ *   "carries no gated content", not "clear the column"; only the second is a
+ *   write, and treating them alike loses data.
+ * - **It reaches the bound workspace's own config.** On a row the runtime bound
+ *   (`executionWorkspaceId` + `reuse_existing`, the shape of any task that has
+ *   run once), a settings write is propagated to the workspace row, and the
+ *   patch builder emits an explicit `null` for every config key it knows — so a
+ *   content-free settings value erases that workspace's `provisionCommand`,
+ *   `teardownCommand`, `environmentId` and `workspaceRuntime`.
+ *
+ * `executionWorkspaceId` and `executionWorkspacePreference` carry no such
+ * payload: a baseline value there is a scalar that removes configuration rather
+ * than a blob written over one, and neither triggers the propagation. The id in
+ * particular *must* persist — clearing a stale binding is what lets a
+ * runtime-bound task change project at all.
+ *
+ * The residual is therefore that a settings clear or downgrade is still dropped
+ * rather than persisted on a gated instance. That is unchanged from before this
+ * fix, and it is the conservative side of the trade: the alternative is a write
+ * that silently deletes a workspace's provisioning commands.
+ */
+export function unpersistableGatedExecutionWorkspaceFields(
+  patch: Record<string, unknown>,
+): GatedExecutionWorkspaceField[] {
+  return GATED_EXECUTION_WORKSPACE_FIELDS.filter(
+    (field) =>
+      Object.prototype.hasOwnProperty.call(patch, field) &&
+      patch[field] !== undefined &&
+      (field === "executionWorkspaceSettings" ||
+        !isGatedExecutionWorkspaceBaseline(
+          field,
+          normalizeGatedExecutionWorkspaceField(field, patch[field]),
+        )),
+  );
+}
