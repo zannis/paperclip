@@ -39,7 +39,7 @@ import { admitExplicitNativeContinuation, admitExplicitContinuationRetry, undeli
 import { canRetryStoppedRun, isCancelledNativeStartup } from "./cancelled-native-startup.js";
 import { connectionIntentService } from "./connection-intents.js";
 import { managedAiSessionFingerprintConfig, prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings, isAiConnectionBusy, AI_AUTH_ENV_KEYS } from "./ai-connection-runtime.js";
-import { isManagedAiGateUnreachableError } from "./managed-ai-gate-settings.js";
+import { assertManagedAiGateReachesRemoteTarget, isManagedAiGateUnreachableError } from "./managed-ai-gate-settings.js";
 import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema, type AiConnectionRouterSelection } from "@paperclipai/shared";
 import { aiConnectionRouterService, AiConnectionPoolExhausted, applyAiConnectionRouterTaskSettings } from "./ai-connection-router.js";
 import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible } from "./ai-connection-session.js";
@@ -22866,6 +22866,17 @@ export function heartbeatService(
       if (managedAiRuntime && aiBinding) {
         try { await assertManagedAiProjectAuth({ ...resolvedConfig, cwd: executionWorkspace.cwd }, aiBinding.provider, executionTarget); }
         catch { throw new ConfigurationIncompleteFailure("Project authentication conflicts with this agent’s managed AI connection", { configurationIncomplete: { reason: "ai_connection_incompatible", actionUrl: `/agents/${agent.id}/runtime` } }); }
+        // The gate seeded into the private config dir was checked against this
+        // server, because the execution target is only known here. A remote
+        // target stages that config dir into its sandbox but nothing else from
+        // the host, so re-assert the carried hooks now. Outside the catch
+        // above on purpose: an unreachable gate is not a project-auth conflict,
+        // and it must fail with its own message.
+        if (executionTarget?.kind === "remote" && managedAiRuntime.gate)
+          assertManagedAiGateReachesRemoteTarget({
+            hookCommands: managedAiRuntime.gate.hookCommands,
+            environmentName: selectedEnvironmentForConfig?.name ?? null,
+          });
       }
       const remoteExecution = realizationResult.remoteExecution;
       if (
