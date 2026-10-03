@@ -1,0 +1,34 @@
+server/src/__tests__/issue-idempotency-registry-routes.test.ts
+  s_49f62545611f8e::t_4c38432e12bd1c 123-155
+  s_f800b88c84cab0::t_c60e6e5a9fe81e 123-155
+server/src/routes/issues.ts
+  s_49f62545611f8e::t_ed1e6316baf71f 12718-12719,12723-12731,12735-12736
+  s_49f62545611f8e::t_6288ba3830b942 12718-12719,12723-12731,12735-12736
+server/src/services/issues.ts
+  s_49f62545611f8e::t_d088650f6ace9e 7958-7969
+  s_49f62545611f8e::t_f4b43bd970efe1 7958-7969
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "a6520617349beb102a892a4e2ac99bfa195b6f45",
+  "prompts": {},
+  "sessions": {
+    "s_49f62545611f8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "38c825e3-28ab-4d8a-98da-4f8134d4e0c6",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_f800b88c84cab0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e35505c1-4245-4db1-bbf3-8ecd15609d7e",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
