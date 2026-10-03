@@ -32,7 +32,7 @@ Local recovery references:
 | RTK Docker integration | Deployed baseline; upstream PR #12349 closed without merge |
 | Bundled git-install packaging | Deployed preparation of server/UI, catalogs and workspace dependencies |
 | Claude SDK plugin loading | Deployed ACPX patches and their lockfile hashes |
-| Codex MCP HTTP headers | Deployed baseline; upstream PR #12287 remains open |
+| Codex MCP HTTP headers | Deployed baseline. Upstream now writes `http_headers` itself, so only the rtk half remains: `AGENTS.md` and `RTK.md` are copied into managed Codex homes and kept out of the sandbox sync allowlist |
 | Runtime API probe and exit diagnostics | Deployed baseline; upstream PR #12886 remains open |
 | Zombie-aware liveness | Deployed supervisor/restart changes plus later recovery/watchdog corrections |
 | Infrastructure termination recovery | Deployed classification/backoff; upstream PR #12030 remains open |
@@ -47,11 +47,11 @@ Local recovery references:
 | Remote MCP header policy | Fork PR #5 merged into deployment, plus reconnect deduplication |
 | TypeSafe connection | Fork PR #7 replayed onto the queue (19 topic commits); upstream PR paperclipai/paperclip#13713 open |
 | Transient upstream turn failures | Ported from onlybots `bin/patch-paperclip-529-recovery.sh` as source: acpx turn failures matching the 529/429/503 shape classify as `acpx_transient_upstream`, join the transient continuation set with a budget of 6, and read as the `transient_upstream` family. Not upstream |
-| Lockfile sync | Upstream `4b8ec588f` has bumped the codex and claude-agent-sdk overrides and the codex-acp patch without refreshing `pnpm-lock.yaml`. The git installer runs a frozen install, so this commit syncs it. Retire it when upstream's refreshed lockfile arrives |
-| Lane task primitives | Conditional issue PATCH (`expected` preconditions on revision, status, assignee and description hash; atomic status and comment; no self-wake on a conditional park) and a durable idempotency key registry (retain, void, delete tombstones) with board lookup and void routes. Migrations 0284–0285. For flow's lane-task reuse. Fork-only, not proposed upstream |
-| Grouped lane children | Create-only, board-only `groupedChild` issue flag (migration 0286). A grouped child's completion never wakes its parent (`issue_children_completed`, including native completions), it never relays a stop comment, it is not counted as the parent's open child (including by recovery), and parent subtree holds (cancel, pause, restore) skip it and its descendants. For flow's lane tasks. Fork-only, not proposed upstream |
-| Fork image publishing | `docker.yml` also triggers on pushes to `patches/onlybots`; only `zannis/paperclip` builds that ref, publishing the multi-arch (amd64, arm64) production image as `ghcr.io/zannis/paperclip:sha-<short>` with upstream's OCI and schema labels. The cloud image, full-SHA tag and standard-image attestation stay upstream-master-only and are skipped. Fork-only, not proposed upstream |
-| Anthropic SDK refresh | `@anthropic-ai/sdk` 0.121.0 → 0.128.0 (claude-local) and the claude-agent-acp `@anthropic-ai/claude-agent-sdk` override 0.3.280 → 0.3.283 (Claude Code 2.1.283), with the runner integrity pins, executable digests and Daytona image check moved together. Retire it when upstream bumps past these versions |
+| Lockfile sync | Retired October 3, 2026: upstream `ffe5e9e2a` ships a lockfile in sync with its overrides |
+| Lane task primitives | Conditional issue PATCH (`expected` preconditions on revision, status, assignee and description hash; atomic status and comment; no self-wake on a conditional park) and a durable idempotency key registry (retain, void, delete tombstones) with board lookup and void routes. Migrations 0295–0296 (renumbered from 0284–0285). For flow's lane-task reuse. Fork-only, not proposed upstream |
+| Grouped lane children | Create-only, board-only `groupedChild` issue flag (migration 0297, renumbered from 0286). A grouped child's completion never wakes its parent (`issue_children_completed`, including native completions), it never relays a stop comment, it is not counted as the parent's open child (including by recovery), and parent subtree holds (cancel, pause, restore) skip it and its descendants. For flow's lane tasks. Fork-only, not proposed upstream |
+| Fork image publishing | `docker.yml` also triggers on pushes to `patches/onlybots`; only `zannis/paperclip` builds that ref, publishing the multi-arch (amd64, arm64) production image as `ghcr.io/zannis/paperclip:sha-<short>` with upstream's OCI and schema labels. The full-SHA tag and standard-image attestation stay upstream-master-only; upstream has retired the cloud image build. Fork-only, not proposed upstream |
+| Anthropic SDK refresh | The claude-agent-acp `@anthropic-ai/claude-agent-sdk` override 0.3.280 → 0.3.283 (Claude Code 2.1.283), with the runner integrity pins, executable digests and Daytona image check moved together. The `@anthropic-ai/sdk` half retired once upstream moved claude-local to 0.129.0. Retire the rest when upstream bumps past 0.3.283 |
 | Lockfile in queue PRs | `pr-trusted.yml`'s "Block manual lockfile edits" skips PRs into `patches/onlybots`: upstream's lockfile refresh runs on `master` only, so a queue PR that changes dependencies carries its own `pnpm-lock.yaml` instead of a direct sync commit after merge. `pr.yml` calls the fork's own `pr-trusted.yml`, not upstream's `master` copy, so this and every other queue change to the checks takes effect. |
 | Claude ACP pin and npm overrides | `@agentclientprotocol/claude-agent-acp` 0.73.0 → 0.81.2 (its patch ported), keeping the `claude-agent-sdk` override at 0.3.283, with the runner's qualified command digest and dependency bindings. The published CLI package now carries every nested pnpm override as an npm `overrides` entry: the managed install is an npm install, so without them it resolved claude-agent-acp's own SDK declaration (0.3.257 under 0.73.0) and codex-acp's own Codex range. npm refuses an override keyed on a direct dependency unless it is pinned to the override's exact version, so codex-local pins codex-acp `1.6.2` and the generator refuses a mismatch. The git installer writes those overrides into the staged payload's own `package.json` before `npm install`, since npm honours overrides only from the root project. |
 
@@ -152,6 +152,58 @@ On the rebased tip, with Node 26 and pnpm 9.15.4: the frozen install, `pnpm -r
 typecheck` and `pnpm build` (including the Rust runner) pass. The 79 test files
 that the queue touches pass: 77 files and 2670 tests, with 2 files and 12 tests
 skipped. The serialized server suite was not run.
+
+## Upstream update (October 3, 2026)
+
+The queue moved from upstream `4b8ec588f` to `ffe5e9e2a` (210 upstream
+commits). The old queue tip `faf1c8216` is anchored at
+`refs/onlybots-backups/sync/onlybots-20261003`. 42 of 72 patches replayed
+unchanged; one was retired. These resolutions need review:
+
+- **Migration renumbering.** Upstream added 0284–0294. The lane task primitives
+  and grouped children migrations moved from 0284–0286 to 0295–0297. Their SQL
+  is byte-identical: the migrator identifies applied migrations by content hash,
+  so a database that already ran the old numbers treats them as applied, and
+  upstream's new migrations still run. Each snapshot is upstream's latest
+  snapshot plus the original patch's snapshot delta. Upstream's new migrations
+  touch none of these columns.
+- **Lockfile sync** is retired: upstream's lockfile now matches its overrides.
+- **Codex MCP HTTP headers.** Upstream writes `http_headers` and asserts it. The
+  patch keeps only the rtk `AGENTS.md`/`RTK.md` seeding and its tests, and its
+  commit is renamed accordingly.
+- **Anthropic SDK refresh.** Upstream moved `@anthropic-ai/sdk` to 0.129.0, past
+  the patch's 0.128.0; that half is dropped. The `claude-agent-sdk` 0.3.283
+  override, pins and digests remain, and the commit is renamed.
+- **Claude SDK plugin loading.** Upstream changed `patches/acpx@0.13.1.patch`
+  again. It was rebuilt from the pristine package: upstream's hunks, then the
+  plugin hunks. Both acpx patches apply to their pristine packages; only the
+  two acpx hashes changed in the lockfile.
+- **Project inference.** Upstream resolves the create assignment project with
+  `resolveCreateAssignmentProjectId`. The inferred project is passed into it
+  (inference runs only when no project, parent or workspace is given).
+- **Reconnect credential dedupe.** Upstream moved the reconnect loop into a
+  transaction and matches refs by config path only, which still duplicates the
+  Authorization header. The header-key match is reapplied there.
+- **Idempotency key registry.** Upstream's new `assertCanReuseIssue` guard runs
+  on the registry path before a retain update.
+- **Conditional updates.** The atomic conditional comment passes upstream's
+  `mirrorToSlack` for board users, like upstream's other comment paths.
+- **Grouped children.** Upstream removed delegation mention forwarding, so the
+  grouped-child guard there and its test scenarios are gone.
+- **Fork image publishing.** Upstream retired the cloud image job; its skip
+  condition is gone.
+- **TypeSafe connection.** Upstream's catalog generator requires a permission
+  review for every tool method; `tool-method-permission-reviews.json` gains a
+  TypeSafe entry (no key-permission helper text). Store counts move to 60.
+
+On the rebased tip, with Node 26.5.0 and pnpm 9.15.4: `git diff --check`, the
+frozen install, `pnpm build` (including the Rust runner) and `pnpm -r
+typecheck` pass. `pnpm test:run`: 15267 passed, 61 failed, 101 skipped. All 61
+failures are in `workspace-runtime` and `execution-workspaces-service` and are
+local to the build machine: its global git config signs commits without a
+reachable gpg, and its global ignore file ignores `.worktrees/`. With both
+neutralised, those files pass except two that compare `/private/var` with
+`/var` (macOS). The serialized server suite was not run.
 
 ## Routine upstream update
 
