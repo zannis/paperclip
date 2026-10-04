@@ -5,6 +5,7 @@ import {
   MAX_PLAUSIBLE_EXPIRY_MS,
   UNREADABLE_EXPIRY,
   USE_SOURCE,
+  claudeRefreshTokenFingerprint,
   decideClaudeAuthMerge,
   isRefreshableClaudeDocument,
 } from "../services/claude-credential-document.js";
@@ -120,5 +121,20 @@ describe("decideClaudeAuthMerge", () => {
       expect(decide(document({ expiresAt: NOW + MAX_PLAUSIBLE_EXPIRY_MS + 1 }), document())).toBe(IMPLAUSIBLE_EXPIRY);
       expect(decide(document({ expiresAt: NOW + 10 * 365 * 24 * HOUR }), document())).toBe(IMPLAUSIBLE_EXPIRY);
     });
+  });
+});
+
+describe("claudeRefreshTokenFingerprint", () => {
+  it("is a short stable digest that never contains the token", () => {
+    const fingerprint = claudeRefreshTokenFingerprint(document({ refreshToken: "refresh-secret" }));
+    expect(fingerprint).toMatch(/^[0-9a-f]{12}$/);
+    expect(fingerprint).toBe(claudeRefreshTokenFingerprint(document({ refreshToken: "refresh-secret", expiresAt: NOW + HOUR })));
+    expect(fingerprint).not.toBe(claudeRefreshTokenFingerprint(document({ refreshToken: "rotated-secret" })));
+    expect(fingerprint).not.toContain("refresh");
+  });
+
+  it("returns null for a bare token or a document without a refresh token", () => {
+    expect(claudeRefreshTokenFingerprint("sk-ant-oat01-bare")).toBeNull();
+    expect(claudeRefreshTokenFingerprint(document({ refreshToken: "" }))).toBeNull();
   });
 });
