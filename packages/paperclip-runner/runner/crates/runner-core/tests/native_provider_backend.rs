@@ -252,7 +252,7 @@ fn pending_acpx_runtime_request(
     let mut payload = prepare_payload_with_mode(directory, "codex", mode);
     if mode.starts_with("permissions-") {
         // Codex's pinned runner policy does not allow interactive ACP permissions.
-        let digest = "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a";
+        let digest = "sha256:ecfa6ff948a4241090934979179a5ba035bb0a7c3ef543752f4a304d44a267fb";
         *config
             .acpx_launch_profile
             .as_mut()
@@ -264,9 +264,9 @@ fn pending_acpx_runtime_request(
         provider["agent"] = json!("claude");
         provider["model"] = json!("claude-sonnet-5");
         provider["agentServerPackage"] = json!("@agentclientprotocol/claude-agent-acp");
-        provider["agentServerVersion"] = json!("0.73.0");
+        provider["agentServerVersion"] = json!("0.81.2");
         provider["agentRuntimePackage"] = json!("@anthropic-ai/claude-agent-sdk");
-        provider["agentRuntimeVersion"] = json!("0.3.280");
+        provider["agentRuntimeVersion"] = json!("0.3.283");
         provider["commandDigest"] = json!(digest);
         provider["sidecarArgs"][3] = json!(digest);
     } else {
