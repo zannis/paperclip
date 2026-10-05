@@ -852,19 +852,12 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     expect(container.textContent).toContain("no agents selected yet.");
   });
 
-  it("tells the operator on the key step that TypeSafe receives submitted content", async () => {
+  it("tells the operator beside the key field that TypeSafe receives submitted content", async () => {
     mockParams.appKey = "typesafe";
     listGalleryMock.mockResolvedValue({ apps: [TYPESAFE] });
     await render();
 
-    // Provider copy stays out of the shared access step.
-    expect(container.textContent).not.toContain("is sent to TypeSafe");
-
-    await act(async () => {
-      buttonByText("Save and continue")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    await flushReact();
-
+    // Setup is one screen: the notice sits under the key field it applies to.
     expect(container.textContent).toContain("Your TypeSafe key");
     expect(container.textContent).toContain(
       "Content an agent submits for evaluation is sent to TypeSafe.",

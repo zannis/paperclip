@@ -3845,7 +3845,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toHaveLength(1);
   });
 
-  it("does not reset an exhausted incident budget on server restart", async () => {
+  it("waits out an exhausted incident budget a server restart interrupted with one infrastructure re-dispatch", async () => {
     const { agentId, runId, issueId } = await seedRunFixture({
       agentStatus: "running",
     });
@@ -3860,24 +3860,28 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .where(eq(heartbeatRuns.id, runId));
     await heartbeatService(db).drainRunningRunsForShutdown("SIGTERM");
     const reconciled = await heartbeatService(db).reconcileStrandedAssignedIssues();
-    // The budget stays spent across the restart: no successor run is
-    // queued, by the process-loss retry or by the sweeper.
-    expect(
-      await db
-        .select()
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.agentId, agentId)),
-    ).toHaveLength(1);
-    // A spent budget is no longer left to sit: the sweeper escalates the
-    // issue to a board-owned recovery action instead of skipping it on
-    // every tick with no live path. The action spawns no run of its own.
+    // The process-loss retry does not reset the spent budget. The sweeper
+    // escalates the spent budget, and because a server shutdown ended the
+    // run, the escalation is the infrastructure wait: one delayed
+    // re-dispatch of the original assignee under a system-owned action,
+    // never a board takeover.
+    const runsAfterRestart = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId));
+    expect(runsAfterRestart).toHaveLength(2);
+    expect(runsAfterRestart.find((row) => row.id !== runId)).toMatchObject({
+      status: "scheduled_retry",
+      retryOfRunId: runId,
+      scheduledRetryReason: "infra_termination_recovery",
+    });
     expect(reconciled.escalated).toBe(1);
     const recoveryActions = await db
       .select()
       .from(issueRecoveryActions)
       .where(eq(issueRecoveryActions.sourceIssueId, issueId));
     expect(recoveryActions).toHaveLength(1);
-    expect(recoveryActions[0]).toMatchObject({ status: "active", ownerType: "board", ownerAgentId: null });
+    expect(recoveryActions[0]).toMatchObject({ status: "active", ownerType: "system", ownerAgentId: null });
     const escalatedIssue = await db
       .select({ status: issues.status })
       .from(issues)
@@ -3892,7 +3896,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         .select()
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.agentId, agentId)),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
   });
 
   it("releases active environment leases when an orphaned run is reaped", async () => {
@@ -6015,16 +6019,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it("escalates an in_progress issue whose interrupted run has spent its transient retry budget", async () => {
-    // Three deploy restarts in a row interrupted a run and both of its
-    // bounded transient retries. The retry scheduler then reports the
-    // budget exhausted and queues nothing, and the sweeper used to skip
-    // the issue on every tick: in_progress, no run, no path, no notice.
+    // A run and both of its bounded transient retries failed. The retry
+    // scheduler then reports the budget exhausted and queues nothing, and
+    // the sweeper used to skip the issue on every tick: in_progress, no
+    // run, no path, no notice. This case exercises the agent-failure
+    // budget; a platform interruption follows the infrastructure
+    // wait-and-redispatch path instead.
     const { companyId, agentId, runId, issueId } =
       await seedStrandedIssueFixture({
         status: "in_progress",
         runStatus: "failed",
-        runErrorCode: "server_shutdown_interrupted",
-        runError: "Interrupted by graceful server shutdown (SIGTERM)",
+        runErrorCode: "adapter_exit_code",
+        runError: "Adapter exited with code 1",
         // A conversation adapter's interrupted run keeps its session for
         // continuation, so legacy reconciliation does not terminalize it;
         // the sweeper reaches the retry lane with a spent budget.
@@ -6145,8 +6151,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const { agentId, runId, issueId } = await seedStrandedIssueFixture({
       status: "todo",
       runStatus: "failed",
-      runErrorCode: "server_shutdown_interrupted",
-      runError: "Interrupted by graceful server shutdown (SIGTERM)",
+      // This case exercises the agent-failure budget. Platform interruption
+      // follows the infrastructure wait-and-redispatch path instead.
+      runErrorCode: "adapter_exit_code",
+      runError: "Adapter exited with code 1",
       resultJson: {
         stopReason: "interrupted",
         conversationContinuation: "continue_conversation_v1",

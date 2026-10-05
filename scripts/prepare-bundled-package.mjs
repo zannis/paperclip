@@ -57,6 +57,16 @@ export function readWorkspacePackageVersions(root = repoRoot) {
   return versions;
 }
 
+// A caller that restaged this package under a version other than its own
+// manifest's (release verification packs every public package at one unified
+// version) packs its workspace dependencies at that version too, so they
+// follow the package. A package staged at its own version (git installs) takes
+// each dependency's own version.
+export function stagingWorkspaceVersions(sourcePackage, workspaceVersions) {
+  const ownVersion = workspaceVersions[sourcePackage.name];
+  return ownVersion !== undefined && ownVersion !== sourcePackage.version ? {} : workspaceVersions;
+}
+
 export function createBundledInstallManifest(publishManifest, bundledDependencies) {
   const bundledDependencyNames = new Set(bundledDependencies);
   const installManifest = structuredClone(publishManifest);
@@ -197,7 +207,10 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
   }
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
-  const publishManifest = materializePublishManifest(sourcePackage, readWorkspacePackageVersions());
+  const publishManifest = materializePublishManifest(
+    sourcePackage,
+    stagingWorkspaceVersions(sourcePackage, readWorkspacePackageVersions()),
+  );
   // Everything the manifest promises is already materialized in the staged
   // copy, and the staged dir has no workspace or ../scripts to build from —
   // npm pack must not re-run the source package's lifecycle builds here.
