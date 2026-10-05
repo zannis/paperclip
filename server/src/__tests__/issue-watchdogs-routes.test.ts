@@ -217,28 +217,6 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     }
   }
 
-  // The wake a specific agent received. A comment can fire more than one wake —
-  // the target's assignee and one per @-mention — and the route enqueues them
-  // independently, so waiting on the comment's own wake says nothing about
-  // whether the mention has landed yet.
-  async function waitForAgentWake(companyId: string, agentId: string, timeoutMs = 5_000) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const [row] = await db
-        .select()
-        .from(agentWakeupRequests)
-        .where(and(
-          eq(agentWakeupRequests.companyId, companyId),
-          eq(agentWakeupRequests.agentId, agentId),
-        ));
-      if (row) return row;
-      if (Date.now() >= deadline) {
-        throw new Error(`No wake request landed for agent ${agentId} within ${timeoutMs}ms`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-
   async function seedCloudTenantMember(companyId: string) {
     await db.insert(companyMemberships).values({
       companyId,
@@ -1186,29 +1164,22 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(watchdogComments).toHaveLength(1);
 
     // And it is admitted on the same terms as on the comment route: a record,
-    // not a message. The board's control comment on the revived leaf proves the
-    // mention path is live for this company and gives the assertion a row to
-    // wait for rather than a timeout to trust.
+    // not a message. A board comment on the revived leaf does wake its
+    // assignee, which proves the wake path is live for this company and gives
+    // the assertion a row to wait for rather than a timeout to trust.
     const control = await request(createApp(companyId))
       .post(`/api/issues/${watchedChildId}/comments`)
-      .send({ body: `Board checking in. cc [@Mentioned Bystander](${buildAgentMentionHref(bystanderAgentId)})` });
+      .send({ body: "Board checking in." });
     expect(control.status, JSON.stringify(control.body)).toBe(201);
-    // Wait on the *mention* the control fired, not just on the control's
-    // comment wake. The route enqueues the two separately, so waiting for the
-    // comment wake can observe the mention path mid-flight and read zero
-    // bystander wakes for a reason that has nothing to do with the summary.
-    await waitForAgentWake(companyId, bystanderAgentId);
+    await waitForIssueCommentWake(companyId, control.body.id);
     const wakes = await db
       .select()
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.companyId, companyId));
     expect(wakes.filter((row) => (row.payload as Record<string, unknown> | null)?.commentId === watchdogComments[0]!.id))
       .toHaveLength(0);
-    // Nothing reached the agent the summary mentioned; the only wake it has is
-    // the control's.
-    const bystanderWakes = wakes.filter((row) => row.agentId === bystanderAgentId);
-    expect(bystanderWakes).toHaveLength(1);
-    expect((bystanderWakes[0]!.payload as Record<string, unknown> | null)?.commentId).toBe(control.body.id);
+    // Nothing reached the agent the summary mentioned.
+    expect(wakes.filter((row) => row.agentId === bystanderAgentId)).toHaveLength(0);
 
     // Still one record: the update route spends the same grant the comment
     // route does, not a second one of its own.

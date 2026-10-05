@@ -22,6 +22,7 @@ import {
   createBundledInstallManifest,
   materializePublishManifest,
   selectBundledDependencyPatches,
+  stagingWorkspaceVersions,
 } from "./prepare-bundled-package.mjs";
 
 const rootPackage = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -173,6 +174,31 @@ test("bundled package staging materializes workspace dependency versions", () =>
     caret: "^2026.723.0",
     tilde: "~2026.723.0",
   });
+});
+
+test("bundled package staging keeps restaged workspace dependencies at the staged version", () => {
+  const workspaceVersions = {
+    "@paperclipai/server": "0.3.1",
+    "@paperclipai/shared": "0.3.1",
+    "@paperclipai/plugin-sdk": "1.0.0",
+  };
+  const server = (version) => ({
+    name: "@paperclipai/server",
+    version,
+    dependencies: { "@paperclipai/shared": "workspace:*", "@paperclipai/plugin-sdk": "workspace:*" },
+  });
+
+  const restaged = server("0.0.0-grok-verify.abc");
+  assert.deepEqual(
+    materializePublishManifest(restaged, stagingWorkspaceVersions(restaged, workspaceVersions)).dependencies,
+    { "@paperclipai/shared": "0.0.0-grok-verify.abc", "@paperclipai/plugin-sdk": "0.0.0-grok-verify.abc" },
+  );
+
+  const checkout = server("0.3.1");
+  assert.deepEqual(
+    materializePublishManifest(checkout, stagingWorkspaceVersions(checkout, workspaceVersions)).dependencies,
+    { "@paperclipai/shared": "0.3.1", "@paperclipai/plugin-sdk": "1.0.0" },
+  );
 });
 
 test("bundled package staging installs only dependencies included in the tarball", () => {
