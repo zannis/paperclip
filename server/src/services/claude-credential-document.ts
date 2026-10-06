@@ -4,6 +4,8 @@
 // it, and the write-back decides whether a refreshed copy may replace it.
 // All three read the document through this module so they agree on its shape.
 
+import { createHash } from "node:crypto";
+
 type ClaudeOauthBlock = {
   accessToken?: unknown;
   refreshToken?: unknown;
@@ -68,6 +70,18 @@ export function isRefreshableClaudeDocument(value: string): boolean {
   if (!document || !hasBothTokens(document)) return false;
   const expiry = readExpiry(document.oauth.expiresAt);
   return expiry.present && expiry.ms !== null;
+}
+
+/**
+ * A short, non-reversible fingerprint of the document's refresh token, for logs.
+ * Sign-in, run staging and the write-back log it so an operator can tell which
+ * refresh token a failing run carried and whether the stored one ever changed.
+ * Returns null when the value is not a document or carries no refresh token.
+ */
+export function claudeRefreshTokenFingerprint(value: string): string | null {
+  const document = parseDocument(value);
+  if (!document || !nonEmptyString(document.oauth.refreshToken)) return null;
+  return createHash("sha256").update(document.oauth.refreshToken).digest("hex").slice(0, 12);
 }
 
 // Identity fields of the stored document. A refresh keeps the account, so a

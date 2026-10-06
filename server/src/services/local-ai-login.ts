@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import { adapterAuthSessions, ADAPTER_AUTH_SESSION_ACTIVE_STATES, environments, type Db } from "@paperclipai/db";
@@ -9,9 +9,44 @@ import { notFound, unprocessable } from "../errors.js";
 import { aiConnectionService } from "./ai-connections.js";
 import { readVerifiedLocalAiCredential } from "./local-ai-credentials.js";
 import { logActivity } from "./activity-log.js";
+import { claudeRefreshTokenFingerprint } from "./claude-credential-document.js";
+import { logger } from "../middleware/logger.js";
 
 const LOCAL_LOGIN_METHOD = "local_subscription";
 const ATTEMPT_DURATION_MS = 30 * 60 * 1000;
+// `claude auth login` writes `.credentials.json` as soon as the code exchange
+// returns, and the CLI can rewrite it before it exits. Completing on the first
+// readable copy can store a refresh token the CLI has already replaced, so the
+// connection works until the access token expires and then cannot refresh.
+// Completion waits until the file has been untouched for CREDENTIAL_SETTLE_MS.
+const CREDENTIAL_SETTLE_MS = 3_000;
+const CREDENTIAL_SETTLE_TIMEOUT_MS = 20_000;
+const CREDENTIAL_SETTLE_POLL_MS = 250;
+
+export async function waitForSettledCredentialFile(
+  directory: string,
+  provider: AiConnectionLoginIntent["provider"],
+  {
+    settleMs = CREDENTIAL_SETTLE_MS,
+    timeoutMs = CREDENTIAL_SETTLE_TIMEOUT_MS,
+    pollMs = CREDENTIAL_SETTLE_POLL_MS,
+  }: { settleMs?: number; timeoutMs?: number; pollMs?: number } = {},
+): Promise<boolean> {
+  if (provider !== "anthropic") return true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let newest: number | null = null;
+    for (const name of [".credentials.json", "credentials.json"]) {
+      const info = await stat(path.join(directory, name)).catch(() => null);
+      if (info) newest = Math.max(newest ?? 0, info.mtimeMs);
+    }
+    // No file yet: the read below reports the missing login as before.
+    if (newest === null || Date.now() - newest >= settleMs) return true;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+  logger.warn({ event: "local_ai_login_credential_unsettled", provider }, "Claude credential file kept changing; completing with the latest copy");
+  return false;
+}
 function loginHome(id: string) {
   return path.join(resolvePaperclipInstanceRoot(), "ai-local-logins", id);
 }
@@ -148,6 +183,9 @@ export function localAiLoginService(db: Db) {
   }
 
   async function complete(companyId: string, userId: string, id: string, intent: AiConnectionLoginIntent) {
+    // Wait outside the transaction so the attempt row lock is not held while polling.
+    await waitForSettledCredentialFile(loginHome(id), intent.provider);
+    let refreshTokenFingerprint: string | null = null;
     const result = await db.transaction(async (tx) => {
       const [session] = await tx.select().from(adapterAuthSessions).where(and(
         eq(adapterAuthSessions.id, id), eq(adapterAuthSessions.companyId, companyId),
@@ -163,6 +201,7 @@ export function localAiLoginService(db: Db) {
           !session.expiresAt || session.expiresAt.getTime() <= Date.now())
         throw unprocessable("This sign-in attempt has expired or was cancelled. Start sign-in again.");
       const credential = await readVerifiedLocalAiCredential(intent.provider, loginHome(id));
+      if (intent.provider === "anthropic") refreshTokenFingerprint = claudeRefreshTokenFingerprint(credential);
       await tx.update(adapterAuthSessions).set({ status: "promoting", updatedAt: new Date() })
         .where(eq(adapterAuthSessions.id, id));
       // Nested transaction is a savepoint on this same connection. Holding the
@@ -175,6 +214,8 @@ export function localAiLoginService(db: Db) {
       }).where(eq(adapterAuthSessions.id, id));
       return saved;
     });
+    if (intent.provider === "anthropic")
+      logger.info({ event: "local_ai_login_credential_saved", grantId: result.grantId, refreshTokenFingerprint }, "Claude subscription credential saved");
     // Failed cleanup can be retried by the same completed attempt or reaper.
     await rm(loginHome(id), { recursive: true, force: true });
     return result;
