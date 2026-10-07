@@ -528,6 +528,14 @@ describe("paperclip skill utils", () => {
     expect(skillBody).toContain("`assigneeUserId` is null");
   });
 
+  it("leaves commit trailers to the repository's conventions", async () => {
+    const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
+
+    expect(skillBody).not.toMatch(/MUST add[^\n]*Co-Authored-By/i);
+    expect(skillBody).not.toContain("Co-Authored-By: Paperclip");
+    expect(skillBody).toContain("follow the repository's and operator's commit conventions");
+  });
+
   it("requires issue-update writes to be verified, not inferred", async () => {
     const skillBody = await fs.readFile(path.resolve("skills/paperclip/SKILL.md"), "utf8");
 
