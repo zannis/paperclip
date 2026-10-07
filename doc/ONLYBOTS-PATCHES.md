@@ -206,6 +206,30 @@ reachable gpg, and its global ignore file ignores `.worktrees/`. With both
 neutralised, those files pass except two that compare `/private/var` with
 `/var` (macOS). The serialized server suite was not run.
 
+## Queue CI repair (October 5, 2026)
+
+The October 3 tip failed six pull request checks that the pre-rebase queue
+(`faf1c8216`) passed. Each failure was an upstream change in
+`4b8ec588f..ffe5e9e2a` meeting a retained patch:
+
+- **Runner settlement tests** (Claude ACP pin). Upstream's new acpx settlement
+  tests describe claude-agent-acp 0.73.0 with SDK 0.3.280; they now use the
+  pinned 0.81.2 / 0.3.283 profile and its digest.
+- **TypeSafe connection.** Upstream merged connector setup into one screen, so
+  the test asserts the data notice under the key field, not its absence from a
+  separate access step.
+- **Infrastructure termination recovery.** Upstream escalates an issue whose
+  run spent its transient retry budget, testing it through server shutdowns.
+  The queue answers an infrastructure termination with a system-owned wait and
+  one delayed re-dispatch, so the in_progress and todo cases fail on an adapter
+  exit, and the restart case asserts the infrastructure wait.
+- **Watchdog recovery audit.** Upstream removed mention dispatch; the
+  update-route summary test's control is a plain board comment.
+- **Bundled git-install packaging.** Release verification restages every public
+  package at one unified version; a package staged at a version other than its
+  own manifest's now packs its workspace dependencies at that version, which
+  fixes the clean public install in Canary Dry Run.
+
 ## Routine upstream update
 
 Start with a clean worktree and a local `patches/onlybots` matching the published

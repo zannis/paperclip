@@ -16,9 +16,11 @@ import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/executio
 import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 import { decideGrokAuthMerge } from "@paperclipai/adapter-grok-local/server";
 import {
+  claudeRefreshTokenFingerprint,
   decideClaudeAuthMerge,
   isRefreshableClaudeDocument,
 } from "./claude-credential-document.js";
+import { logger } from "../middleware/logger.js";
 
 export function isAiConnectionBusy(error: unknown): error is HttpError {
   return error instanceof HttpError && error.status === 422 &&
@@ -294,6 +296,16 @@ export async function prepareManagedAiRuntime(
       );
     if (subscriptionFile) await writeFile(authFile, value, { mode: 0o600 });
     else env[capability.envKey] = value;
+    // Fingerprints only, never token values: they let an operator match a failing
+    // run's refresh token against the one sign-in stored and the write-back kept.
+    const anthropicFile = subscriptionFile && input.binding.provider === "anthropic";
+    if (anthropicFile)
+      logger.info({
+        event: "claude_credential_staged",
+        grantId: selection.grant.id,
+        agentId: input.agentId,
+        refreshTokenFingerprint: claudeRefreshTokenFingerprint(value),
+      }, "Claude subscription credential staged for run");
     if (
       input.binding.provider === "openai" &&
       selection.attribution.method === "api_key"
@@ -329,6 +341,8 @@ export async function prepareManagedAiRuntime(
         try {
           if (subscriptionFile) {
             const refreshed = await readFile(authFile, "utf8");
+            if (anthropicFile && refreshed === value)
+              logger.info({ event: "claude_credential_writeback", grantId: selection.grant.id, outcome: "unchanged" }, "Claude credential unchanged by run");
             if (refreshed !== value)
               await db.transaction(async (tx) => {
                 const [grant] = await tx
@@ -382,6 +396,15 @@ export async function prepareManagedAiRuntime(
                       : await decideGrokAuthMerge(authFile, destination, {
                           errorLabel: "AI account refresh",
                         });
+                if (anthropicFile)
+                  logger.info({
+                    event: "claude_credential_writeback",
+                    grantId: grant.id,
+                    outcome: decision === 10 ? "stored" : "kept_stored",
+                    decision,
+                    runRefreshTokenFingerprint: claudeRefreshTokenFingerprint(refreshed),
+                    storedRefreshTokenFingerprint: claudeRefreshTokenFingerprint(current),
+                  }, "Claude credential write-back decision");
                 if (decision !== 10) return;
                 await secretService(tx).rotate(
                   ref.secretId,

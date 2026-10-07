@@ -101,9 +101,8 @@ decides whether to retry.
 
 ## Data handling
 
-- The `state` and the questions are sent to TypeSafe. The key step of setup
-  tells the operator this, under the key field. The text comes from the
-  field's `helperMd`, because provider copy stays out of the shared access step.
+- The `state` and the questions are sent to TypeSafe. Setup tells the operator
+  this under the key field. The text comes from the field's `helperMd`.
 - The API key stays in the vault. It is never placed in connection config, the
   skill, tool results, errors or logs. Provider error bodies are discarded
   because they can echo the submitted state.
