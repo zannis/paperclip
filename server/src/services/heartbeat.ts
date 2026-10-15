@@ -10436,8 +10436,8 @@ export function heartbeatService(
       logger.error({ err }, "closed-workspace kept-workspace sweep failed");
       return 0;
     });
-    // Settle stops confirmed since the last tick (a blocked run's own
-    // attempt among them) before the stop page, which can take minutes.
+    // Settle stops confirmed since the last tick (a release's inline stop, or
+    // a settle due for retry) before the stop page, which can take minutes.
     await settleConfirmedRemoteStops();
     const stopped = await environmentRuntime.reconcileStoppedLeases();
     await settleConfirmedRemoteStops();

@@ -515,7 +515,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
     });
 
-    it("lets a run refused by a blocking stop on a long backoff stop the pod itself and resume", async () => {
+    it("fails a run refused by a blocking stop without a stop attempt of its own, and resumes once the sweep confirms it", async () => {
       const seeded = await seed();
       let failStop = true;
       const provider = fakeProvider({ stopFails: () => failStop });
@@ -523,66 +523,19 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const acquired = await acquire(seeded, provider, runId);
       await finishRun(runId, "cancelled");
       await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      // The stop keeps failing until the sweep's backoff is minutes long.
-      for (let i = 0; i < 4; i += 1) {
-        await expireStopBackoff(acquired.lease.id);
-        await services(provider).heartbeat.sweepKeptWorkspaceLeases();
-      }
       failStop = false;
+      const stopsBefore = provider.methods().filter((m) => m === "environmentStopLease").length;
 
       const blockedRun = await newRun(seeded);
-      const resumed = await acquire(seeded, provider, blockedRun);
+      await expect(acquire(seeded, provider, blockedRun)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
+      expect(provider.methods().filter((m) => m === "environmentStopLease")).toHaveLength(stopsBefore);
 
-      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
-      // The cancelled run's Stop is still settled, on the next tick.
-      expect(await settleMark(acquired.lease.id)).toEqual({ dueAtMs: 0 });
+      // The sweep confirms the stop and settles the cancelled run's Stop.
+      await expireStopBackoff(acquired.lease.id);
       await services(provider).heartbeat.sweepKeptWorkspaceLeases();
       expect(await settleMark(acquired.lease.id)).toBeUndefined();
-    });
-
-    it("lets a blocked run resume when a concurrent attempt confirms the stop it was refused by", async () => {
-      const seeded = await seed();
-      let failStop = true;
-      const provider = fakeProvider({ stopFails: () => failStop });
-      const runId = await newRun(seeded);
-      const acquired = await acquire(seeded, provider, runId);
-      await finishRun(runId, "cancelled");
-      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      failStop = false;
-      // Another attempt holds the stop and confirms it right after this run's
-      // own attempt was refused (the second refused write).
-      await db.update(environmentLeases).set({
-        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
-          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 90_000 })}::jsonb)`,
-      }).where(eq(environmentLeases.id, acquired.lease.id));
-      await db.execute(sql.raw(`
-        create table test_statements (n int);
-        create function test_confirm_on_second() returns trigger language plpgsql as $$
-        begin
-          insert into test_statements values (1);
-          if (select count(*) from test_statements) = 2 then
-            update environment_leases set metadata = metadata || jsonb_build_object('sandboxStop',
-                jsonb_build_object('attempts', 0, 'retryAfterMs', 0,
-                  'confirmedEpoch', coalesce((metadata->>'sandboxEpoch')::int, 0)))
-              where id = '${acquired.lease.id}';
-          end if;
-          return null;
-        end $$;
-        create trigger test_confirm_on_second after update on environment_leases
-          for each statement when (pg_trigger_depth() < 1) execute function test_confirm_on_second();
-      `));
-      const blockedRun = await newRun(seeded);
-      let resumed;
-      try {
-        resumed = await acquire(seeded, provider, blockedRun);
-      } finally {
-        await db.execute(sql.raw(`
-          drop trigger test_confirm_on_second on environment_leases;
-          drop function test_confirm_on_second();
-          drop table test_statements;
-        `));
-      }
-
+      const nextRun = await newRun(seeded);
+      const resumed = await acquire(seeded, provider, nextRun);
       expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
     });
 
@@ -654,7 +607,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(await settleMark(acquired.lease.id)).toBeUndefined();
     });
 
-    it("takes over a blocking stop attempt whose claim expired with its process", async () => {
+    it("lets the sweep take over a blocking stop attempt whose claim expired with its process", async () => {
       const seeded = await seed();
       let failStop = true;
       const provider = fakeProvider({ stopFails: () => failStop });
@@ -668,13 +621,10 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       }).where(eq(environmentLeases.id, acquired.lease.id));
       failStop = false;
 
-      const blockedRun = await newRun(seeded);
-      const resumed = await acquire(seeded, provider, blockedRun);
-
-      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+      expect((await services(provider).runtime.reconcileStoppedLeases()).confirmed).toBe(1);
     });
 
-    it("waits for a blocking stop attempt in flight and resumes once it confirms", async () => {
+    it("never lets the sweep take over a blocking stop attempt still in flight", async () => {
       const seeded = await seed();
       const provider = fakeProvider({ stopFails: () => true });
       const runId = await newRun(seeded);
@@ -683,68 +633,28 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
       await db.update(environmentLeases).set({
         metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
-          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 30_000 })}::jsonb)`,
-      }).where(eq(environmentLeases.id, acquired.lease.id));
-      // That attempt confirms the stop a moment later.
-      const confirming = new Promise((resolve) => setTimeout(resolve, 1_500)).then(() =>
-        db.update(environmentLeases).set({
-          metadata: sql`${environmentLeases.metadata} || jsonb_build_object('sandboxStop', jsonb_build_object(
-            'attempts', 0, 'retryAfterMs', 0, 'confirmedEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)))`,
-        }).where(eq(environmentLeases.id, acquired.lease.id)));
-
-      const blockedRun = await newRun(seeded);
-      const resumed = await acquire(seeded, provider, blockedRun);
-      await confirming;
-
-      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
-    });
-
-    it("does not resume the workspace for a run cancelled while it waits on a stop", async () => {
-      const seeded = await seed();
-      const provider = fakeProvider({ stopFails: () => true });
-      const runId = await newRun(seeded);
-      const acquired = await acquire(seeded, provider, runId);
-      await finishRun(runId, "cancelled");
-      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      await db.update(environmentLeases).set({
-        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
-          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 30_000 })}::jsonb)`,
-      }).where(eq(environmentLeases.id, acquired.lease.id));
-      const blockedRun = await newRun(seeded);
-      // The waiting run is cancelled, then the other attempt confirms the stop.
-      const settling = new Promise((resolve) => setTimeout(resolve, 1_000)).then(async () => {
-        await finishRun(blockedRun, "cancelled");
-        await db.update(environmentLeases).set({
-          metadata: sql`${environmentLeases.metadata} || jsonb_build_object('sandboxStop', jsonb_build_object(
-            'attempts', 0, 'retryAfterMs', 0, 'confirmedEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)))`,
-        }).where(eq(environmentLeases.id, acquired.lease.id));
-      });
-
-      const error = await acquire(seeded, provider, blockedRun).catch((e: unknown) => e);
-      await settling;
-
-      expect(error).toBeInstanceOf(ReusableSandboxResumeError);
-      expect(provider.methods().filter((m) => m === "environmentResumeLease")).toHaveLength(0);
-    });
-
-    it("never takes over a blocking stop attempt still in flight", async () => {
-      const seeded = await seed();
-      const provider = fakeProvider({ stopFails: () => true });
-      const runId = await newRun(seeded);
-      const acquired = await acquire(seeded, provider, runId);
-      await finishRun(runId, "cancelled");
-      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      // Another attempt holds the stop claim.
-      await db.update(environmentLeases).set({
-        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
-          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 2_000 })}::jsonb)`,
+          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 60_000 })}::jsonb)`,
       }).where(eq(environmentLeases.id, acquired.lease.id));
       const stopsBefore = provider.methods().filter((m) => m === "environmentStopLease").length;
 
-      const blockedRun = await newRun(seeded);
-      await expect(acquire(seeded, provider, blockedRun)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
+      await services(provider).runtime.reconcileStoppedLeases();
 
       expect(provider.methods().filter((m) => m === "environmentStopLease")).toHaveLength(stopsBefore);
+    });
+
+    it("does not resume the workspace for a run cancelled before its claim", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      expect((await leaseRow(acquired.lease.id)).metadata?.sandboxStop).toMatchObject({ confirmedEpoch: expect.any(Number) });
+      const cancelledRun = await newRun(seeded);
+      await finishRun(cancelledRun, "cancelled");
+
+      await expect(acquire(seeded, provider, cancelledRun)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
+      expect(provider.methods().filter((m) => m === "environmentResumeLease")).toHaveLength(0);
     });
 
     it("never claims a kept lease another live run holds active", async () => {

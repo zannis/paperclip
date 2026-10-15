@@ -130,14 +130,13 @@ const KEPT_WORKSPACE_STOP_CONCURRENCY = 4;
 const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
 const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
 const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
-// A run's stop confirmed outside the reconciler, whose Stop and waiting
-// messages the reconciler still has to settle.
+// A confirmed stop of a run that did not succeed, whose Stop and waiting
+// messages are still to be settled.
 const REMOTE_STOP_SETTLE_PENDING_KEY = "remoteStopSettlePending";
 // A settle claim older than this belongs to a sweep that died.
 const REMOTE_STOP_SETTLE_CLAIM_MS = 5 * 60_000;
 const REMOTE_STOP_SETTLE_RETRY_MS = 60_000;
 const REMOTE_STOP_SETTLE_PAGE_SIZE = 20;
-const KEPT_WORKSPACE_STOP_WAIT_POLL_MS = 2_000;
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -1410,10 +1409,6 @@ function createSandboxEnvironmentDriver(
     deferredOrphanCleanupBufferLimit?: number;
     orphanCleanupSpool?: SandboxOrphanCleanupSpool;
     orphanCleanupSpoolDir?: string;
-    /** One guarded stop attempt of a claim-blocking kept-workspace stop. */
-    attemptBlockingKeptWorkspaceStop?: (
-      lease: EnvironmentLease,
-    ) => Promise<"confirmed" | "destroyed" | "failed" | "skipped">;
   } = {},
 ): EnvironmentRuntimeDriver {
   const pluginWorkerManager = options.pluginWorkerManager;
@@ -3498,10 +3493,9 @@ function createSandboxEnvironmentDriver(
    * acquisition is about to resume. A lease the sweep already claimed, or
    * another live run holds, is not reusable, and the acquisition creates a
    * new sandbox instead. A still-stopped kept workspace is the exception: if
-   * an unconfirmed stop of a run that did not succeed refuses the claim, this
-   * run makes one provider stop attempt itself (up to a stop RPC timeout),
-   * then claims the workspace if the stop was confirmed, starts fresh if the
-   * Sandbox is gone, or fails with a retryable resume error. Never call it
+   * an unconfirmed stop of a run that did not succeed refuses the claim, the
+   * run fails with a retryable resume error and picks the workspace up on a
+   * later wake, once the reconciler has confirmed the stop. Never call it
    * while holding a transaction or lock.
    */
   async function claimReusableLeaseForResume(
@@ -3543,8 +3537,7 @@ function createSandboxEnvironmentDriver(
           // A cancelled or crashed run's agent may still run in that pod
           // until its stop is confirmed; no other run may take it over.
           sql`not ${stopBlocksIssueClaimSql()}`,
-          // A run cancelled meanwhile (say, during a stop it waited on) must
-          // not resume the workspace.
+          // A run cancelled meanwhile must not resume the workspace.
           heartbeatRunId ? runIsLiveSql(heartbeatRunId) : undefined,
         ),
       )
@@ -3564,49 +3557,11 @@ function createSandboxEnvironmentDriver(
       .from(environmentLeases)
       .where(eq(environmentLeases.id, lease.id));
     if (current?.row.status !== "stopped") return null;
-    const runIsLive = async () => {
-      if (!heartbeatRunId) return false;
-      const [live] = await db.execute<{ live: boolean }>(sql`select ${runIsLiveSql(heartbeatRunId)} as live`);
-      return live?.live === true;
-    };
-    if (!retried && await runIsLive()) {
-      // Claimable again: a blocking stop was confirmed since the refused claim.
-      let claimable = !current.blocksClaim;
-      if (!claimable) {
-        // A run that did not succeed still holds the pod until its stop is
-        // confirmed. Make the next stop attempt now instead of waiting out the
-        // sweep's backoff, so every retry of this run gets one.
-        const outcome = await (options.attemptBlockingKeptWorkspaceStop?.(toEnvironmentLeaseSnapshot(current.row))
-          ?? Promise.resolve("skipped" as const))
-          .catch((error: unknown) => {
-            logger.warn({ err: error, leaseId: lease.id }, "kept-workspace sandbox stop attempt failed");
-            return "failed" as const;
-          });
-        if (outcome === "destroyed") return null;
-        claimable = outcome === "confirmed";
-        // Another attempt holds the stop: wait for it, at most until its own
-        // claim expires, and go by what it settled.
-        for (let waiting = outcome === "skipped"; waiting;) {
-          const [reread] = await db
-            .select({
-              status: environmentLeases.status,
-              blocksClaim: sql<boolean>`${stopBlocksIssueClaimSql()}`,
-              inFlight: sql<boolean>`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not null
-                and ${stopRetryAfterMsSql()} > ${Date.now()})`,
-            })
-            .from(environmentLeases)
-            .where(eq(environmentLeases.id, lease.id));
-          // A run cancelled while it waits fails, whatever the stop settled.
-          if (!(await runIsLive())) break;
-          if (reread?.status !== "stopped") return null;
-          claimable = !reread.blocksClaim;
-          waiting = !claimable && reread.inFlight;
-          if (waiting) await new Promise((resolve) => setTimeout(resolve, KEPT_WORKSPACE_STOP_WAIT_POLL_MS));
-        }
-      }
-      if (claimable) {
-        return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
-      }
+    // Claimable again: a blocking stop was confirmed since the refused claim.
+    // While it is unconfirmed the run makes no stop attempt of its own; the
+    // stopped-lease reconciler keeps retrying it.
+    if (!retried && !current.blocksClaim) {
+      return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
     }
     throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
   }
@@ -4222,7 +4177,6 @@ export function environmentRuntimeService(
       deferredOrphanCleanupBufferLimit: options.deferredOrphanCleanupBufferLimit,
       orphanCleanupSpool: options.orphanCleanupSpool,
       orphanCleanupSpoolDir: options.orphanCleanupSpoolDir,
-      attemptBlockingKeptWorkspaceStop: (lease) => attemptKeptWorkspaceStop(lease, { ignoreBackoff: true }),
     }),
     ...(options.pluginWorkerManager
       ? [createPluginEnvironmentDriver(db, options.pluginWorkerManager)]
@@ -4265,11 +4219,7 @@ export function environmentRuntimeService(
    */
   async function attemptKeptWorkspaceStop(
     lease: EnvironmentLease,
-    options: {
-      ownRunId?: string;
-      /** A run blocked by this stop attempts it now, whatever the backoff. */
-      ignoreBackoff?: boolean;
-    } = {},
+    options: { ownRunId?: string } = {},
   ): Promise<"confirmed" | "destroyed" | "failed" | "skipped"> {
     const driver = getDriver("sandbox");
     if (!driver?.stopKeptWorkspaceLease) return "skipped";
@@ -4316,13 +4266,10 @@ export function environmentRuntimeService(
         sql`${sandboxEpochSql()} = ${epoch}`,
         sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not distinct from ${previous.attemptId ?? null}::text`,
         // The caller's snapshot can be stale: re-check that the stop is still
-        // unconfirmed and due, and never take over an attempt in flight (one
-        // whose claim expired died with its process).
+        // unconfirmed and due. An attempt in flight is not due until its claim
+        // expires, when it died with its process.
         stopUnconfirmedSql(),
-        options.ignoreBackoff
-          ? sql`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null
-            or ${stopRetryAfterMsSql()} <= ${Date.now()})`
-          : sql`${stopRetryAfterMsSql()} <= ${Date.now()}`,
+        sql`${stopRetryAfterMsSql()} <= ${Date.now()}`,
         notLive,
       ))
       .returning();
@@ -4379,8 +4326,8 @@ export function environmentRuntimeService(
       // stop.
       // The claimed row is fresh; the caller's snapshot can lag other attempts.
       const attempts = (readKeptWorkspaceStop(claimed).attempts ?? 0) + 1;
-      // A run refused by a claim-blocking stop makes its own attempt, so the
-      // backoff only paces the sweep.
+      // A run refused by a claim-blocking stop makes no attempt of its own:
+      // it fails with a retryable resume error until this stop is confirmed.
       const retryAfterMs = Date.now() + Math.min(
         KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
         KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
