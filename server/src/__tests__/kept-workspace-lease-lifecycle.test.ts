@@ -530,11 +530,52 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const resumed = await acquire(seeded, provider, blockedRun);
 
       expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
-      // The cancelled run's Stop is still settled, on the reconciler's next tick.
-      const reconciled = await services(provider).runtime.reconcileStoppedLeases();
-      expect(reconciled.stoppedRuns).toEqual([{ companyId: seeded.companyId, runId }]);
-      const again = await services(provider).runtime.reconcileStoppedLeases();
-      expect(again.stoppedRuns).toEqual([]);
+      // The cancelled run's Stop is still settled, once, on the next tick.
+      const { runtime, heartbeat } = services(provider);
+      expect(await runtime.listPendingRemoteStopSettles())
+        .toEqual([{ leaseId: acquired.lease.id, companyId: seeded.companyId, runId }]);
+      await heartbeat.sweepKeptWorkspaceLeases();
+      expect(await runtime.listPendingRemoteStopSettles()).toEqual([]);
+    });
+
+    it("marks a blocking stop the sweep confirms for settlement until it is settled", async () => {
+      const seeded = await seed();
+      let failStop = true;
+      const provider = fakeProvider({ stopFails: () => failStop });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      failStop = false;
+      await expireStopBackoff(acquired.lease.id);
+
+      // The stop is confirmed, and the process dies before settling it.
+      const { runtime, heartbeat } = services(provider);
+      expect((await runtime.reconcileStoppedLeases()).confirmed).toBe(1);
+      expect(await runtime.listPendingRemoteStopSettles()).toHaveLength(1);
+
+      await heartbeat.sweepKeptWorkspaceLeases();
+      expect(await runtime.listPendingRemoteStopSettles()).toEqual([]);
+    });
+
+    it("takes over a blocking stop attempt whose claim expired with its process", async () => {
+      const seeded = await seed();
+      let failStop = true;
+      const provider = fakeProvider({ stopFails: () => failStop });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      await db.update(environmentLeases).set({
+        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
+          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() - 1_000 })}::jsonb)`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
+      failStop = false;
+
+      const blockedRun = await newRun(seeded);
+      const resumed = await acquire(seeded, provider, blockedRun);
+
+      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
     });
 
     it("never takes over a blocking stop attempt still in flight", async () => {

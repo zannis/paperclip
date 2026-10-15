@@ -10436,13 +10436,28 @@ export function heartbeatService(
       logger.error({ err }, "closed-workspace kept-workspace sweep failed");
       return 0;
     });
-    const { stoppedRuns, ...stopped } = await environmentRuntime.reconcileStoppedLeases();
-    // A confirmed stop ends its run's remote execution: acknowledge a pending
-    // Stop and start messages that waited for it, as the cleanup sweep does.
-    for (const { companyId, runId } of stoppedRuns) {
-      await settleRemoteStop(runId, companyId);
-    }
+    // Settle stops confirmed since the last tick (a blocked run's own
+    // attempt among them) before the stop page, which can take minutes.
+    await settleConfirmedRemoteStops();
+    const stopped = await environmentRuntime.reconcileStoppedLeases();
+    await settleConfirmedRemoteStops();
     return { ...stopped, terminalDestroyed: terminal.destroyed + closedWorkspaces };
+  }
+
+  // A confirmed stop ends its run's remote execution: acknowledge a pending
+  // Stop and start messages that waited for it, as the cleanup sweep does.
+  // The lease's mark is cleared only after that, so a restart retries it.
+  async function settleConfirmedRemoteStops() {
+    const pending = await environmentRuntime.listPendingRemoteStopSettles().catch((err) => {
+      logger.error({ err }, "could not list kept-workspace stops to settle");
+      return [];
+    });
+    for (const { leaseId, companyId, runId } of pending) {
+      await settleRemoteStop(runId, companyId);
+      await environmentRuntime.clearRemoteStopSettle(leaseId).catch((err) => {
+        logger.warn({ err, leaseId }, "could not clear a settled kept-workspace stop");
+      });
+    }
   }
 
   // A closed execution workspace destroys its reusable sandboxes in its close

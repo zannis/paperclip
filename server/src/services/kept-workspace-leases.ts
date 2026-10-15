@@ -123,6 +123,11 @@ export function leaseHasLiveRunSql() {
   ))`;
 }
 
+/** When the next stop attempt is due, or an attempt in flight expires. */
+export function stopRetryAfterMsSql() {
+  return sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)`;
+}
+
 /** No provider stop has been confirmed at the lease's current epoch. */
 export function stopUnconfirmedSql() {
   return sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'confirmedEpoch')::int, -1)

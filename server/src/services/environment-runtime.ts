@@ -66,6 +66,7 @@ import {
   leaseSandboxEpoch,
   readKeptWorkspaceStop,
   sandboxEpochSql,
+  stopRetryAfterMsSql,
   unconfirmedStopMetadataSql,
 } from "./kept-workspace-leases.js";
 import { HttpError } from "../errors.js";
@@ -3490,8 +3491,12 @@ function createSandboxEnvironmentDriver(
    * so stamping it first means the sweep cannot destroy a sandbox this
    * acquisition is about to resume. A lease the sweep already claimed, or
    * another live run holds, is not reusable, and the acquisition creates a
-   * new sandbox instead; a still-stopped kept workspace is the exception, and
-   * a refused claim on it fails the run with a retryable resume error.
+   * new sandbox instead. A still-stopped kept workspace is the exception: if
+   * an unconfirmed stop of a run that did not succeed refuses the claim, this
+   * run makes one provider stop attempt itself (up to a stop RPC timeout),
+   * then claims the workspace if the stop was confirmed, starts fresh if the
+   * Sandbox is gone, or fails with a retryable resume error. Never call it
+   * while holding a transaction or lock.
    */
   async function claimReusableLeaseForResume(
     lease: EnvironmentLease | null | undefined,
@@ -4184,7 +4189,7 @@ export function environmentRuntimeService(
       deferredOrphanCleanupBufferLimit: options.deferredOrphanCleanupBufferLimit,
       orphanCleanupSpool: options.orphanCleanupSpool,
       orphanCleanupSpoolDir: options.orphanCleanupSpoolDir,
-      attemptBlockingKeptWorkspaceStop: (lease) => attemptKeptWorkspaceStop(lease, { settleLater: true }),
+      attemptBlockingKeptWorkspaceStop: (lease) => attemptKeptWorkspaceStop(lease, { ignoreBackoff: true }),
     }),
     ...(options.pluginWorkerManager
       ? [createPluginEnvironmentDriver(db, options.pluginWorkerManager)]
@@ -4229,23 +4234,25 @@ export function environmentRuntimeService(
     lease: EnvironmentLease,
     options: {
       ownRunId?: string;
-      /**
-       * The caller cannot settle the stopped run's Stop: a stop that ends a
-       * run's remote execution leaves that to the reconciler's next tick.
-       */
-      settleLater?: boolean;
+      /** A run blocked by this stop attempts it now, whatever the backoff. */
+      ignoreBackoff?: boolean;
     } = {},
   ): Promise<"confirmed" | "destroyed" | "failed" | "skipped"> {
     const driver = getDriver("sandbox");
     if (!driver?.stopKeptWorkspaceLease) return "skipped";
     if (!leaseKeepsWorkspace(lease) || keptWorkspaceStopConfirmed(lease)) return "skipped";
     if (!driver.canStopKeptWorkspaceLease?.({ lease })) {
-      // Push the row back so a worker that stays down cannot fill every page.
+      // Push the row back so a worker that stays down cannot fill every page;
+      // an attempt in flight keeps its claim.
       await db.update(environmentLeases).set({
         metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
           coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}, '{}'::jsonb)
             || ${JSON.stringify({ retryAfterMs: Date.now() + KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS })}::jsonb)`,
-      }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.status, "stopped")));
+      }).where(and(
+        eq(environmentLeases.id, lease.id),
+        eq(environmentLeases.status, "stopped"),
+        sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null`,
+      ));
       return "skipped";
     }
     // The releasing run stops its own lease inline; anyone else waits until
@@ -4274,15 +4281,23 @@ export function environmentRuntimeService(
         eq(environmentLeases.status, "stopped"),
         sql`${sandboxEpochSql()} = ${epoch}`,
         sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not distinct from ${previous.attemptId ?? null}::text`,
-        // Never take over an attempt in flight; one whose claim expired died.
-        sql`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null
-          or coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0) <= ${Date.now()})`,
+        // The caller's snapshot can be stale: re-check that the stop is still
+        // unconfirmed and due, and never take over an attempt in flight (one
+        // whose claim expired died with its process).
+        stopUnconfirmedSql(),
+        options.ignoreBackoff
+          ? sql`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null
+            or ${stopRetryAfterMsSql()} <= ${Date.now()})`
+          : sql`${stopRetryAfterMsSql()} <= ${Date.now()}`,
         notLive,
       ))
       .returning();
     if (!claimedRow) return "skipped";
     const claimed = toEnvironmentLeaseSnapshot(claimedRow);
-    const settleMarker = options.settleLater && claimed.heartbeatRunId &&
+    // A stop that ends a run that did not succeed leaves its Stop and waiting
+    // messages to settle; the mark makes that survive a restart. The
+    // releasing run's own stop is settled by its release.
+    const settleMarker = !options.ownRunId && claimed.heartbeatRunId &&
       readKeptWorkspaceStop(claimed).blocksIssueClaim
       ? { [REMOTE_STOP_SETTLE_PENDING_KEY]: true }
       : {};
@@ -4328,7 +4343,8 @@ export function environmentRuntimeService(
       // write below matches nothing and the stop simply lost the race; if the
       // row lags the Sandbox's fence, it backs off and warns like any failed
       // stop.
-      const attempts = (previous.attempts ?? 0) + 1;
+      // The claimed row is fresh; the caller's snapshot can lag other attempts.
+      const attempts = (readKeptWorkspaceStop(claimed).attempts ?? 0) + 1;
       // A run refused by a claim-blocking stop makes its own attempt, so the
       // backoff only paces the sweep.
       const retryAfterMs = Date.now() + Math.min(
@@ -5037,10 +5053,8 @@ export function environmentRuntimeService(
       confirmed: number;
       destroyed: number;
       failed: number;
-      /** Runs whose remote execution a confirmed stop just ended. */
-      stoppedRuns: Array<{ companyId: string; runId: string }>;
     }> {
-      const result = { confirmed: 0, destroyed: 0, failed: 0, stoppedRuns: [] as Array<{ companyId: string; runId: string }> };
+      const result = { confirmed: 0, destroyed: 0, failed: 0 };
       const driver = getDriver("sandbox");
       if (!driver?.stopKeptWorkspaceLease) return result;
       const rows = await db
@@ -5051,36 +5065,24 @@ export function environmentRuntimeService(
           keepsWorkspaceSql(),
           sql`not ${leaseHasLiveRunSql()}`,
           stopUnconfirmedSql(),
-          sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)
-            <= ${Date.now()}`,
+          sql`${stopRetryAfterMsSql()} <= ${Date.now()}`,
         ))
-        .orderBy(asc(environmentLeases.lastUsedAt))
+        // A stop that holds up an issue's next run goes first, then the
+        // longest idle.
+        .orderBy(
+          sql`coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}->'blocksIssueClaim' = 'true'::jsonb, false) desc`,
+          asc(environmentLeases.lastUsedAt),
+        )
         .limit(input.limit ?? KEPT_WORKSPACE_STOP_PAGE_SIZE);
-
-      // Settle the runs whose stop a blocked run confirmed itself.
-      const settled = await db
-        .update(environmentLeases)
-        .set({ metadata: sql`${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text` })
-        .where(sql`coalesce(${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text = 'true'::jsonb, false)`)
-        .returning({ companyId: environmentLeases.companyId, runId: environmentLeases.heartbeatRunId });
-      for (const { companyId, runId } of settled) {
-        if (runId) result.stoppedRuns.push({ companyId, runId });
-      }
 
       // A few stops at a time: each can wait most of a minute on the provider.
       const queue = [...rows];
       const worker = async () => {
         for (let row = queue.shift(); row; row = queue.shift()) {
           try {
-            const lease = toEnvironmentLeaseSnapshot(row);
-            const outcome = await attemptKeptWorkspaceStop(lease);
+            const outcome = await attemptKeptWorkspaceStop(toEnvironmentLeaseSnapshot(row));
             if (outcome === "skipped") continue;
             result[outcome] += 1;
-            // Only a stop of a released or crashed run has a Stop or waiting
-            // messages to settle; an idle stop's run ended long ago.
-            if (outcome !== "failed" && row.heartbeatRunId && readKeptWorkspaceStop(lease).blocksIssueClaim) {
-              result.stoppedRuns.push({ companyId: row.companyId, runId: row.heartbeatRunId });
-            }
           } catch (error) {
             result.failed += 1;
             logger.warn({ err: error, leaseId: row.id }, "kept-workspace sandbox stop attempt failed");
@@ -5089,6 +5091,28 @@ export function environmentRuntimeService(
       };
       await Promise.all(Array.from({ length: KEPT_WORKSPACE_STOP_CONCURRENCY }, worker));
       return result;
+    },
+
+    /**
+     * Runs whose remote execution a confirmed stop ended, by whoever made the
+     * attempt, and whose Stop and waiting messages are not settled yet.
+     */
+    async listPendingRemoteStopSettles(): Promise<Array<{ leaseId: string; companyId: string; runId: string }>> {
+      const rows = await db
+        .select({ leaseId: environmentLeases.id, companyId: environmentLeases.companyId, runId: environmentLeases.heartbeatRunId })
+        .from(environmentLeases)
+        .where(and(
+          // A confirmed stop leaves the row stopped; a Sandbox found gone, expired.
+          inArray(environmentLeases.status, ["stopped", "expired"]),
+          sql`coalesce(${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text = 'true'::jsonb, false)`,
+        ));
+      return rows.flatMap((row) => (row.runId ? [{ leaseId: row.leaseId, companyId: row.companyId, runId: row.runId }] : []));
+    },
+
+    async clearRemoteStopSettle(leaseId: string): Promise<void> {
+      await db.update(environmentLeases)
+        .set({ metadata: sql`${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text` })
+        .where(eq(environmentLeases.id, leaseId));
     },
 
     /**
