@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@paperclipai/db";
 import { remoteTerminationReceipt } from "../remote-execution-termination.js";
+import { confirmedStopStateSql, leaseKeepsWorkspace } from "../kept-workspace-leases.js";
 import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 
 type Lease = {
   id: string; companyId: string; heartbeatRunId: string | null;
   provider: string | null; providerLeaseId: string | null;
   metadata: Record<string, unknown> | null;
+  leasePolicy?: string;
 };
 
 export const NATIVE_WORKSPACE_EXPORT_RESUME_KEY = "nativeWorkspaceExportResume";
@@ -83,7 +85,7 @@ export async function releaseCompletedNativeWorkspaceExportRetention(db: Db, lea
     || reference.resourceDisposition !== "destroy" || reference.leaseId !== lease.id || reference.providerLeaseId !== lease.providerLeaseId) return null;
   const [otherOwner] = await db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
     ne(environmentLeases.id, lease.id), eq(environmentLeases.provider, lease.provider!),
-    eq(environmentLeases.providerLeaseId, lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "pending_cleanup"]),
+    eq(environmentLeases.providerLeaseId, lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "stopped", "pending_cleanup"]),
   )).limit(1);
   if (otherOwner) return null;
   const [released] = await db.update(environmentLeases).set({
@@ -105,15 +107,21 @@ export async function settleNativeWorkspaceExportResume(db: Db, lease: Lease, op
   if (!marker) return null;
   const receipt = remoteTerminationReceipt(lease, options.receipt);
   const stopped = receipt?.state === "stopped";
+  // A stopped Sandbox that keeps its workspace volume still holds provider
+  // storage, so it settles as `stopped`, never as cleaned up.
+  // Only a reusable lease is ever resumed or destroyed by an issue or workspace
+  // close, so only a reusable lease may be left holding its volume.
+  const keptWorkspace = stopped && lease.leasePolicy === "reuse_by_environment" && leaseKeepsWorkspace(lease);
   const now = new Date();
   const [row] = await db.update(environmentLeases).set({
-    status: stopped ? options.status ?? "released" : "pending_cleanup", cleanupStatus: stopped ? "success" : "failed",
+    status: keptWorkspace ? "stopped" : stopped ? options.status ?? "released" : "pending_cleanup",
+    cleanupStatus: keptWorkspace ? "pending" : stopped ? "success" : "failed",
     releasedAt: now, lastUsedAt: now, updatedAt: now,
     metadata: sql`(${environmentLeases.metadata} - 'remoteExecutionTermination'
       ${stopped ? sql`- 'nativeWorkspaceExportResume'` : sql``}) || ${JSON.stringify({
         ...(stopped ? { remoteExecutionTermination: receipt } : {}),
         pendingCleanupInFlight: false, pendingCleanupLeaseExpiresAtMs: 0,
-      })}::jsonb`,
+      })}::jsonb${keptWorkspace ? sql` || ${confirmedStopStateSql(now)}` : sql``}`,
   }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, lease.companyId),
     eq(environmentLeases.heartbeatRunId, lease.heartbeatRunId!), eq(environmentLeases.provider, lease.provider!),
     eq(environmentLeases.providerLeaseId, lease.providerLeaseId!), eq(environmentLeases.status, "pending_cleanup"),

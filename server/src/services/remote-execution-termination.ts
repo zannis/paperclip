@@ -26,8 +26,14 @@ export function hasRemoteTerminationReceipt(lease: LeaseIdentity & {
   metadata: Record<string, unknown> | null;
 }): boolean {
   const receipt = lease.metadata?.remoteExecutionTermination as Record<string, unknown> | undefined;
-  return Boolean(lease.releasedAt && lease.cleanupStatus === "success" &&
-    ["released", "expired", "failed"].includes(lease.status) && receipt &&
+  // A lease that keeps its workspace volume ends its run's execution with a
+  // provider-confirmed stop, and stays `stopped` (or is retired by the resume
+  // that took it over) without ever reading as cleaned up.
+  const keptWorkspaceStopped = receipt?.state === "stopped" && (lease.status === "stopped" ||
+    (lease.status === "expired" && lease.metadata?.retiredByResume === true));
+  return Boolean(lease.releasedAt &&
+    (keptWorkspaceStopped || (lease.cleanupStatus === "success" && ["released", "expired", "failed"].includes(lease.status))) &&
+    receipt &&
     receipt.schema === "paperclip.remote-termination.v1" &&
     receipt.companyId === lease.companyId && receipt.runId === lease.heartbeatRunId &&
     receipt.leaseId === lease.id && receipt.provider === lease.provider &&
