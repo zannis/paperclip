@@ -18828,8 +18828,10 @@ export function heartbeatService(
       // A reusable lease whose workspace survives a stop is not destroyed:
       // the crashed run's issue may still be open and its files are the
       // agent's work. Stop it instead; the kept-workspace sweep issues the
-      // stop and destroys it if the issue has closed.
-      if (lease.leasePolicy === "reuse_by_environment" && leaseKeepsWorkspace(lease)) {
+      // stop and destroys it if the issue has closed. Without its environment
+      // no run can resume it and no kept-workspace path reaches it, so it is
+      // torn down from its recorded metadata like any other orphan.
+      if (lease.leasePolicy === "reuse_by_environment" && lease.environmentId && leaseKeepsWorkspace(lease)) {
         const stopped = await db
           .update(environmentLeases)
           .set({

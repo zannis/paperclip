@@ -68,6 +68,7 @@ import {
   sandboxEpochSql,
   stopRetryAfterMsSql,
   runIsLiveSql,
+  runWithIdIsLiveSql,
   unconfirmedStopMetadataSql,
   RETAINED_LEASE_IDLE_FAILURE_REASON,
 } from "./kept-workspace-leases.js";
@@ -4257,12 +4258,8 @@ export function environmentRuntimeService(
     // The releasing run stops its own lease inline; anyone else waits until
     // the lease's run, and any run holding a resume claim, has ended.
     const notLive = options.ownRunId
-      ? sql`not exists (
-          select 1 from heartbeat_runs as live_run
-          where live_run.status in ('queued', 'scheduled_retry', 'running')
-            and live_run.id = ${resumeClaimRunIdSql()}
-            and live_run.id <> ${options.ownRunId}::uuid
-        )`
+      ? sql`not (${runWithIdIsLiveSql(resumeClaimRunIdSql())}
+          and ${resumeClaimRunIdSql()} is distinct from ${options.ownRunId}::uuid)`
       : sql`not ${leaseHasLiveRunSql()}`;
     const previous = readKeptWorkspaceStop(lease);
     const epoch = leaseSandboxEpoch(lease);

@@ -1124,6 +1124,22 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect((await leaseRow(acquired.lease.id)).status).toBe("stopped");
     });
 
+    it("queues for teardown, rather than stops, an orphaned kept-workspace lease whose environment is gone", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "failed");
+      await db.update(environmentLeases)
+        .set({ environmentId: null, updatedAt: new Date(Date.now() - 60 * 60_000) })
+        .where(eq(environmentLeases.id, acquired.lease.id));
+
+      await services(provider).heartbeat.sweepOrphanedActiveLeases({ backoffMs: 5 * 60_000 });
+
+      // No run can resume it and no kept-workspace path can reach it.
+      expect((await leaseRow(acquired.lease.id)).status).toBe("pending_cleanup");
+    });
+
     it("settles a stop-and-retain release as stopped, and the run counts as stopped once confirmed", async () => {
       const seeded = await seed();
       const provider = fakeProvider();

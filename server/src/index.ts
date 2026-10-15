@@ -1252,7 +1252,9 @@ async function startServerWithDatabaseTeardown(
   // bound is `runnerIdleTimeoutMs` plus one tick. Any other is queued for the
   // pending_cleanup sweep below, which tears it down once its last write is
   // older than its backoff, so its bound is the larger of the two.
-  const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
+  // Startup skips the kept-workspace stage: its provider stops and destroys
+  // can take minutes, and the first interval tick runs it instead.
+  const runEnvironmentLeaseCleanupSweep = (backoffMs: number, options: { keptWorkspaces?: boolean } = {}) =>
     environmentLeaseCleanupHeartbeat
       .sweepIdleRetainedLeases()
       .then((result) => {
@@ -1267,9 +1269,9 @@ async function startServerWithDatabaseTeardown(
       // closed, before the pending_cleanup sweep runs. Stops run a few at a
       // time, and the destroys claim their rows with a fresh write, so the
       // pending_cleanup sweep's backoff keeps it off them.
-      .then(() => environmentLeaseCleanupHeartbeat.sweepKeptWorkspaceLeases())
+      .then(() => options.keptWorkspaces === false ? null : environmentLeaseCleanupHeartbeat.sweepKeptWorkspaceLeases())
       .then((result) => {
-        if (result.confirmed > 0 || result.destroyed > 0 || result.failed > 0 || result.terminalDestroyed > 0) {
+        if (result && (result.confirmed > 0 || result.destroyed > 0 || result.failed > 0 || result.terminalDestroyed > 0)) {
           logger.info(result, "environment lease cleanup sweep reconciled kept-workspace sandboxes");
         }
       })
@@ -1657,7 +1659,7 @@ async function startServerWithDatabaseTeardown(
 
     // Retry any orphan sandbox teardown left by a failed acquire before a server
     // restart, so a leaked sandbox does not stay allocated across the restart.
-    await runEnvironmentLeaseCleanupSweep(0);
+    await runEnvironmentLeaseCleanupSweep(0, { keptWorkspaces: false });
 
     const runRetentionSweep = async () => {
       const activeCompanies = await db.select({ id: companies.id }).from(companies).where(eq(companies.status, "active"));
@@ -1873,7 +1875,7 @@ async function startServerWithDatabaseTeardown(
     // is still required. A failed acquire can leak a paid provider sandbox, so
     // this path retries the teardown at startup and on the interval, exactly as
     // the enabled path does.
-    await runEnvironmentLeaseCleanupSweep(0);
+    await runEnvironmentLeaseCleanupSweep(0, { keptWorkspaces: false });
     startHeartbeatSchedulerInterval(() => {
       scheduleExternalObjectRefreshSweep(new Date());
       scheduleEnvironmentLeaseCleanupSweep();

@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { environmentLeases } from "@paperclipai/db";
 
 /**
@@ -113,23 +113,21 @@ export function resumeClaimRunIdSql() {
     then (${environmentLeases.metadata}->>'resumeClaimRunId')::uuid end)`;
 }
 
+/** The run with this id is queued, waiting to retry or running. */
+export function runWithIdIsLiveSql(runIdSql: SQL) {
+  return sql`exists (select 1 from heartbeat_runs as live_run
+    where live_run.id = ${runIdSql} and live_run.status in ('queued', 'scheduled_retry', 'running'))`;
+}
+
 /** The run is queued, waiting to retry or running. */
 export function runIsLiveSql(runId: string) {
-  return sql`exists (select 1 from heartbeat_runs as live_run
-    where live_run.id = ${runId}::uuid and live_run.status in ('queued', 'scheduled_retry', 'running'))`;
+  return runWithIdIsLiveSql(sql`${runId}::uuid`);
 }
 
 /** The lease's run, or the run holding its resume claim, is still live. */
 export function leaseHasLiveRunSql() {
-  return sql`(exists (
-    select 1 from heartbeat_runs as live_run
-    where live_run.id = ${environmentLeases.heartbeatRunId}
-      and live_run.status in ('queued', 'scheduled_retry', 'running')
-  ) or exists (
-    select 1 from heartbeat_runs as live_run
-    where live_run.id = ${resumeClaimRunIdSql()}
-      and live_run.status in ('queued', 'scheduled_retry', 'running')
-  ))`;
+  return sql`(${runWithIdIsLiveSql(sql`${environmentLeases.heartbeatRunId}`)}
+    or ${runWithIdIsLiveSql(resumeClaimRunIdSql())})`;
 }
 
 /** When the next stop attempt is due, or an attempt in flight expires. */
