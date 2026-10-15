@@ -127,6 +127,8 @@ const KEPT_WORKSPACE_STOP_CONCURRENCY = 4;
 const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
 const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
 const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
+// Matches the bounded resume retries of a run blocked by the stop.
+const KEPT_WORKSPACE_BLOCKING_STOP_FAST_ATTEMPTS = 2;
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -2455,7 +2457,7 @@ function createSandboxEnvironmentDriver(
               },
             });
           } else if (
-            leaseFencesSandboxEpoch(reusableLease) &&
+            leaseKeepsWorkspace(reusableLease) &&
             error instanceof HttpError &&
             error.status === 409 &&
             reusableLease.provider &&
@@ -3520,10 +3522,11 @@ function createSandboxEnvironmentDriver(
       .returning();
     if (touched) return toEnvironmentLeaseSnapshot(touched);
     if (!leaseKeepsWorkspace(lease) || !lease.providerLeaseId || !lease.provider) return null;
-    // A kept workspace is never bypassed by a fresh sandbox, which would fork
-    // the workspace. While it lives on, in this row or in the row a concurrent
-    // run handed it off to, the run fails with a retryable resume error;
-    // only a destroyed workspace lets it start fresh.
+    // A stopped kept workspace is never bypassed by a fresh sandbox, which
+    // would fork a workspace no run is using: while it is still stopped, the
+    // run fails with a retryable resume error instead. A workspace another
+    // run has just taken over is in use, and like any lease in use it is not
+    // shared: the run gets its own sandbox.
     const [current] = await db
       .select({
         row: environmentLeases,
@@ -3531,17 +3534,12 @@ function createSandboxEnvironmentDriver(
       })
       .from(environmentLeases)
       .where(eq(environmentLeases.id, lease.id));
-    if (!current) return null;
+    if (current?.row.status !== "stopped") return null;
     // A blocking stop was confirmed between the refused claim and this read.
-    if (!retried && current.row.status === "stopped" && !current.blocksClaim) {
+    if (!retried && !current.blocksClaim) {
       return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
     }
-    const handedOff = current.row.status === "expired" &&
-      (current.row.metadata as Record<string, unknown> | null)?.retiredByResume === true;
-    if (handedOff || ["active", "released", "retained", "stopped"].includes(current.row.status)) {
-      throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
-    }
-    return null;
+    throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
   }
 
   /**
@@ -4252,22 +4250,24 @@ export function environmentRuntimeService(
       const receipt = await driver.stopKeptWorkspaceLease({ lease: claimed });
       const state = (receipt as { state?: unknown } | null)?.state;
       const termination = remoteTerminationReceipt(claimed, receipt);
+      // An outcome counts only when the row still belongs to this attempt; a
+      // resume that claimed the row meanwhile owns it now.
       if (state === "destroyed") {
         // The Sandbox, and with it the volume, is already gone.
-        await db.update(environmentLeases).set({
+        const settled = await db.update(environmentLeases).set({
           status: "expired",
           cleanupStatus: "success",
           failureReason: "sandbox_missing",
           releasedAt: new Date(),
           metadata: sql`(${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'remoteExecutionTermination')
             || ${JSON.stringify(termination ? { remoteExecutionTermination: termination } : {})}::jsonb`,
-        }).where(sameAttempt);
-        return "destroyed";
+        }).where(sameAttempt).returning({ id: environmentLeases.id });
+        return settled.length > 0 ? "destroyed" : "skipped";
       } else if (state === "stopped") {
-        await db.update(environmentLeases)
+        const settled = await db.update(environmentLeases)
           .set({ metadata: confirmedStopMetadataSql(termination) })
-          .where(sameAttempt);
-        return "confirmed";
+          .where(sameAttempt).returning({ id: environmentLeases.id });
+        return settled.length > 0 ? "confirmed" : "skipped";
       } else {
         throw new Error("The provider returned no stop receipt.");
       }
@@ -4278,8 +4278,10 @@ export function environmentRuntimeService(
       // row lags the Sandbox's fence, it backs off and warns like any failed
       // stop.
       const attempts = (previous.attempts ?? 0) + 1;
-      // Runs blocked by this stop retry every 30 s; so does the stop.
-      const retryAfterMs = Date.now() + (readKeptWorkspaceStop(claimed).blocksIssueClaim
+      // A run blocked by this stop retries twice, 30 s apart; the stop keeps
+      // that pace while it can still unblock the run, then backs off.
+      const retryAfterMs = Date.now() + (
+        readKeptWorkspaceStop(claimed).blocksIssueClaim && attempts <= KEPT_WORKSPACE_BLOCKING_STOP_FAST_ATTEMPTS
         ? KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS
         : Math.min(
           KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,

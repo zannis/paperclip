@@ -537,7 +537,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect((await leaseRow(first.lease.id)).metadata?.sandboxEpoch).toBe(2);
     });
 
-    it("never forks a workspace that a concurrent run handed off between selection and claim", async () => {
+    it("treats a workspace taken over between selection and claim as in use, like any concurrent run", async () => {
       const seeded = await seed();
       const provider = fakeProvider();
       const first = await stoppedLease(seeded, provider);
@@ -564,11 +564,16 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
           for each row when (pg_trigger_depth() < 1) execute function test_handoff_before_claim();
       `));
       try {
-        const error = await acquire(seeded, provider, runId).catch((e: unknown) => e);
+        const acquired = await acquire(seeded, provider, runId);
 
-        expect(error).toBeInstanceOf(ReusableSandboxResumeError);
-        expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
-        expect(await leaseRow(first.lease.id)).toMatchObject({ status: "expired" });
+        // Two live runs never share a pod: this run gets its own Sandbox and
+        // the taken-over workspace stays with the run that holds it.
+        expect(acquired.lease.providerLeaseId).not.toBe(first.lease.providerLeaseId);
+        expect(provider.methods().filter((m) => m === "environmentResumeLease")).toHaveLength(0);
+        const [holder] = await db.select().from(environmentLeases)
+          .where(eq(environmentLeases.heartbeatRunId, otherRun));
+        expect(holder).toMatchObject({ status: "active", providerLeaseId: first.lease.providerLeaseId });
+        expect(provider.sandboxes.get(first.lease.providerLeaseId!)?.files.get("notes.md")).toBe("from run 1");
       } finally {
         await db.execute(sql.raw(`
           drop trigger test_handoff_before_claim on environment_leases;
@@ -591,8 +596,10 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       await db.execute(sql.raw(`
         create function test_confirm_after_claim() returns trigger language plpgsql as $$
         begin
-          update environment_leases set metadata = jsonb_set(metadata, '{sandboxStop,confirmedEpoch}',
-              to_jsonb(coalesce((metadata->>'sandboxEpoch')::int, 0)))
+          -- The state confirmedStopMetadataSql writes: a fresh confirmed stop.
+          update environment_leases set metadata = metadata || jsonb_build_object('sandboxStop',
+              jsonb_build_object('attempts', 0, 'retryAfterMs', 0,
+                'confirmedEpoch', coalesce((metadata->>'sandboxEpoch')::int, 0)))
             where id = '${acquired.lease.id}' and status = 'stopped';
           return null;
         end $$;
@@ -612,6 +619,33 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
 
       expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
       expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
+    });
+
+    it("does not count a stop as confirmed when a resume claimed the row before it landed", async () => {
+      const seeded = await seed();
+      let claimRun = "";
+      const provider = fakeProvider({
+        onStop: async () => {
+          if (claimRun) return;
+          // A resume claim moves the row's epoch on while the stop runs.
+          claimRun = await newRun(seeded);
+          await db.update(environmentLeases).set({
+            metadata: sql`${environmentLeases.metadata} || ${JSON.stringify({
+              sandboxEpoch: 2, resumeClaimRunId: claimRun, resumeClaimedAt: new Date().toISOString(),
+            })}::jsonb`,
+          }).where(eq(environmentLeases.status, "stopped"));
+        },
+      });
+      const turn = await warmTurn(seeded, provider, ["notes.md", "kept"]);
+      await makeIdle(turn.lease.id);
+
+      const { heartbeat } = services(provider);
+      await heartbeat.sweepIdleRetainedLeases();
+      const kept = await heartbeat.sweepKeptWorkspaceLeases();
+
+      expect(kept.confirmed).toBe(0);
+      expect(kept.failed).toBe(0);
+      expect((await leaseRow(turn.lease.id)).metadata?.sandboxStop).not.toHaveProperty("confirmedEpoch");
     });
 
     it("lets a resume win over a stop that is still in flight, without losing the pod", async () => {
