@@ -10439,7 +10439,10 @@ export function heartbeatService(
     // Settle stops confirmed since the last tick (a release's inline stop, or
     // a settle due for retry) before the stop page, which can take minutes.
     await settleConfirmedRemoteStops();
-    const stopped = await environmentRuntime.reconcileStoppedLeases();
+    const stopped = await environmentRuntime.reconcileStoppedLeases().catch((err) => {
+      logger.error({ err }, "kept-workspace stop sweep failed");
+      return { confirmed: 0, destroyed: 0, failed: 0 };
+    });
     await settleConfirmedRemoteStops();
     return { ...stopped, terminalDestroyed: terminal.destroyed + closedWorkspaces };
   }
