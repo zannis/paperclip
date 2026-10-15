@@ -74,10 +74,25 @@ export function leaseHasLiveRunSql() {
 /**
  * Metadata for a lease that just became `stopped` without a confirmed stop: a
  * fresh stop state that the reconciler picks up on its next tick.
+ *
+ * `blocksIssueClaim` marks a stop whose run did not end cleanly (a cancelled
+ * or crashed run): its agent may still be running in the pod, so no new run
+ * may claim the issue until the provider confirms the stop. An idle stop of a
+ * warm lease whose run already ended never blocks a claim.
  */
-export function unconfirmedStopMetadataSql() {
+export function unconfirmedStopMetadataSql(options: { blocksIssueClaim?: boolean } = {}) {
   return sql`(coalesce(${environmentLeases.metadata}, '{}'::jsonb) - ${STOP_KEY_SQL})
-    || jsonb_build_object(${STOP_KEY_SQL}, jsonb_build_object('attempts', 0, 'retryAfterMs', 0))`;
+    || jsonb_build_object(${STOP_KEY_SQL}, ${JSON.stringify({
+      attempts: 0, retryAfterMs: 0, ...(options.blocksIssueClaim ? { blocksIssueClaim: true } : {}),
+    })}::jsonb)`;
+}
+
+/** A stop of a run that did not end cleanly, not yet confirmed by the provider. */
+export function stopBlocksIssueClaimSql() {
+  return sql`(${environmentLeases.status} = 'stopped'
+    and coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}->'blocksIssueClaim' = 'true'::jsonb, false)
+    and coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'confirmedEpoch')::int, -1)
+      <> coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0))`;
 }
 
 /** Metadata for a lease whose stop the provider confirmed at its current epoch. */

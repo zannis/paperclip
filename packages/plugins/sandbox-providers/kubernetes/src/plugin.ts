@@ -671,6 +671,13 @@ const plugin = definePlugin({
       // See acquireLease: only the sandbox-cr backend has a pod-exec channel for
       // native sync, so a resumed job lease must keep the base64 fallback.
       nativeFileSyncUnsupported: leaseBackend !== "sandbox-cr",
+      ...(typeof params.leaseMetadata?.adapterType === "string"
+        ? { adapterType: params.leaseMetadata.adapterType }
+        : {}),
+      // The server rebuilds the lease row from this metadata. Say explicitly
+      // that a stop cannot keep this lease's files, so it is never routed to
+      // a stop the plugin would refuse.
+      workspaceSurvivesStop: false,
     };
 
     return {

@@ -608,7 +608,12 @@ import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-loc
 import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { retryChatControlAdmission } from "./chat-control-admission-retry.js";
-import { keepsWorkspaceSql, leaseKeepsWorkspace, unconfirmedStopMetadataSql } from "./kept-workspace-leases.js";
+import {
+  keepsWorkspaceSql,
+  leaseKeepsWorkspace,
+  stopBlocksIssueClaimSql,
+  unconfirmedStopMetadataSql,
+} from "./kept-workspace-leases.js";
 import {
   environmentRuntimeService,
   REUSABLE_SANDBOX_RESUME_FAILED_CODE,
@@ -17668,11 +17673,9 @@ export function heartbeatService(
                   and ${environmentLeases.cleanupStatus} = 'success', false)`),
               eq(environmentLeases.status, "pending_cleanup"),
               eq(environmentLeases.cleanupStatus, "failed"),
-              // A kept-workspace stop the provider has not confirmed yet: the
-              // old run's agent may still be running in that pod.
-              and(eq(environmentLeases.status, "stopped"), sql`coalesce(
-                (${environmentLeases.metadata}->'sandboxStop'->>'confirmedEpoch')::int, -1)
-                <> coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)`)),
+              // A kept-workspace stop of a cancelled or crashed run that the
+              // provider has not confirmed yet: its agent may still be running.
+              stopBlocksIssueClaimSql()),
           )).limit(1);
         const [finalization] = await tx.select({
           phase: nativeRunFinalizations.phase, leaseOwner: nativeRunFinalizations.leaseOwner,
@@ -18787,7 +18790,7 @@ export function heartbeatService(
             cleanupStatus: "pending",
             failureReason: "orphaned_active_lease_recovered",
             releasedAt: new Date(),
-            metadata: unconfirmedStopMetadataSql(),
+            metadata: unconfirmedStopMetadataSql({ blocksIssueClaim: true }),
           })
           .where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.status, "active")))
           .returning({ id: environmentLeases.id });

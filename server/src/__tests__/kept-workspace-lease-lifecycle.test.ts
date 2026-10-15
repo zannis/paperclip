@@ -26,6 +26,7 @@ import { environmentRuntimeService, ReusableSandboxResumeError } from "../servic
 import { environmentService } from "../services/environments.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { remoteExecutionHasStopped } from "../services/remote-execution-termination.ts";
+import { stopBlocksIssueClaimSql } from "../services/kept-workspace-leases.ts";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -513,7 +514,96 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
     });
   });
 
+  describe("provider call budgets", () => {
+    it("gives kept-workspace resume and destroy calls the full lifecycle budget", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const first = await stoppedLease(seeded, provider);
+      const runId = await newRun(seeded);
+      await acquire(seeded, provider, runId);
+      await finishRun(runId);
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "keep_running");
+      await services(provider).runtime.destroyReusableSandboxLeases({
+        companyId: seeded.companyId, issueId: seeded.issueId, failureReason: "issue_terminal_done",
+      });
+
+      const timeoutOf = (method: string) => provider.call.mock.calls.find((c) => c[1] === method)?.[3];
+      // The provider waits up to 40 s for a cold pod or for the volume to go;
+      // the default 30 s plugin RPC timeout would cut that short.
+      expect(timeoutOf("environmentResumeLease")).toBeGreaterThan(40_000);
+      expect(timeoutOf("environmentDestroyLease")).toBeGreaterThanOrEqual(60_000);
+      expect(timeoutOf("environmentStopLease")).toBeGreaterThanOrEqual(60_000);
+      expect(provider.sandboxes.has(first.lease.providerLeaseId!)).toBe(false);
+    });
+  });
+
+  describe("issue claims", () => {
+    it("block on an unconfirmed stop of a cancelled run, not on an idle stop", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider({ stopFails: () => true });
+      const idle = await warmTurn(seeded, provider);
+      await makeIdle(idle.lease.id);
+      await cleanupTick(provider);
+      const cancelledRun = await newRun(seeded);
+      await db.update(environmentLeases).set({ status: "expired" }).where(eq(environmentLeases.id, idle.lease.id));
+      const cancelled = await acquire(seeded, provider, cancelledRun);
+      await finishRun(cancelledRun, "cancelled");
+      await services(provider).runtime.releaseRunLeases(cancelledRun, "released", undefined, "stop_and_retain");
+      await db.update(environmentLeases).set({ status: "stopped" }).where(eq(environmentLeases.id, idle.lease.id));
+
+      const blocking = await db.select({ id: environmentLeases.id }).from(environmentLeases)
+        .where(stopBlocksIssueClaimSql());
+
+      expect((await leaseRow(idle.lease.id)).status).toBe("stopped");
+      expect((await leaseRow(cancelled.lease.id)).status).toBe("stopped");
+      expect(blocking.map((row) => row.id)).toEqual([cancelled.lease.id]);
+    });
+  });
+
   describe("terminal paths delete the kept volume", () => {
+    it("destroys a stopped kept workspace that an adapter change made unreachable", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const first = await stoppedLease(seeded, provider);
+
+      const runId = await newRun(seeded);
+      const { runtime } = services(provider);
+      const environment = (await environmentService(db).getById(seeded.environmentId))!;
+      const next = await runtime.acquireRunLease({
+        companyId: seeded.companyId, environment, issueId: seeded.issueId, agentId: seeded.agentId,
+        adapterType: "codex_local", heartbeatRunId: runId, persistedExecutionWorkspace: null,
+      });
+
+      expect(next.lease.providerLeaseId).not.toBe(first.lease.providerLeaseId);
+      expect(provider.sandboxes.has(first.lease.providerLeaseId!)).toBe(false);
+      expect(await leaseRow(first.lease.id)).toMatchObject({ status: "expired", cleanupStatus: "success" });
+    });
+
+    it("does not let the closed-issue sweep reach a lease bound to an open execution workspace", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const bound = await warmTurn(seeded, provider);
+      const projectId = randomUUID();
+      await db.insert(projects).values({ id: projectId, companyId: seeded.companyId, name: "Lab" });
+      const workspaceId = randomUUID();
+      await db.insert(executionWorkspaces).values({
+        id: workspaceId, companyId: seeded.companyId, projectId, mode: "isolated_workspace",
+        strategyType: "git_worktree", name: "lane", status: "active",
+      } as any);
+      await db.update(environmentLeases).set({ executionWorkspaceId: workspaceId })
+        .where(eq(environmentLeases.id, bound.lease.id));
+      const projectless = await stoppedLease(seeded, provider);
+      expect(projectless.lease.providerLeaseId).not.toBe(bound.lease.providerLeaseId);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, seeded.issueId));
+
+      await cleanupTick(provider);
+
+      expect(provider.sandboxes.has(projectless.lease.providerLeaseId!)).toBe(false);
+      expect(provider.sandboxes.has(bound.lease.providerLeaseId!)).toBe(true);
+      expect((await leaseRow(bound.lease.id)).status).toBe("retained");
+    });
+
+
     it("destroys a stopped Sandbox and its volume when the issue closes", async () => {
       const seeded = await seed();
       const provider = fakeProvider();
