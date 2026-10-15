@@ -20,7 +20,6 @@
 import { PatchStrategy, setHeaderOptions } from "@kubernetes/client-node";
 import type { KubeClients } from "./kube-client.js";
 import { isKubeNotFoundError } from "./lease-lifecycle.js";
-import { findPodForSandbox } from "./sandbox-cr-orchestrator.js";
 
 const SANDBOX_GROUP = "agents.x-k8s.io";
 const SANDBOX_VERSION = "v1alpha1";
@@ -254,6 +253,32 @@ export async function stopSuspendableSandbox(
   return "stopped";
 }
 
+/**
+ * The pod behind a Ready Sandbox. agent-sandbox names it after the Sandbox
+ * (v1alpha1 status carries no pod name); older controllers label it with the
+ * Sandbox name instead.
+ */
+async function readyPodName(clients: KubeClients, ref: SuspendableSandboxRef): Promise<string | null> {
+  try {
+    const pod = await clients.core.readNamespacedPod({ namespace: ref.namespace, name: ref.name }) as {
+      metadata?: { name?: string; deletionTimestamp?: unknown };
+    };
+    if (pod.metadata?.name && !pod.metadata.deletionTimestamp) return pod.metadata.name;
+  } catch (err) {
+    if (!isKubeNotFoundError(err)) throw err;
+  }
+  try {
+    const list = await clients.core.listNamespacedPod({
+      namespace: ref.namespace,
+      labelSelector: `agents.x-k8s.io/sandbox-name=${ref.name}`,
+    }) as { items?: Array<{ metadata?: { name?: string; deletionTimestamp?: unknown } }> };
+    return list.items?.find((pod) => pod.metadata?.name && !pod.metadata.deletionTimestamp)?.metadata?.name ?? null;
+  } catch (err) {
+    if (isKubeNotFoundError(err)) return null;
+    throw err;
+  }
+}
+
 export type SuspendableResumeResult =
   | { outcome: "ready"; podName: string | null; coldStart: boolean }
   | { outcome: "missing" }
@@ -365,7 +390,10 @@ export async function resumeSuspendableSandbox(
     if (!cr) return { outcome: "missing" };
     const ready = conditionAt(cr, "Ready", targetGeneration);
     if (ready?.status === "True") {
-      return { outcome: "ready", podName: await findPodForSandbox(clients, input.namespace, input.name), coldStart };
+      const podName = await readyPodName(clients, input);
+      // Ready with no pod left means the Sandbox was deleted meanwhile.
+      if (!podName) return { outcome: "missing" };
+      return { outcome: "ready", podName, coldStart };
     }
     if (Date.now() - startedAt >= input.timeoutMs) {
       throw new SandboxColdResumeNotReadyError(input.name, Date.now() - startedAt);

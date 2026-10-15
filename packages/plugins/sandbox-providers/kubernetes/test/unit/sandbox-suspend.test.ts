@@ -353,6 +353,20 @@ describe("resumeSuspendableSandbox", () => {
     expect(cluster.cr?.spec.replicas).toBe(1);
   });
 
+  it("reports missing when the Sandbox is deleted right after it became Ready", async () => {
+    const cluster = fakeCluster({ replicas: 1 });
+    cluster.core.readNamespacedPod.mockImplementation(async () => {
+      throw Object.assign(new Error("not found"), { code: 404 });
+    });
+    cluster.core.listNamespacedPod.mockImplementation(async () => {
+      throw Object.assign(new Error("not found"), { code: 404 });
+    });
+
+    await expect(
+      resumeSuspendableSandbox(cluster.clients, { ...BASE, ...REFRESH, epoch: 1 }),
+    ).resolves.toEqual({ outcome: "missing" });
+  });
+
   it("reports missing when the Sandbox CR is gone", async () => {
     const cluster = fakeCluster({ missing: true });
 

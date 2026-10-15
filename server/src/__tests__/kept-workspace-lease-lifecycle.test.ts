@@ -777,16 +777,52 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
     it("moves the epoch past the last stop when a lifecycle resume brings a stopped Sandbox back", async () => {
       const seeded = await seed();
       const provider = fakeProvider();
-      const first = await stoppedLease(seeded, provider);
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId);
+      // A released lease whose Sandbox a stop-only cleanup suspended at epoch 0.
+      await db.update(environmentLeases).set({ status: "released", releasedAt: new Date() })
+        .where(eq(environmentLeases.id, acquired.lease.id));
+      const sandbox = provider.sandboxes.get(acquired.lease.providerLeaseId!)!;
+      sandbox.replicas = 0;
+      sandbox.stopEpoch = 0;
       const environment = (await environmentService(db).getById(seeded.environmentId))!;
 
       const resumed = await services(provider).runtime.resumeRunLease({
-        environment, lease: toLease(await leaseRow(first.lease.id)),
+        environment, lease: toLease(await leaseRow(acquired.lease.id)),
       });
 
-      expect(resumed?.providerLeaseId).toBe(first.lease.providerLeaseId);
-      expect(provider.sandboxes.get(first.lease.providerLeaseId!)!.replicas).toBe(1);
-      expect((await leaseRow(first.lease.id)).metadata?.sandboxEpoch).toBe(1);
+      expect(resumed?.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+      expect(sandbox.replicas).toBe(1);
+      expect((await leaseRow(acquired.lease.id)).metadata?.sandboxEpoch).toBe(1);
+    });
+
+    it("leaves a stopped kept workspace to acquisition, which records the claiming run", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const first = await stoppedLease(seeded, provider);
+      const environment = (await environmentService(db).getById(seeded.environmentId))!;
+
+      await expect(services(provider).runtime.resumeRunLease({
+        environment, lease: toLease(await leaseRow(first.lease.id)),
+      })).rejects.toThrow(/acquiring it/);
+      expect(provider.sandboxes.get(first.lease.providerLeaseId!)!.replicas).toBe(0);
+    });
+
+    it("releases a Paperclip Runner lease instead of suspending it when its turn is stopped", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await db.update(environmentLeases).set({
+        metadata: sql`${environmentLeases.metadata} || '{"reusableSandboxLease":{"version":1,"adapterType":"paperclip_runner"}}'::jsonb`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
+      await finishRun(runId, "cancelled");
+
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+
+      expect(provider.methods()).not.toContain("environmentStopLease");
+      expect(provider.sandboxes.has(acquired.lease.providerLeaseId!)).toBe(false);
     });
 
     it("keeps a Paperclip Runner lease out of the stopped lifecycle when its run crashed", async () => {

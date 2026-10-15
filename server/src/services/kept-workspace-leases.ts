@@ -80,11 +80,22 @@ export function keptWorkspaceStopConfirmed(lease: LeaseMetadataHolder): boolean 
   return readKeptWorkspaceStop(lease).confirmedEpoch === leaseSandboxEpoch(lease);
 }
 
+/** The SQL twin of `!isPaperclipRunnerLease`: one definition of a Runner lease. */
+export function notPaperclipRunnerLeaseMetadataSql() {
+  return sql`coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType',
+    ${environmentLeases.metadata}->>'adapterType', '') <> 'paperclip_runner'`;
+}
+
 export function keepsWorkspaceSql() {
   return sql`(coalesce(${environmentLeases.metadata}->'workspaceSurvivesStop' = 'true'::jsonb, false)
     and coalesce(${environmentLeases.metadata}->'sandboxProviderPlugin' = 'true'::jsonb, false)
-    and coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType',
-      ${environmentLeases.metadata}->>'adapterType', '') <> 'paperclip_runner')`;
+    and ${notPaperclipRunnerLeaseMetadataSql()})`;
+}
+
+/** Lease metadata with the sandbox epoch moved on by one. */
+export function bumpSandboxEpochSql() {
+  return sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || jsonb_build_object(
+    'sandboxEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) + 1)`;
 }
 
 /** The run id holding a resume claim, as a uuid the primary key can match. */

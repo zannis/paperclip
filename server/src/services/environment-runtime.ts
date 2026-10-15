@@ -3,7 +3,7 @@ import { readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { hasNativeWorkspaceExportResume, releaseCompletedNativeWorkspaceExportRetention } from "./native-runtime/native-workspace-export-resume.js";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companySecrets, companySecretVersions, environmentLeases, environments, heartbeatRuns, issues } from "@paperclipai/db";
 import type {
@@ -50,6 +50,8 @@ import {
 import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import {
   STOP_KEY_SQL,
+  bumpSandboxEpochSql,
+  notPaperclipRunnerLeaseMetadataSql,
   leaseFencesSandboxEpoch,
   resumeClaimRunIdSql,
   stopUnconfirmedSql,
@@ -127,7 +129,7 @@ const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 // Paperclip Runner leases keep their retention: their next turn restores
 // harness state only through the reusable lease row.
 export function notPaperclipRunnerLeaseSql() {
-  return sql`coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType', '') <> 'paperclip_runner'`;
+  return notPaperclipRunnerLeaseMetadataSql();
 }
 
 // The idle bound of a retained warm lease is its environment's warm runner idle
@@ -3071,15 +3073,25 @@ function createSandboxEnvironmentDriver(
       const config = stripSandboxProviderEnvelope(await resolvePluginSandboxRuntimeConfig({
         environment: input.environment, lease: input.lease, provider: providerKey,
       }) as SandboxEnvironmentConfig);
-      // The provider fences resume on the sandbox epoch. Move it past the last
-      // stop, or this resume is refused as a late one.
+      // The provider fences resume on the sandbox epoch, so the one lease
+      // write allowed here moves the epoch past the last stop; otherwise the
+      // resume is refused as a late one. A `stopped` kept workspace is resumed
+      // only by an acquisition, which records the claiming run.
       let leaseMetadata: Record<string, unknown> | undefined = input.lease.metadata ?? undefined;
       if (leaseFencesSandboxEpoch(input.lease)) {
-        const [bumped] = await db.update(environmentLeases).set({
-          metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || jsonb_build_object(
-            'sandboxEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) + 1)`,
-        }).where(eq(environmentLeases.id, input.lease.id)).returning();
-        if (!bumped) throw new Error("The exact sandbox lease no longer exists.");
+        if (input.lease.status === "stopped") {
+          throw new Error("A stopped kept workspace is resumed only by a run acquiring it.");
+        }
+        const attemptId = input.lease.metadata?.pendingCleanupAttemptId;
+        const [bumped] = await db.update(environmentLeases).set({ metadata: bumpSandboxEpochSql() })
+          .where(and(
+            eq(environmentLeases.id, input.lease.id),
+            eq(environmentLeases.status, input.lease.status),
+            typeof attemptId === "string"
+              ? sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${attemptId}`
+              : undefined,
+          )).returning();
+        if (!bumped) throw new Error("The exact sandbox lease changed before its resume.");
         leaseMetadata = (bumped.metadata as Record<string, unknown> | null) ?? undefined;
       }
       const resumed = await pluginWorkerManager.call(pluginId, "environmentResumeLease", {
@@ -3461,8 +3473,7 @@ function createSandboxEnvironmentDriver(
         lastUsedAt: now,
         ...(keepsWorkspace
           ? {
-              metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || jsonb_build_object(
-                'sandboxEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) + 1,
+              metadata: sql`${bumpSandboxEpochSql()} || jsonb_build_object(
                 'resumeClaimRunId', ${heartbeatRunId}::text,
                 'resumeClaimedAt', ${now.toISOString()}::text)`,
             }
@@ -4238,7 +4249,7 @@ export function environmentRuntimeService(
     return "failed";
   }
 
-  return {
+  const runtime = {
     getDriver,
 
     /**
@@ -4376,9 +4387,13 @@ export function environmentRuntimeService(
           // A stop cannot keep this lease's files, or nothing would ever resume
           // or destroy what it kept (an ephemeral lease), so it is released
           // instead.
+          // A Paperclip Runner lease on a kept volume is released too: a cold
+          // pod would not have its harness state, and its next turn restores
+          // from the verified backup instead.
           const leaseDisposition = providerResourceDisposition === "stop_and_retain" && (
             leaseLosesWorkspaceOnStop(leaseSnapshot) ||
-            (leaseKeepsWorkspace(leaseSnapshot) && leaseSnapshot.leasePolicy !== "reuse_by_environment")
+            (leaseFencesSandboxEpoch(leaseSnapshot) &&
+              (!leaseKeepsWorkspace(leaseSnapshot) || leaseSnapshot.leasePolicy !== "reuse_by_environment"))
           )
             ? undefined
             : providerResourceDisposition;
@@ -4611,7 +4626,10 @@ export function environmentRuntimeService(
         const [claimedRow] = await db
           .update(environmentLeases)
           .set(leaseRow.status === "pending_cleanup"
-            ? { metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'sandboxStopAndRetain'` }
+            ? {
+                updatedAt: new Date(),
+                metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'sandboxStopAndRetain'`,
+              }
             : {
                 status: "pending_cleanup",
                 failureReason,
@@ -4968,6 +4986,9 @@ export function environmentRuntimeService(
           // which can be reopened for a closed issue; the workspace sweep owns
           // it, under the reopen fence.
           isNull(environmentLeases.executionWorkspaceId),
+          // The destroy needs the environment; a deleted one already
+          // destroyed or parked its leases.
+          isNotNull(environmentLeases.environmentId),
           keepsWorkspaceSql(),
           inArray(issues.status, ["done", "cancelled"]),
           sql`not ${leaseHasLiveRunSql()}`,
@@ -4977,7 +4998,7 @@ export function environmentRuntimeService(
       for (const row of rows) {
         if (!row.issueId) continue;
         try {
-          const records = await this.destroyReusableSandboxLeases({
+          const records = await runtime.destroyReusableSandboxLeases({
             companyId: row.companyId,
             issueId: row.issueId,
             projectlessOnly: true,
@@ -5102,6 +5123,7 @@ export function environmentRuntimeService(
       return await driver.getRunnerIngressEndpoint(input);
     },
   };
+  return runtime;
 }
 
 export type EnvironmentRuntimeService = ReturnType<typeof environmentRuntimeService>;

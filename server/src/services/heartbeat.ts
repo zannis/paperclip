@@ -610,6 +610,7 @@ import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.j
 import { retryChatControlAdmission } from "./chat-control-admission-retry.js";
 import {
   keepsWorkspaceSql,
+  leaseHasLiveRunSql,
   leaseKeepsWorkspace,
   stopBlocksIssueClaimSql,
   unconfirmedStopMetadataSql,
@@ -10439,11 +10440,7 @@ export function heartbeatService(
     // A confirmed stop ends its run's remote execution: acknowledge a pending
     // Stop and start messages that waited for it, as the cleanup sweep does.
     for (const { companyId, runId } of stoppedRuns) {
-      await (async () => {
-        await acknowledgeRemoteStop(runId, companyId);
-        const run = await getRun(runId);
-        if (run) await resumeRemoteStopComments(run);
-      })().catch(() => logger.warn({ runId }, "could not reconsider messages after a kept-workspace stop"));
+      await settleRemoteStop(runId, companyId);
     }
     return { ...stopped, terminalDestroyed: terminal.destroyed + closedWorkspaces };
   }
@@ -10466,6 +10463,9 @@ export function heartbeatService(
         inArray(environmentLeases.status, ["retained", "stopped"]),
         keepsWorkspaceSql(),
         inArray(executionWorkspaces.status, ["archived", "cleanup_failed"]),
+        // Rows the destroy would skip must not fill the page every tick.
+        isNotNull(environmentLeases.environmentId),
+        sql`not ${leaseHasLiveRunSql()}`,
       ))
       .limit(100);
     let destroyed = 0;
@@ -10489,6 +10489,18 @@ export function heartbeatService(
       }
     }
     return destroyed;
+  }
+
+  // A provider receipt just ended this run's remote execution: acknowledge a
+  // pending Stop and start the messages that waited for it. Delivery failure
+  // must not revert the cleanup; a new message can still use the persisted
+  // receipt on its next admission.
+  async function settleRemoteStop(runId: string, companyId: string) {
+    await (async () => {
+      await acknowledgeRemoteStop(runId, companyId);
+      const run = await getRun(runId);
+      if (run) await resumeRemoteStopComments(run);
+    })().catch((err) => logger.warn({ err, runId }, "could not reconsider messages after a remote stop"));
   }
 
   async function acknowledgeRemoteStop(runId: string, companyId: string) {
@@ -19079,13 +19091,7 @@ export function heartbeatService(
       }).where(and(eq(environmentLeases.id, lease.id),
         sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${claimed}`));
       if (lease.heartbeatRunId) {
-        // Delivery failure must not revert successful provider cleanup. A new
-        // message can still use the persisted receipt on its next admission.
-        await (async () => {
-          await acknowledgeRemoteStop(lease.heartbeatRunId!, lease.companyId);
-          const run = await getRun(lease.heartbeatRunId!);
-          if (run) await resumeRemoteStopComments(run);
-        })().catch(() => logger.warn({ leaseId: lease.id }, "could not reconsider messages after cleanup retry"));
+        await settleRemoteStop(lease.heartbeatRunId, lease.companyId);
       }
     }
 
