@@ -1,0 +1,19 @@
+doc/ONLYBOTS-PATCHES.md
+  s_27265c9c99128c::t_828c093160821f 54,56,209-243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a66c49e5bd94cd83de3ebfd31a870c04d90ca1ef",
+  "prompts": {},
+  "sessions": {
+    "s_27265c9c99128c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b616e9bc-8c42-4f11-a2ea-e60b596edb5f",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
