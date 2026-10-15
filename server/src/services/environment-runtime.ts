@@ -64,8 +64,10 @@ import {
   leaseLosesWorkspaceOnStop,
   leaseSandboxEpoch,
   readKeptWorkspaceStop,
+  sandboxEpochSql,
   unconfirmedStopMetadataSql,
 } from "./kept-workspace-leases.js";
+import { HttpError } from "../errors.js";
 import {
   createEffectiveRunConfigFingerprints,
   type EffectiveRunConfigFingerprint,
@@ -2452,6 +2454,20 @@ function createSandboxEnvironmentDriver(
                 );
               },
             });
+          } else if (
+            leaseFencesSandboxEpoch(reusableLease) &&
+            error instanceof HttpError &&
+            error.status === 409 &&
+            reusableLease.provider &&
+            reusableLease.providerLeaseId
+          ) {
+            // A concurrent claim moved the epoch on during this resume, so the
+            // workspace now belongs to that claim. Losing the race is retryable.
+            throw new ReusableSandboxResumeError({
+              provider: reusableLease.provider,
+              providerLeaseId: reusableLease.providerLeaseId,
+              cause: error,
+            });
           }
           throw error;
         }
@@ -3470,6 +3486,7 @@ function createSandboxEnvironmentDriver(
   async function claimReusableLeaseForResume(
     lease: EnvironmentLease | null | undefined,
     heartbeatRunId: string | null,
+    retried = false,
   ): Promise<EnvironmentLease | null> {
     if (!lease) return null;
     const now = new Date();
@@ -3502,15 +3519,27 @@ function createSandboxEnvironmentDriver(
       )
       .returning();
     if (touched) return toEnvironmentLeaseSnapshot(touched);
-    // A stopped kept workspace is never bypassed by a fresh sandbox, which
-    // would fork the workspace: while it is still stopped, the run fails
-    // with a retryable resume error instead.
-    if (lease.status === "stopped" && lease.providerLeaseId && lease.provider) {
-      const [current] = await db.select({ status: environmentLeases.status })
-        .from(environmentLeases).where(eq(environmentLeases.id, lease.id));
-      if (current?.status === "stopped") {
-        throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
-      }
+    if (!leaseKeepsWorkspace(lease) || !lease.providerLeaseId || !lease.provider) return null;
+    // A kept workspace is never bypassed by a fresh sandbox, which would fork
+    // the workspace. While it lives on, in this row or in the row a concurrent
+    // run handed it off to, the run fails with a retryable resume error;
+    // only a destroyed workspace lets it start fresh.
+    const [current] = await db
+      .select({
+        row: environmentLeases,
+        blocksClaim: sql<boolean>`${stopBlocksIssueClaimSql()}`,
+      })
+      .from(environmentLeases)
+      .where(eq(environmentLeases.id, lease.id));
+    if (!current) return null;
+    // A blocking stop was confirmed between the refused claim and this read.
+    if (!retried && current.row.status === "stopped" && !current.blocksClaim) {
+      return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
+    }
+    const handedOff = current.row.status === "expired" &&
+      (current.row.metadata as Record<string, unknown> | null)?.retiredByResume === true;
+    if (handedOff || ["active", "released", "retained", "stopped"].includes(current.row.status)) {
+      throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
     }
     return null;
   }
@@ -4206,7 +4235,7 @@ export function environmentRuntimeService(
       .where(and(
         eq(environmentLeases.id, lease.id),
         eq(environmentLeases.status, "stopped"),
-        sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${epoch}`,
+        sql`${sandboxEpochSql()} = ${epoch}`,
         sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not distinct from ${previous.attemptId ?? null}::text`,
         notLive,
       ))
@@ -4216,7 +4245,7 @@ export function environmentRuntimeService(
     const sameAttempt = and(
       eq(environmentLeases.id, lease.id),
       eq(environmentLeases.status, "stopped"),
-      sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${epoch}`,
+      sql`${sandboxEpochSql()} = ${epoch}`,
       sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' = ${attemptId}`,
     );
     try {
@@ -4245,19 +4274,24 @@ export function environmentRuntimeService(
     } catch (error) {
       // A stop the provider refused because a newer resume owns the Sandbox
       // lands here too. While that resume's claim moved the epoch on, the
-      // write below matches nothing; if the row lags the Sandbox's fence, it
-      // backs off and warns like any failed stop.
+      // write below matches nothing and the stop simply lost the race; if the
+      // row lags the Sandbox's fence, it backs off and warns like any failed
+      // stop.
       const attempts = (previous.attempts ?? 0) + 1;
-      const retryAfterMs = Date.now() + Math.min(
-        KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
-        KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
-      );
-      await db.update(environmentLeases).set({
+      // Runs blocked by this stop retry every 30 s; so does the stop.
+      const retryAfterMs = Date.now() + (readKeptWorkspaceStop(claimed).blocksIssueClaim
+        ? KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS
+        : Math.min(
+          KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
+          KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
+        ));
+      const backedOff = await db.update(environmentLeases).set({
         metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
           (${environmentLeases.metadata}->${STOP_KEY_SQL}) - 'attemptId' || ${JSON.stringify({
             attempts, retryAfterMs, lastError: error instanceof Error ? error.name : "unknown",
           })}::jsonb)`,
-      }).where(sameAttempt);
+      }).where(sameAttempt).returning({ id: environmentLeases.id });
+      if (backedOff.length === 0) return "skipped";
       if (attempts === KEPT_WORKSPACE_STOP_WARN_ATTEMPTS) {
         // The error itself can carry provider detail; log the identifiers only.
         logger.warn(

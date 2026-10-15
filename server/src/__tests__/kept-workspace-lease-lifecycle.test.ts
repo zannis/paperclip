@@ -529,11 +529,89 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const first = await stoppedLease(seeded, provider);
 
       const runId = await newRun(seeded);
-      await expect(acquire(seeded, provider, runId)).rejects.toThrow();
+      // Losing the race is retryable: the run gets the bounded resume retry.
+      await expect(acquire(seeded, provider, runId)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
 
       // The row stays with the claim that owns the provider fence.
       expect(await leaseRow(first.lease.id)).toMatchObject({ status: "stopped" });
       expect((await leaseRow(first.lease.id)).metadata?.sandboxEpoch).toBe(2);
+    });
+
+    it("never forks a workspace that a concurrent run handed off between selection and claim", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const first = await stoppedLease(seeded, provider);
+      const runId = await newRun(seeded);
+      const otherRun = await newRun(seeded);
+      // Just before this run's claim lands, another run hands the workspace
+      // off: the old row is retired and a new active row owns the Sandbox.
+      await db.execute(sql.raw(`
+        create function test_handoff_before_claim() returns trigger language plpgsql as $$
+        begin
+          if old.status = 'stopped' and new.metadata->>'resumeClaimRunId' = '${runId}' then
+            update environment_leases set status = 'expired',
+              metadata = metadata || '{"retiredByResume":true}'::jsonb where id = old.id;
+            insert into environment_leases (company_id, environment_id, execution_workspace_id, issue_id,
+              heartbeat_run_id, status, lease_policy, provider, provider_lease_id, metadata)
+            select company_id, environment_id, execution_workspace_id, issue_id, '${otherRun}'::uuid, 'active',
+              lease_policy, provider, provider_lease_id, metadata - 'retiredByResume'
+            from environment_leases where id = old.id;
+            return null;
+          end if;
+          return new;
+        end $$;
+        create trigger test_handoff_before_claim before update on environment_leases
+          for each row when (pg_trigger_depth() < 1) execute function test_handoff_before_claim();
+      `));
+      try {
+        const error = await acquire(seeded, provider, runId).catch((e: unknown) => e);
+
+        expect(error).toBeInstanceOf(ReusableSandboxResumeError);
+        expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
+        expect(await leaseRow(first.lease.id)).toMatchObject({ status: "expired" });
+      } finally {
+        await db.execute(sql.raw(`
+          drop trigger test_handoff_before_claim on environment_leases;
+          drop function test_handoff_before_claim();
+        `));
+      }
+    });
+
+    it("claims a workspace whose blocking stop is confirmed right after the claim was refused", async () => {
+      const seeded = await seed();
+      let failStop = true;
+      const provider = fakeProvider({ stopFails: () => failStop });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      failStop = false;
+      // The provider confirms the stop right after the next run's claim was
+      // refused, before that run reads the row again.
+      await db.execute(sql.raw(`
+        create function test_confirm_after_claim() returns trigger language plpgsql as $$
+        begin
+          update environment_leases set metadata = jsonb_set(metadata, '{sandboxStop,confirmedEpoch}',
+              to_jsonb(coalesce((metadata->>'sandboxEpoch')::int, 0)))
+            where id = '${acquired.lease.id}' and status = 'stopped';
+          return null;
+        end $$;
+        create trigger test_confirm_after_claim after update on environment_leases
+          for each statement when (pg_trigger_depth() < 1) execute function test_confirm_after_claim();
+      `));
+      const nextRun = await newRun(seeded);
+      let resumed;
+      try {
+        resumed = await acquire(seeded, provider, nextRun);
+      } finally {
+        await db.execute(sql.raw(`
+          drop trigger test_confirm_after_claim on environment_leases;
+          drop function test_confirm_after_claim();
+        `));
+      }
+
+      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+      expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
     });
 
     it("lets a resume win over a stop that is still in flight, without losing the pod", async () => {
@@ -551,8 +629,12 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const turn = await warmTurn(seeded, provider, ["notes.md", "kept"]);
       await makeIdle(turn.lease.id);
 
-      await cleanupTick(provider);
+      const { heartbeat } = services(provider);
+      await heartbeat.sweepIdleRetainedLeases();
+      const kept = await heartbeat.sweepKeptWorkspaceLeases();
 
+      // The superseded stop is not a stop failure.
+      expect(kept.failed).toBe(0);
       const sandbox = provider.sandboxes.get(turn.lease.providerLeaseId!)!;
       expect(sandbox.replicas).toBe(1);
       expect(sandbox.files.get("notes.md")).toBe("kept");

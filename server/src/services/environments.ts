@@ -32,6 +32,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, forbidden } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { sandboxEpochSql } from "./kept-workspace-leases.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
 import {
   resourceStatus,
@@ -1557,7 +1558,7 @@ export function environmentService(db: Db) {
                         "stopped",
                       ]),
                       input.expectedReusableLeaseSandboxEpoch !== undefined
-                        ? sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${input.expectedReusableLeaseSandboxEpoch}`
+                        ? sql`${sandboxEpochSql()} = ${input.expectedReusableLeaseSandboxEpoch}`
                         : undefined,
                     ),
                   )
@@ -1609,7 +1610,7 @@ export function environmentService(db: Db) {
                         "stopped",
                       ]),
                       input.expectedReusableLeaseSandboxEpoch !== undefined
-                        ? sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${input.expectedReusableLeaseSandboxEpoch}`
+                        ? sql`${sandboxEpochSql()} = ${input.expectedReusableLeaseSandboxEpoch}`
                         : undefined,
                     ),
                   )
