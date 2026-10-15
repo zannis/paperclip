@@ -497,6 +497,24 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       expect(old.failureReason).toBeNull();
     });
 
+    it("does not bring back as retained a lease an issue close destroyed after the run's release read it", async () => {
+      const seeded = await seed();
+      const leaseId = await insertLease(seeded, { status: "active" });
+      // The issue close hook destroys the lease once the run is terminal.
+      await db.update(environmentLeases)
+        .set({ status: "expired", cleanupStatus: "success", releasedAt: new Date() })
+        .where(eq(environmentLeases.id, leaseId));
+
+      // The finalizer's warm release, which read the lease while it was active.
+      const retained = await environmentService(db).releaseLease(leaseId, "retained", {
+        cleanupStatus: "success",
+        expectedStatus: "active",
+      });
+
+      expect(retained).toBeNull();
+      expect((await leaseRow(leaseId)).status).toBe("expired");
+    });
+
     it("keeps the confirmed stop of a released lease when a new run takes its Sandbox over", async () => {
       const seeded = await seed();
       const providerLeaseId = "pc-stopped";

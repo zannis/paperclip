@@ -18909,10 +18909,11 @@ export function heartbeatService(
           const result = await environmentRuntime.destroyRunLease({
             environment,
             lease,
-            // An idle reclaim keeps its reason, so the row says why the
-            // sandbox went away.
-            failureReason: lease.failureReason === RETAINED_LEASE_IDLE_FAILURE_REASON
-              ? RETAINED_LEASE_IDLE_FAILURE_REASON
+            // An idle reclaim or an issue-close teardown keeps its reason, so
+            // the row says why the sandbox went away.
+            failureReason: lease.failureReason === RETAINED_LEASE_IDLE_FAILURE_REASON ||
+                lease.failureReason?.startsWith("issue_terminal_")
+              ? lease.failureReason
               : "pending_cleanup_retry",
           });
           if (result && result.status !== "pending_cleanup") {

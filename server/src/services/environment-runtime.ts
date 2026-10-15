@@ -4059,10 +4059,12 @@ export function environmentRuntimeService(
             providerResourceDisposition === "keep_running" &&
             leaseSnapshot.leasePolicy === "reuse_by_environment"
           ) {
+            // Retain only a lease that is still this run's active lease. An
+            // issue close that destroyed it after the select above wins.
             const lease = await environmentsSvc.releaseLease(
               leaseRow.id,
               "retained",
-              { cleanupStatus: "success" },
+              { cleanupStatus: "success", expectedStatus: "active" },
             );
             if (lease) {
               released.push({

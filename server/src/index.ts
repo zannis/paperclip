@@ -1247,8 +1247,10 @@ async function startServerWithDatabaseTeardown(
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
-  // Queue idle retained warm sandboxes first, so the pending_cleanup sweep
-  // below tears them down on the same tick.
+  // Queue idle retained warm sandboxes first. The pending_cleanup sweep below
+  // tears a queued lease down once its last write is older than its backoff,
+  // so the effective idle bound is the larger of `runnerIdleTimeoutMs` and
+  // that backoff.
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
       .sweepIdleRetainedLeases()
