@@ -2348,6 +2348,7 @@ describe("sandbox adapter execution targets", () => {
       vi.stubEnv("npm_config_proxy", "http://proxy-user:proxy-pass@proxy.internal:3128");
       vi.stubEnv("HTTP_PROXY", "proxy-user:proxy-pass@proxy.internal:3128");
       vi.stubEnv("ALL_PROXY", "socks5://proxy-user:pass word@proxy.internal:1080");
+      vi.stubEnv("NPM_CONFIG_HTTPS_PROXY", "http:///proxy-user:proxy-pass@proxy.internal:3128");
       vi.stubEnv("NO_PROXY", "localhost");
       const runner = { execute: vi.fn(async () => okResult()) };
 
@@ -2358,6 +2359,7 @@ describe("sandbox adapter execution targets", () => {
           npm_config_proxy: "http://proxy-user:proxy-pass@proxy.internal:3128",
           HTTP_PROXY: "proxy-user:proxy-pass@proxy.internal:3128",
           ALL_PROXY: "socks5://proxy-user:pass word@proxy.internal:1080",
+          NPM_CONFIG_HTTPS_PROXY: "http:///proxy-user:proxy-pass@proxy.internal:3128",
           NO_PROXY: "localhost",
         },
       });

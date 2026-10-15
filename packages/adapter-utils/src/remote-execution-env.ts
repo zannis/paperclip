@@ -72,7 +72,7 @@ export function sanitizeSandboxSetupEnv(
 // A proxy value with userinfo (`user:pass@`), with or without a scheme, is a
 // server credential, not a shared setting.
 function isSharedNetworkSetting(key: string, value: string): boolean {
-  return SANDBOX_SETUP_ENV_SHARED_KEYS.has(key.toUpperCase()) && !/^\s*(?:[a-z][a-z0-9+.-]*:\/\/)?[^/]*@/i.test(value);
+  return SANDBOX_SETUP_ENV_SHARED_KEYS.has(key.toUpperCase()) && !/^\s*(?:[a-z][a-z0-9+.-]*:[\/\\]*)?[^/\\]*@/i.test(value);
 }
 
 export function sanitizeRemoteExecutionEnv(
