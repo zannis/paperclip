@@ -535,7 +535,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
 
       expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
       // The cancelled run's Stop is still settled, on the next tick.
-      expect(await settleMark(acquired.lease.id)).toBe(true);
+      expect(await settleMark(acquired.lease.id)).toEqual({ dueAtMs: 0 });
       await services(provider).heartbeat.sweepKeptWorkspaceLeases();
       expect(await settleMark(acquired.lease.id)).toBeUndefined();
     });
@@ -594,19 +594,26 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       await finishRun(runId, "cancelled");
       await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
       const { runtime } = services(provider);
-      expect(await settleMark(acquired.lease.id)).toBe(true);
+      expect(await settleMark(acquired.lease.id)).toEqual({ dueAtMs: 0 });
+      // An ended lease with a run but no mark has nothing to settle.
+      const done = await leaseRow(acquired.lease.id);
+      const endedRun = await newRun(seeded, "succeeded");
+      await db.insert(environmentLeases).values({
+        companyId: done.companyId, environmentId: done.environmentId, issueId: done.issueId,
+        heartbeatRunId: endedRun, status: "expired", leasePolicy: done.leasePolicy, provider: done.provider,
+        providerLeaseId: "pc-ended", cleanupStatus: "success", metadata: {},
+      });
 
-      const first = await runtime.claimRemoteStopSettles();
-      const overlapping = await runtime.claimRemoteStopSettles();
+      const claims = await Promise.all([runtime.claimRemoteStopSettles(), runtime.claimRemoteStopSettles()]);
+      const first = claims.flat();
       expect(first.map((c) => c.runId)).toEqual([runId]);
-      expect(overlapping).toEqual([]);
 
       await runtime.finishRemoteStopSettle(acquired.lease.id, first[0]!.token, false);
       // A failed settle waits out a backoff before it is claimed again.
-      expect(await settleMark(acquired.lease.id)).toMatchObject({ retryAfterMs: expect.any(Number) });
+      expect(await settleMark(acquired.lease.id)).toMatchObject({ dueAtMs: expect.any(Number) });
       expect(await runtime.claimRemoteStopSettles()).toEqual([]);
       await db.update(environmentLeases).set({
-        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{remoteStopSettlePending,retryAfterMs}', '0'::jsonb)`,
+        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{remoteStopSettlePending,dueAtMs}', '0'::jsonb)`,
       }).where(eq(environmentLeases.id, acquired.lease.id));
       const retried = await runtime.claimRemoteStopSettles();
       await runtime.finishRemoteStopSettle(acquired.lease.id, retried[0]!.token, true);
@@ -640,7 +647,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       // The stop is confirmed, and the process dies before settling it.
       const { runtime, heartbeat } = services(provider);
       expect((await runtime.reconcileStoppedLeases()).confirmed).toBe(1);
-      expect(await settleMark(acquired.lease.id)).toBe(true);
+      expect(await settleMark(acquired.lease.id)).toEqual({ dueAtMs: 0 });
 
       await heartbeat.sweepKeptWorkspaceLeases();
       expect(await settleMark(acquired.lease.id)).toBeUndefined();

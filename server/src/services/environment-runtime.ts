@@ -133,10 +133,10 @@ const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
 // messages the reconciler still has to settle.
 const REMOTE_STOP_SETTLE_PENDING_KEY = "remoteStopSettlePending";
 // A settle claim older than this belongs to a sweep that died.
-const REMOTE_STOP_SETTLE_CLAIM_MS = 2 * 60_000;
+const REMOTE_STOP_SETTLE_CLAIM_MS = 5 * 60_000;
 const REMOTE_STOP_SETTLE_RETRY_MS = 60_000;
 const REMOTE_STOP_SETTLE_PAGE_SIZE = 20;
-const KEPT_WORKSPACE_STOP_WAIT_POLL_MS = 1_000;
+const KEPT_WORKSPACE_STOP_WAIT_POLL_MS = 2_000;
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -3584,10 +3584,15 @@ function createSandboxEnvironmentDriver(
               blocksClaim: sql<boolean>`${stopBlocksIssueClaimSql()}`,
               inFlight: sql<boolean>`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not null
                 and ${stopRetryAfterMsSql()} > ${Date.now()})`,
+              // A run cancelled while it waits must not resume the workspace.
+              runLive: sql<boolean>`exists (select 1 from heartbeat_runs as waiting_run
+                where waiting_run.id = ${heartbeatRunId}::uuid
+                  and waiting_run.status in ('queued', 'scheduled_retry', 'running'))`,
             })
             .from(environmentLeases)
             .where(eq(environmentLeases.id, lease.id));
           if (reread?.status !== "stopped") return null;
+          if (!reread.runLive) break;
           claimable = !reread.blocksClaim;
           waiting = !claimable && reread.inFlight;
           if (waiting) await new Promise((resolve) => setTimeout(resolve, KEPT_WORKSPACE_STOP_WAIT_POLL_MS));
@@ -4322,7 +4327,7 @@ export function environmentRuntimeService(
     // restart or a failed settle.
     const settleMarker = claimed.heartbeatRunId &&
       readKeptWorkspaceStop(claimed).blocksIssueClaim
-      ? { [REMOTE_STOP_SETTLE_PENDING_KEY]: true }
+      ? { [REMOTE_STOP_SETTLE_PENDING_KEY]: { dueAtMs: 0 } }
       : {};
     // An outcome counts only when the row still belongs to this attempt; a
     // resume that claimed the row meanwhile owns it now.
@@ -5125,25 +5130,29 @@ export function environmentRuntimeService(
      * at a time, so a restart or an overlapping sweep waits on few claims.
      */
     async claimRemoteStopSettles(): Promise<Array<{ leaseId: string; companyId: string; runId: string; token: string }>> {
-      const mark = sql`${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text`;
       const token = randomUUID();
       const now = Date.now();
-      // The mark is `true` (due), a claim {claim, at}, or a failed settle
-      // waiting out its backoff {retryAfterMs}.
-      const due = db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
+      // The mark is {dueAtMs, claim?}: due at 0 when the stop is confirmed,
+      // later while a sweep holds it or a failed settle backs off. A lease
+      // without a mark has no dueAtMs and is never due.
+      const due = and(
         // A confirmed stop leaves the row stopped; a Sandbox found gone, expired.
         inArray(environmentLeases.status, ["stopped", "expired"]),
-        sql`(${mark} = 'true'::jsonb or coalesce((${mark}->>'retryAfterMs')::bigint,
-          (${mark}->>'at')::bigint + ${REMOTE_STOP_SETTLE_CLAIM_MS}::bigint, 0) <= ${now}::bigint)`,
-      )).limit(REMOTE_STOP_SETTLE_PAGE_SIZE);
+        sql`(${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text->>'dueAtMs')::bigint <= ${now}::bigint`,
+      );
+      const page = db.select({ id: environmentLeases.id }).from(environmentLeases).where(due)
+        .limit(REMOTE_STOP_SETTLE_PAGE_SIZE)
+        // An overlapping sweep skips rows this one is claiming.
+        .for("update", { skipLocked: true });
       const rows = await db.update(environmentLeases)
         .set({
           metadata: sql`case when ${environmentLeases.heartbeatRunId} is null
             then ${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text
             else ${environmentLeases.metadata} || jsonb_build_object(${REMOTE_STOP_SETTLE_PENDING_KEY}::text,
-              jsonb_build_object('claim', ${token}::text, 'at', ${now}::bigint)) end`,
+              jsonb_build_object('dueAtMs', ${now + REMOTE_STOP_SETTLE_CLAIM_MS}::bigint, 'claim', ${token}::text)) end`,
         })
-        .where(inArray(environmentLeases.id, due))
+        // The due check again, so a row claimed concurrently is re-checked.
+        .where(and(inArray(environmentLeases.id, page), due))
         .returning({ leaseId: environmentLeases.id, companyId: environmentLeases.companyId, runId: environmentLeases.heartbeatRunId });
       return rows.flatMap((row) => (row.runId ? [{ ...row, runId: row.runId, token }] : []));
     },
@@ -5155,7 +5164,7 @@ export function environmentRuntimeService(
           metadata: settled
             ? sql`${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text`
             : sql`${environmentLeases.metadata} || jsonb_build_object(${REMOTE_STOP_SETTLE_PENDING_KEY}::text,
-              jsonb_build_object('retryAfterMs', ${Date.now() + REMOTE_STOP_SETTLE_RETRY_MS}::bigint))`,
+              jsonb_build_object('dueAtMs', ${Date.now() + REMOTE_STOP_SETTLE_RETRY_MS}::bigint))`,
         })
         .where(and(
           eq(environmentLeases.id, leaseId),
