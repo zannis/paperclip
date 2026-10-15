@@ -485,7 +485,11 @@ async function executeTurn(ctx: AdapterExecutionContext): Promise<AdapterExecuti
       ),
     );
     const runtimeEnv = ensurePathInEnv(effectiveEnv);
-    await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv, {
+    // Sandbox setup commands get the run's own env, never the server's process.env.
+    // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+    const targetSetupEnv =
+      executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? env : runtimeEnv;
+    await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, targetSetupEnv, {
       installCommand: ctx.runtimeCommandSpec?.installCommand ?? null,
       timeoutSec,
     });

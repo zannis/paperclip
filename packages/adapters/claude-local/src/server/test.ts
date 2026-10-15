@@ -149,9 +149,12 @@ export async function testEnvironment(
     })),
   );
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Sandbox probes get the run's own env, never the server's process.env.
+  // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+  const targetSetupEnv = targetIsSandbox ? env : runtimeEnv;
   let localRuntimeCommand: string | null = null;
   try {
-    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
+    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, targetSetupEnv);
     if (!targetIsRemote) {
       localRuntimeCommand = await resolveAdapterExecutionTargetCommandForLogs(
         command,

@@ -315,6 +315,9 @@ export async function testEnvironment(
     if (typeof value === "string") env[key] = value;
   }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Sandbox probes get the run's own env, never the server's process.env.
+  // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+  const targetSetupEnv = targetIsSandbox ? env : runtimeEnv;
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -325,7 +328,7 @@ export async function testEnvironment(
   });
   if (installCheck) checks.push(installCheck);
   try {
-    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
+    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, targetSetupEnv);
     checks.push({
       code: "codex_command_resolvable",
       level: "info",

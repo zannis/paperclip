@@ -28,6 +28,7 @@ import {
   adapterExecutionTargetToRemoteSpec,
   adapterExecutionTargetUsesPaperclipBridge,
   ensureAdapterExecutionTargetCommandResolvable,
+  ensureAdapterExecutionTargetRuntimeCommandInstalled,
   formatAdapterExecutionTimeoutErrorMessage,
   formatAdapterExecutionTimeoutStartLogLine,
   parseAdapterExecutionTarget,
@@ -2246,6 +2247,139 @@ describe("sandbox adapter execution targets", () => {
         SAFE_VALUE: "visible",
       },
     }));
+  });
+
+  describe("host env never reaches sandbox probes, installs or shell commands", () => {
+    const okResult = (stdout = "") => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout,
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    });
+    const missingResult = () => ({ ...okResult(), exitCode: 1 });
+    const sandboxTarget = (runner: AdapterSandboxExecutionTarget["runner"]): AdapterSandboxExecutionTarget => ({
+      kind: "remote",
+      transport: "sandbox",
+      remoteCwd: "/workspace",
+      runner,
+    });
+
+    it("drops host-inherited values from the resolvability probe", async () => {
+      vi.stubEnv("PATH", "/host/bin:/usr/bin");
+      vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
+      const runner = { execute: vi.fn(async () => okResult("/usr/bin/agent-cli\n")) };
+
+      await ensureAdapterExecutionTargetCommandResolvable(
+        "agent-cli",
+        sandboxTarget(runner),
+        "/local/workspace",
+        { HOST_ONLY_SECRET: "host-secret-value", PATH: "/remote/bin:/usr/bin", RUN_TOKEN: "run-token-value" },
+      );
+
+      expect(runner.execute).toHaveBeenCalledTimes(1);
+      expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({
+        args: ["-c", "command -v 'agent-cli'"],
+        env: { PATH: "/remote/bin:/usr/bin", RUN_TOKEN: "run-token-value" },
+      }));
+    });
+
+    it("runs the resolvability install fallback without values inherited from the host", async () => {
+      vi.stubEnv("PATH", "/host/bin:/usr/bin");
+      vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
+      vi.stubEnv("NPM_CONFIG_REGISTRY", "https://host.registry.test");
+      const runner = {
+        execute: vi.fn()
+          .mockResolvedValueOnce(missingResult())
+          .mockResolvedValueOnce(okResult())
+          .mockResolvedValueOnce(okResult("/usr/bin/agent-cli\n")),
+      };
+
+      await ensureAdapterExecutionTargetCommandResolvable(
+        "agent-cli",
+        sandboxTarget(runner),
+        "/local/workspace",
+        {
+          PATH: "/host/bin:/usr/bin",
+          HOST_ONLY_SECRET: "host-secret-value",
+          NPM_CONFIG_REGISTRY: "https://run.registry.test",
+          RUN_TOKEN: "run-token-value",
+        },
+        { installCommand: "npm install -g agent-cli" },
+      );
+
+      expect(runner.execute).toHaveBeenCalledTimes(3);
+      for (const call of runner.execute.mock.calls) {
+        expect(call[0].env).toEqual({ NPM_CONFIG_REGISTRY: "https://run.registry.test", RUN_TOKEN: "run-token-value" });
+      }
+      expect(runner.execute).toHaveBeenNthCalledWith(2, expect.objectContaining({
+        args: ["-c", "npm install -g agent-cli"],
+      }));
+    });
+
+    it("keeps operator network settings that equal the host's", async () => {
+      vi.stubEnv("HTTPS_PROXY", "http://proxy.internal:3128");
+      vi.stubEnv("NODE_EXTRA_CA_CERTS", "/etc/ssl/internal-ca.pem");
+      vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
+      const runner = { execute: vi.fn(async () => okResult()) };
+
+      await runAdapterExecutionTargetShellCommand("run-env-3", sandboxTarget(runner), "npm install -g agent-cli", {
+        cwd: "/local/workspace",
+        env: {
+          HTTPS_PROXY: "http://proxy.internal:3128",
+          NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem",
+          HOST_ONLY_SECRET: "host-secret-value",
+        },
+      });
+
+      expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({
+        env: { HTTPS_PROXY: "http://proxy.internal:3128", NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem" },
+      }));
+    });
+
+    it("drops host-inherited values from sandbox shell commands but keeps run-set values", async () => {
+      vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
+      vi.stubEnv("SHARED_KEY", "host-value");
+      const runner = { execute: vi.fn(async () => okResult()) };
+
+      await runAdapterExecutionTargetShellCommand("run-env-1", sandboxTarget(runner), "true", {
+        cwd: "/local/workspace",
+        env: {
+          HOST_ONLY_SECRET: "host-secret-value",
+          SHARED_KEY: "run-value",
+          RUN_TOKEN: "run-token-value",
+        },
+      });
+
+      expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({
+        env: { SHARED_KEY: "run-value", RUN_TOKEN: "run-token-value" },
+      }));
+    });
+
+    it("drops host-inherited values from the runtime install step", async () => {
+      vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
+      const runner = {
+        execute: vi.fn()
+          .mockResolvedValueOnce(missingResult())
+          .mockResolvedValueOnce(okResult()),
+      };
+
+      await ensureAdapterExecutionTargetRuntimeCommandInstalled({
+        runId: "run-env-2",
+        target: sandboxTarget(runner),
+        installCommand: "npm install -g agent-cli",
+        detectCommand: "agent-cli",
+        cwd: "/workspace",
+        env: { HOST_ONLY_SECRET: "host-secret-value", RUN_TOKEN: "run-token-value" },
+      });
+
+      expect(runner.execute).toHaveBeenCalledTimes(2);
+      for (const call of runner.execute.mock.calls) {
+        expect(call[0].env).toEqual({ RUN_TOKEN: "run-token-value" });
+      }
+    });
   });
 
   it("treats SSH targets as bridge-only", () => {

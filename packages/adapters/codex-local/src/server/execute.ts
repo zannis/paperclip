@@ -1031,18 +1031,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    // Sandbox setup commands get the run's own env, never the server's process.env.
+    // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+    const targetSetupEnv =
+      executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? env : runtimeEnv;
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({
       runId,
       target: executionTarget,
       installCommand: ctx.runtimeCommandSpec?.installCommand,
       detectCommand: ctx.runtimeCommandSpec?.detectCommand,
       cwd,
-      env: runtimeEnv,
+      env: targetSetupEnv,
       timeoutSec,
       graceSec,
       onLog,
     });
-    await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
+    await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, targetSetupEnv);
     const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
     const loggedEnv = buildInvocationEnvForLogs(env, {
       runtimeEnv,
