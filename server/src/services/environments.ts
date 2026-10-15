@@ -1402,6 +1402,12 @@ export function environmentService(db: Db) {
        */
       replacesReusableLeaseId?: string | null;
       /**
+       * The sandbox epoch this acquisition's resume claim moved the replaced
+       * or reacquired row to. A concurrent claim moves it further, and the
+       * provider then fences on that newer epoch, so the handoff must lose.
+       */
+      expectedReusableLeaseSandboxEpoch?: number;
+      /**
        * Reactivate the exact lease row already owned by this heartbeat run.
        * Native same-run recovery re-enters environment startup after the
        * provider process is interrupted; it must not manufacture a second
@@ -1550,6 +1556,9 @@ export function environmentService(db: Db) {
                         "retained",
                         "stopped",
                       ]),
+                      input.expectedReusableLeaseSandboxEpoch !== undefined
+                        ? sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${input.expectedReusableLeaseSandboxEpoch}`
+                        : undefined,
                     ),
                   )
                   .returning({ id: environmentLeases.id });
@@ -1599,6 +1608,9 @@ export function environmentService(db: Db) {
                         "retained",
                         "stopped",
                       ]),
+                      input.expectedReusableLeaseSandboxEpoch !== undefined
+                        ? sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${input.expectedReusableLeaseSandboxEpoch}`
+                        : undefined,
                     ),
                   )
                   .returning()

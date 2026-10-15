@@ -93,6 +93,7 @@ function fakeProvider(options: {
         if (keepsWorkspace) {
           if (epoch === null) throw new Error("resume without an epoch");
           if (sandbox.stopEpoch >= epoch) throw new Error("resume fenced by a newer stop");
+          if (sandbox.resumeEpoch > epoch) throw new Error("resume fenced by a newer resume");
           sandbox.resumeEpoch = epoch;
         }
         const coldResumed = sandbox.replicas === 0;
@@ -491,6 +492,48 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
 
       expect(sandbox.replicas).toBe(0);
       expect((await leaseRow(first.lease.id)).metadata?.sandboxStop).toMatchObject({ confirmedEpoch: 1 });
+    });
+
+    it("does not take over a pod whose cancelled run's stop is not confirmed yet", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider({ stopFails: () => true });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      expect((await leaseRow(acquired.lease.id)).status).toBe("stopped");
+
+      const nextRun = await newRun(seeded);
+      const error = await acquire(seeded, provider, nextRun).catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ReusableSandboxResumeError);
+      expect(provider.methods().filter((m) => m === "environmentResumeLease")).toHaveLength(0);
+      expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
+    });
+
+    it("loses the handoff when a concurrent claim moved the epoch past this resume", async () => {
+      const seeded = await seed();
+      let concurrentRun = "";
+      const provider = fakeProvider({
+        onResume: async () => {
+          if (concurrentRun) return;
+          // A second run claims the same stopped row while this resume runs.
+          concurrentRun = await newRun(seeded);
+          await db.update(environmentLeases).set({
+            metadata: sql`${environmentLeases.metadata} || ${JSON.stringify({
+              sandboxEpoch: 2, resumeClaimRunId: concurrentRun, resumeClaimedAt: new Date().toISOString(),
+            })}::jsonb`,
+          }).where(eq(environmentLeases.status, "stopped"));
+        },
+      });
+      const first = await stoppedLease(seeded, provider);
+
+      const runId = await newRun(seeded);
+      await expect(acquire(seeded, provider, runId)).rejects.toThrow();
+
+      // The row stays with the claim that owns the provider fence.
+      expect(await leaseRow(first.lease.id)).toMatchObject({ status: "stopped" });
+      expect((await leaseRow(first.lease.id)).metadata?.sandboxEpoch).toBe(2);
     });
 
     it("lets a resume win over a stop that is still in flight, without losing the pod", async () => {

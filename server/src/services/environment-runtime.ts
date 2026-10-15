@@ -51,6 +51,7 @@ import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import {
   STOP_KEY_SQL,
   bumpSandboxEpochSql,
+  stopBlocksIssueClaimSql,
   notPaperclipRunnerLeaseMetadataSql,
   leaseFencesSandboxEpoch,
   resumeClaimRunIdSql,
@@ -2401,6 +2402,9 @@ function createSandboxEnvironmentDriver(
               reusableLease?.heartbeatRunId !== input.heartbeatRunId
                 ? reusableLease?.id
                 : null,
+            ...(providerLease && reusableLease && leaseFencesSandboxEpoch(reusableLease)
+              ? { expectedReusableLeaseSandboxEpoch: leaseSandboxEpoch(reusableLease) }
+              : {}),
           });
         } catch (error) {
           // The conditional lease insert rejected, so no lease row exists. A
@@ -3491,10 +3495,24 @@ function createSandboxEnvironmentDriver(
         and(
           eq(environmentLeases.id, lease.id),
           inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
+          // A cancelled or crashed run's agent may still run in that pod
+          // until its stop is confirmed; no other run may take it over.
+          sql`not ${stopBlocksIssueClaimSql()}`,
         ),
       )
       .returning();
-    return touched ? toEnvironmentLeaseSnapshot(touched) : null;
+    if (touched) return toEnvironmentLeaseSnapshot(touched);
+    // A stopped kept workspace is never bypassed by a fresh sandbox, which
+    // would fork the workspace: while it is still stopped, the run fails
+    // with a retryable resume error instead.
+    if (lease.status === "stopped" && lease.providerLeaseId && lease.provider) {
+      const [current] = await db.select({ status: environmentLeases.status })
+        .from(environmentLeases).where(eq(environmentLeases.id, lease.id));
+      if (current?.status === "stopped") {
+        throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
+      }
+    }
+    return null;
   }
 
   /**
@@ -4225,16 +4243,10 @@ export function environmentRuntimeService(
         throw new Error("The provider returned no stop receipt.");
       }
     } catch (error) {
-      // The worker RPC carries only the message across, not a string code.
-      if ((error as { code?: unknown } | null)?.code === "sandbox_stop_superseded" ||
-          (error instanceof Error && /superseded by resume epoch/.test(error.message))) {
-        // A newer resume owns the Sandbox at the provider.
-        await db.update(environmentLeases).set({
-          metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
-            (${environmentLeases.metadata}->${STOP_KEY_SQL}) - 'attemptId' || '{"retryAfterMs":0}'::jsonb)`,
-        }).where(sameAttempt);
-        return "skipped";
-      }
+      // A stop the provider refused because a newer resume owns the Sandbox
+      // lands here too. While that resume's claim moved the epoch on, the
+      // write below matches nothing; if the row lags the Sandbox's fence, it
+      // backs off and warns like any failed stop.
       const attempts = (previous.attempts ?? 0) + 1;
       const retryAfterMs = Date.now() + Math.min(
         KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
