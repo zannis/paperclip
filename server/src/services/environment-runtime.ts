@@ -124,6 +124,9 @@ const SANDBOX_ORPHAN_CLEANUP_WRITE_ERROR_KIND = "sandbox_orphan_cleanup_write_fa
 // idle sweep reads is small. The page bounds one tick; the oldest rows go first.
 const RETAINED_LEASE_IDLE_SWEEP_PAGE_SIZE = 500;
 export { RETAINED_LEASE_IDLE_FAILURE_REASON };
+// A run's provider resume of a retained lease can take up to a minute after it
+// stamped lastUsedAt; however short the idle timeout, the sweep waits this out.
+const RETAINED_LEASE_MIN_IDLE_MS = 2 * 60_000;
 
 // A kept-workspace stop is one provider call of at most a minute. The claim
 // outlasts it, so a concurrent sweep cannot start a second stop meanwhile.
@@ -2476,7 +2479,11 @@ function createSandboxEnvironmentDriver(
                     providerLeaseId: acquiredLease.providerLeaseId,
                     leaseMetadata: acquiredLease.metadata ?? undefined,
                   },
-                  resolvePluginSandboxRpcTimeoutMs(workerConfig),
+                  // A kept-workspace destroy waits for the volume to go.
+                  keptWorkspaceAwareRpcTimeoutMs(
+                    { metadata: { ...acquiredLease.metadata, sandboxProviderPlugin: true } },
+                    workerConfig,
+                  ),
                 );
               },
             });
@@ -4948,10 +4955,10 @@ export function environmentRuntimeService(
             sql`${environments.config}->>'runnerLifecycleMode' = 'warm'`,
             // Idle by its own environment's bound, so leases that are older
             // but not idle yet never fill the page.
-            sql`extract(epoch from ${environmentLeases.lastUsedAt}) * 1000 <= ${now.getTime()}::bigint - (case
+            sql`extract(epoch from ${environmentLeases.lastUsedAt}) * 1000 <= ${now.getTime()}::bigint - greatest(case
               when jsonb_typeof(${environments.config}->'runnerIdleTimeoutMs') = 'number'
                 then (${environments.config}->>'runnerIdleTimeoutMs')::numeric
-              else ${DEFAULT_WARM_RUNNER_IDLE_TIMEOUT_MS}::numeric end)`,
+              else ${DEFAULT_WARM_RUNNER_IDLE_TIMEOUT_MS}::numeric end, ${RETAINED_LEASE_MIN_IDLE_MS}::numeric)`,
             notPaperclipRunnerLeaseMetadataSql(),
             workspaceKind,
             sql`not exists (
@@ -4988,10 +4995,16 @@ export function environmentRuntimeService(
       ];
 
       let claimed = 0;
+      const idleTimeoutByEnvironment = new Map<string, number | null>();
       for (const { lease: leaseRow, environmentConfig } of leaseRows) {
-        const idleTimeoutMs = retainedLeaseIdleTimeoutMs({ driver: "sandbox", config: environmentConfig });
+        const environmentId = leaseRow.environmentId ?? "";
+        if (!idleTimeoutByEnvironment.has(environmentId)) {
+          idleTimeoutByEnvironment.set(environmentId,
+            retainedLeaseIdleTimeoutMs({ driver: "sandbox", config: environmentConfig }));
+        }
+        const idleTimeoutMs = idleTimeoutByEnvironment.get(environmentId) ?? null;
         if (idleTimeoutMs === null) continue;
-        const idleSince = new Date(now.getTime() - idleTimeoutMs);
+        const idleSince = new Date(now.getTime() - Math.max(idleTimeoutMs, RETAINED_LEASE_MIN_IDLE_MS));
         if (leaseRow.lastUsedAt > idleSince) continue;
         const leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
         if (leaseKeepsWorkspace(leaseSnapshot)) {

@@ -911,6 +911,31 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
     });
   });
 
+  describe("provider call budgets after a rejected lease insert", () => {
+    it("gives the orphan teardown of a just-acquired kept-workspace Sandbox the full lifecycle budget", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      await db.execute(sql.raw(`
+        create function test_reject_lease() returns trigger language plpgsql as $$
+        begin raise exception 'lease insert rejected'; end $$;
+        create trigger test_reject_lease before insert on environment_leases
+          for each row execute function test_reject_lease();
+      `));
+      try {
+        await acquire(seeded, provider, runId).catch(() => undefined);
+      } finally {
+        await db.execute(sql.raw(`
+          drop trigger test_reject_lease on environment_leases;
+          drop function test_reject_lease();
+        `));
+      }
+
+      const destroy = provider.call.mock.calls.find((c) => c[1] === "environmentDestroyLease");
+      expect(destroy?.[3]).toBeGreaterThanOrEqual(60_000);
+    });
+  });
+
   describe("issue claims", () => {
     it("block on an unconfirmed stop of a cancelled run, not on an idle stop", async () => {
       const seeded = await seed();

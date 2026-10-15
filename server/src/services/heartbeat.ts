@@ -18959,6 +18959,13 @@ export function heartbeatService(
       // the environment is lifecycle context and only a legacy fallback.
       const isOrphanEphemeralLease = lease.leasePolicy === "ephemeral";
       const useRecordedTeardown = isOrphanEphemeralLease || !environment || hasStopOnlyCleanup(lease);
+      // An idle reclaim or an issue-close teardown keeps its reason through
+      // retries, so the row says why the sandbox went away and an idle one
+      // keeps its issue-claim exemption.
+      const retryFailureReason = lease.failureReason === RETAINED_LEASE_IDLE_FAILURE_REASON ||
+          lease.failureReason?.startsWith("issue_terminal_")
+        ? lease.failureReason
+        : "pending_cleanup_retry";
 
       // Do not consume a finite cleanup attempt while the provider plugin is
       // briefly unavailable. A plugin worker restart, a plugin reload, or a
@@ -19040,12 +19047,7 @@ export function heartbeatService(
           const result = await environmentRuntime.destroyRunLease({
             environment,
             lease,
-            // An idle reclaim or an issue-close teardown keeps its reason, so
-            // the row says why the sandbox went away.
-            failureReason: lease.failureReason === RETAINED_LEASE_IDLE_FAILURE_REASON ||
-                lease.failureReason?.startsWith("issue_terminal_")
-              ? lease.failureReason
-              : "pending_cleanup_retry",
+            failureReason: retryFailureReason,
           });
           if (result && result.status !== "pending_cleanup") {
             destroyed += 1;
@@ -19061,7 +19063,7 @@ export function heartbeatService(
           await environmentsSvc.releaseLease(lease.id, "pending_cleanup", {
             expectedPendingCleanupAttemptId: claimed,
             cleanupStatus: "failed",
-            failureReason: "pending_cleanup_retry",
+            failureReason: retryFailureReason,
           });
         }
         // Log a constant errorKind only. The exception can carry a credential in

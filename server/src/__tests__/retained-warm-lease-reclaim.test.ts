@@ -333,6 +333,35 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       expect(holding.map((row) => row.id)).toEqual([failedLeaseId]);
     });
 
+    it("keeps the idle reason, and the issue unblocked, when a recorded teardown of an idle lease fails", async () => {
+      const seeded = await seed();
+      const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
+      await db.update(environmentLeases).set({
+        status: "pending_cleanup", cleanupStatus: "failed", failureReason: "retained_lease_idle_timeout",
+        environmentId: null, releasedAt: new Date(), updatedAt: minutesAgo(16),
+      }).where(eq(environmentLeases.id, leaseId));
+      const provider = fakeProvider({ destroyFails: true });
+
+      await heartbeatService(db, { pluginWorkerManager: provider.pluginWorkerManager })
+        .sweepPendingCleanupLeases({ backoffMs: 5 * 60_000 });
+
+      expect(provider.call.mock.calls.map((call) => call[1])).toEqual(["environmentDestroyLease"]);
+      expect(await leaseRow(leaseId)).toMatchObject({
+        status: "pending_cleanup", failureReason: "retained_lease_idle_timeout",
+      });
+      expect(await db.select({ id: environmentLeases.id }).from(environmentLeases).where(leaseHoldsIssueClaimSql()))
+        .toEqual([]);
+    });
+
+    it("never reclaims a lease inside the resume budget, however short the idle timeout", async () => {
+      const seeded = await seed({ lifecycle: { runnerLifecycleMode: "warm", runnerIdleTimeoutMs: 1_000 } });
+      const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: new Date(Date.now() - 30_000) });
+      const provider = fakeProvider();
+
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
+      expect((await leaseRow(leaseId)).status).toBe("retained");
+    });
+
     it("records a failed provider destroy as a failure, never as cleaned up", async () => {
       const seeded = await seed();
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
