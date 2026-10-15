@@ -298,6 +298,10 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       const row = await leaseRow(leaseId);
       expect(row.status).toBe("pending_cleanup");
       expect(row.cleanupStatus).toBe("failed");
+      // The pending_cleanup sweep retries it on its normal backoff.
+      expect(row.metadata).toMatchObject({ pendingCleanupInFlight: false });
+      expect(row.metadata?.pendingCleanupRetryAfterMs).toBeGreaterThan(Date.now());
+      expect(row.metadata?.pendingCleanupRetryAfterMs).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
     });
 
     it("runs on the heartbeat lease cleanup sweep", async () => {
@@ -422,6 +426,27 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       expect(row.failureReason).toBe("issue_terminal_done");
     });
 
+    it("keeps a Paperclip Runner lease on the existing retention lifecycle", async () => {
+      const seeded = await seed({ issueStatus: "done" });
+      const leaseId = await insertLease(seeded, {
+        status: "active",
+        metadata: { reusableSandboxLease: { version: 1, adapterType: "paperclip_runner" } },
+      });
+      const provider = fakeProvider();
+      const heartbeat = heartbeatService(db, { pluginWorkerManager: provider.pluginWorkerManager });
+
+      await heartbeat.releaseEnvironmentLeasesForRun({
+        runId: seeded.runId,
+        companyId: seeded.companyId,
+        agentId: seeded.agentId,
+        status: "succeeded",
+        providerResourceDisposition: "keep_running",
+      });
+
+      expect(provider.call).not.toHaveBeenCalled();
+      expect((await leaseRow(leaseId)).status).toBe("retained");
+    });
+
     it("keeps the warm Sandbox when the issue is still open", async () => {
       const seeded = await seed({ issueStatus: "in_progress" });
       const leaseId = await insertLease(seeded, { status: "active" });
@@ -467,8 +492,9 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       expect(next).toMatchObject({ status: "active", providerLeaseId });
       const old = await leaseRow(oldLeaseId);
       expect(old.status).toBe("expired");
-      expect(old.cleanupStatus).not.toBe("success");
-      expect(old.failureReason).toBe("reusable_lease_handed_off");
+      expect(old.cleanupStatus).toBeNull();
+      // A handoff is the normal warm path, not a failure.
+      expect(old.failureReason).toBeNull();
     });
 
     it("keeps the confirmed stop of a released lease when a new run takes its Sandbox over", async () => {
@@ -494,7 +520,7 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       });
 
       expect(await leaseRow(oldLeaseId)).toMatchObject({
-        status: "expired", cleanupStatus: "success", failureReason: "reusable_lease_handed_off",
+        status: "expired", cleanupStatus: "success", failureReason: null,
       });
     });
   });

@@ -10271,6 +10271,9 @@ export function heartbeatService(
           eq(environmentLeases.heartbeatRunId, runId),
           eq(environmentLeases.status, "active"),
           eq(environmentLeases.leasePolicy, "reuse_by_environment"),
+          // A Paperclip Runner lease carries harness state its issue may need
+          // again; it keeps the existing retention and close-hook lifecycle.
+          sql`coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType', '') <> 'paperclip_runner'`,
           inArray(issues.status, ["done", "cancelled"]),
         ),
       )

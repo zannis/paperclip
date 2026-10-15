@@ -1520,7 +1520,6 @@ export function environmentService(db: Db) {
                     releasedAt: now,
                     lastUsedAt: now,
                     updatedAt: now,
-                    failureReason: "reusable_lease_handed_off",
                     cleanupStatus: sql`case when ${environmentLeases.status} = 'retained' then null else ${environmentLeases.cleanupStatus} end`,
                   })
                   .where(

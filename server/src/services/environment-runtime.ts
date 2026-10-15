@@ -100,6 +100,7 @@ const SANDBOX_ORPHAN_CLEANUP_WRITE_ERROR_KIND = "sandbox_orphan_cleanup_write_fa
 const RETAINED_LEASE_IDLE_SWEEP_PAGE_SIZE = 500;
 const RETAINED_LEASE_IDLE_FAILURE_REASON = "retained_lease_idle_timeout";
 const RETAINED_LEASE_IDLE_CLEANUP_LEASE_MS = 15 * 60_000;
+const RETAINED_LEASE_IDLE_RETRY_BACKOFF_MS = 5 * 60_000;
 
 function isPaperclipRunnerLease(metadata: Record<string, unknown> | null): boolean {
   return isRecord(metadata?.reusableSandboxLease) &&
@@ -2408,7 +2409,7 @@ function createSandboxEnvironmentDriver(
           issueId: input.issueId,
           agentId: input.agentId,
           executionWorkspaceId: input.executionWorkspaceId,
-          reusableProviderLeaseId,
+          reusableProviderLeaseId: reusableLease?.providerLeaseId ?? null,
           // Forward a caller deadline so the provider configures a provider-side
           // expiry at or before it and returns the real provider expiry.
           requestedExpiresAt: requestedExpiresAtParam(input.requestedExpiresAt),
@@ -4513,21 +4514,40 @@ export function environmentRuntimeService(
 
         const leaseSnapshot = toEnvironmentLeaseSnapshot(claimedRow);
         const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
-        if (!driver?.destroyRunLease) {
-          failed += 1;
+        let destroyedLease: EnvironmentLease | null = null;
+        try {
+          destroyedLease = driver?.destroyRunLease
+            ? await driver.destroyRunLease({
+                environment,
+                lease: leaseSnapshot,
+                failureReason: RETAINED_LEASE_IDLE_FAILURE_REASON,
+              })
+            : null;
+        } catch {
+          destroyedLease = null;
+        }
+        if (destroyedLease?.status === "expired") {
+          reclaimed += 1;
           continue;
         }
-        try {
-          const lease = await driver.destroyRunLease({
-            environment,
-            lease: leaseSnapshot,
-            failureReason: RETAINED_LEASE_IDLE_FAILURE_REASON,
-          });
-          if (lease?.status === "expired") reclaimed += 1;
-          else failed += 1;
-        } catch {
-          failed += 1;
-        }
+        failed += 1;
+        // Hand the failed attempt to the pending_cleanup sweep on its normal
+        // backoff instead of holding it until the in-flight claim expires.
+        await db
+          .update(environmentLeases)
+          .set({
+            metadata: sql`${environmentLeases.metadata} || ${JSON.stringify({
+              pendingCleanupInFlight: false,
+              pendingCleanupRetryAfterMs: Date.now() + RETAINED_LEASE_IDLE_RETRY_BACKOFF_MS,
+            })}::jsonb`,
+          })
+          .where(
+            and(
+              eq(environmentLeases.id, claimedRow.id),
+              eq(environmentLeases.status, "pending_cleanup"),
+              sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${String(claimedRow.metadata?.pendingCleanupAttemptId)}`,
+            ),
+          );
       }
       return { reclaimed, failed };
     },
