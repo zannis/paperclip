@@ -346,6 +346,34 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       expect((await leaseRow(leaseId)).status).toBe("retained");
     });
 
+    it("waits for the provider worker instead of parking the lease as a failed cleanup", async () => {
+      const seeded = await seed();
+      const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
+      const provider = fakeProvider();
+      const runtime = environmentRuntimeService(db, {
+        pluginWorkerManager: { ...provider.pluginWorkerManager, isRunning: () => false } as unknown as PluginWorkerManager,
+      });
+
+      expect(await runtime.reclaimIdleRetainedLeases()).toEqual({ reclaimed: 0, failed: 0 });
+
+      expect(provider.call).not.toHaveBeenCalled();
+      expect(await leaseRow(leaseId)).toMatchObject({ status: "retained", cleanupStatus: "success" });
+    });
+
+    it("never destroys a Sandbox another reusable lease row still holds", async () => {
+      const seeded = await seed();
+      const providerLeaseId = "pc-shared";
+      const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16), providerLeaseId });
+      await insertLease(seeded, { status: "released", providerLeaseId });
+      const provider = fakeProvider();
+      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
+
+      expect(await runtime.reclaimIdleRetainedLeases()).toEqual({ reclaimed: 0, failed: 0 });
+
+      expect(provider.call).not.toHaveBeenCalled();
+      expect((await leaseRow(leaseId)).status).toBe("retained");
+    });
+
     it("does not destroy a Sandbox that a new run is resuming when the sweep runs", async () => {
       const seeded = await seed({ runStatus: "running" });
       const destroyed: string[] = [];

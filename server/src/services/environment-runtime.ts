@@ -101,11 +101,7 @@ const RETAINED_LEASE_IDLE_SWEEP_PAGE_SIZE = 500;
 const RETAINED_LEASE_IDLE_FAILURE_REASON = "retained_lease_idle_timeout";
 const RETAINED_LEASE_IDLE_CLEANUP_LEASE_MS = 15 * 60_000;
 const RETAINED_LEASE_IDLE_RETRY_BACKOFF_MS = 5 * 60_000;
-
-function isPaperclipRunnerLease(metadata: Record<string, unknown> | null): boolean {
-  return isRecord(metadata?.reusableSandboxLease) &&
-    metadata.reusableSandboxLease.adapterType === "paperclip_runner";
-}
+const RETAINED_LEASE_IDLE_RECLAIM_ERROR_KIND = "retained_lease_idle_reclaim_failed";
 
 // The idle bound of a retained warm lease is its environment's warm runner idle
 // timeout. An environment that is not warm, or whose config no longer parses,
@@ -4425,11 +4421,19 @@ export function environmentRuntimeService(
      * sandbox. A destroy that fails or never returns leaves the claimed row to
      * the pending_cleanup sweep, so the row reads `expired`/`success` only after
      * the provider destroy returned.
+     *
+     * Paperclip Runner leases are left alone. Their next turn restores harness
+     * state only through a reusable lease row, so a reclaimed sandbox would
+     * leave the turn unable to continue. Those sandboxes keep their existing
+     * lifetime: the issue close hook, the execution workspace close, or the
+     * environment delete.
      */
     async reclaimIdleRetainedLeases(input: { now?: Date } = {}): Promise<{ reclaimed: number; failed: number }> {
       const now = input.now ?? new Date();
-      // Only warm sandbox environments have an idle bound. Filtering them here
-      // keeps unbounded rows from filling the page ahead of reclaimable ones.
+      // Select only rows the sweep may reclaim: retained leases of warm
+      // sandbox environments, not Paperclip Runner leases, and not sharing their
+      // sandbox with another live or reusable lease row. Rows the loop would
+      // skip never fill the page ahead of reclaimable ones.
       const leaseRows = await db
         .select({ lease: environmentLeases })
         .from(environmentLeases)
@@ -4440,6 +4444,14 @@ export function environmentRuntimeService(
             eq(environmentLeases.leasePolicy, "reuse_by_environment"),
             eq(environments.driver, "sandbox"),
             sql`${environments.config}->>'runnerLifecycleMode' = 'warm'`,
+            sql`coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType', '') <> 'paperclip_runner'`,
+            sql`not exists (
+              select 1 from ${environmentLeases} as other
+              where other.id <> ${environmentLeases.id}
+                and other.provider = ${environmentLeases.provider}
+                and other.provider_lease_id = ${environmentLeases.providerLeaseId}
+                and other.status in ('active', 'released', 'retained', 'pending_cleanup')
+            )`,
           ),
         )
         .orderBy(asc(environmentLeases.lastUsedAt))
@@ -4460,30 +4472,18 @@ export function environmentRuntimeService(
         if (idleTimeoutMs === null) continue;
         const idleSince = new Date(now.getTime() - idleTimeoutMs);
         if (leaseRow.lastUsedAt > idleSince) continue;
-        // A Paperclip Runner turn continues from the harness state inside its
-        // sandbox, and only a reusable lease row leads the next turn to restore
-        // it elsewhere. Its retained sandbox keeps living until the issue or
-        // the workspace closes.
-        if (isPaperclipRunnerLease(leaseRow.metadata)) continue;
 
-        // A provider lease id names one physical sandbox. Never tear down a
-        // sandbox that a different lease row still owns.
-        if (leaseRow.provider && leaseRow.providerLeaseId) {
-          const [otherOwner] = await db
-            .select({ id: environmentLeases.id })
-            .from(environmentLeases)
-            .where(
-              and(
-                ne(environmentLeases.id, leaseRow.id),
-                eq(environmentLeases.provider, leaseRow.provider),
-                eq(environmentLeases.providerLeaseId, leaseRow.providerLeaseId),
-                inArray(environmentLeases.status, ["active", "pending_cleanup"]),
-              ),
-            )
-            .limit(1);
-          if (otherOwner) continue;
+        // A provider worker that is not running yet (for example during
+        // startup) cannot destroy. Leave the lease retained for a later tick
+        // rather than parking it as a failed cleanup.
+        const leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
+        const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
+        if (!driver?.destroyRunLease) continue;
+        if (driver.isPendingCleanupWorkerReady && !(await driver.isPendingCleanupWorkerReady({ environment, lease: leaseSnapshot }))) {
+          continue;
         }
 
+        const attemptId = randomUUID();
         const claimedRow = await db
           .update(environmentLeases)
           .set({
@@ -4496,7 +4496,7 @@ export function environmentRuntimeService(
             // runs a second destroy while this one is in flight nor overwrites
             // its outcome.
             metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || ${JSON.stringify({
-              pendingCleanupAttemptId: randomUUID(),
+              pendingCleanupAttemptId: attemptId,
               pendingCleanupInFlight: true,
               pendingCleanupLeaseExpiresAtMs: now.getTime() + RETAINED_LEASE_IDLE_CLEANUP_LEASE_MS,
             })}::jsonb`,
@@ -4512,19 +4512,20 @@ export function environmentRuntimeService(
           .then((rows) => rows[0] ?? null);
         if (!claimedRow) continue;
 
-        const leaseSnapshot = toEnvironmentLeaseSnapshot(claimedRow);
-        const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
         let destroyedLease: EnvironmentLease | null = null;
         try {
-          destroyedLease = driver?.destroyRunLease
-            ? await driver.destroyRunLease({
-                environment,
-                lease: leaseSnapshot,
-                failureReason: RETAINED_LEASE_IDLE_FAILURE_REASON,
-              })
-            : null;
+          destroyedLease = await driver.destroyRunLease({
+            environment,
+            lease: toEnvironmentLeaseSnapshot(claimedRow),
+            failureReason: RETAINED_LEASE_IDLE_FAILURE_REASON,
+          });
         } catch {
-          destroyedLease = null;
+          // Log a constant kind only: the exception can carry provider
+          // credentials in its message or cause.
+          logger.warn(
+            { errorKind: RETAINED_LEASE_IDLE_RECLAIM_ERROR_KIND, leaseId: claimedRow.id },
+            "idle retained sandbox reclaim failed; the pending_cleanup sweep retries it",
+          );
         }
         if (destroyedLease?.status === "expired") {
           reclaimed += 1;
@@ -4538,14 +4539,14 @@ export function environmentRuntimeService(
           .set({
             metadata: sql`${environmentLeases.metadata} || ${JSON.stringify({
               pendingCleanupInFlight: false,
-              pendingCleanupRetryAfterMs: Date.now() + RETAINED_LEASE_IDLE_RETRY_BACKOFF_MS,
+              pendingCleanupRetryAfterMs: now.getTime() + RETAINED_LEASE_IDLE_RETRY_BACKOFF_MS,
             })}::jsonb`,
           })
           .where(
             and(
               eq(environmentLeases.id, claimedRow.id),
               eq(environmentLeases.status, "pending_cleanup"),
-              sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${String(claimedRow.metadata?.pendingCleanupAttemptId)}`,
+              sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${attemptId}`,
             ),
           );
       }

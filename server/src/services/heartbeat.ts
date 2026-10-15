@@ -10308,7 +10308,10 @@ export function heartbeatService(
       ? await runClosedItsReusableLeaseIssue(input.runId, input.companyId)
       : null;
     const providerResourceDisposition = closedIssueStatus ? "destroy" : terminalDisposition;
-    if (providerResourceDisposition === "destroy") {
+    // The self-close destroy applies only to leases with no warm native
+    // session (Paperclip Runner leases keep retention), so it skips the
+    // environment-wide session close below.
+    if (terminalDisposition === "destroy") {
       const closeResult = await (
         options.closeWarmNativeSessionsForRun ??
         (async ({ runId, reason }) => {
