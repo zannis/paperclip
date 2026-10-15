@@ -1,7 +1,7 @@
 import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 
 const PLUGIN_ID = "paperclip.kubernetes-sandbox-provider";
-const PLUGIN_VERSION = "0.1.0-alpha.1";
+const PLUGIN_VERSION = "0.1.0-alpha.2";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
@@ -23,6 +23,7 @@ const manifest: PaperclipPluginManifestV1 = {
       displayName: "Kubernetes",
       description:
         "Dispatches agent runs in per-tenant Kubernetes namespaces. Default backend (sandbox-cr, alpha) uses kubernetes-sigs/agent-sandbox for multi-command exec; fallback backend (job) uses stable batch/v1 Job for clusters without agent-sandbox installed.",
+      supportsReusableLeases: true,
       configSchema: {
         type: "object",
         properties: {
@@ -101,6 +102,19 @@ const manifest: PaperclipPluginManifestV1 = {
             type: "string",
             description:
               "The adapter type that Jobs in this environment will run (e.g. `claude_local`, `codex_local`). Defaults to `claude_local`. Each environment is bound to one adapter; create multiple environments for different adapters.",
+          },
+          reuseLease: {
+            type: "boolean",
+            description: "Reuse ready Sandbox leases across runs. Select a warm lifecycle to retain the Kubernetes resource.",
+          },
+          workspaceStorage: {
+            type: "object",
+            description: "Sandbox-owned PVC for /workspace. Survives pod replacement; deleted with the Sandbox. Requires sandbox-cr.",
+            properties: {
+              storageClassName: { type: "string", minLength: 1 },
+              size: { type: "string", minLength: 1 },
+            },
+            required: ["storageClassName", "size"],
           },
           backend: {
             type: "string",
