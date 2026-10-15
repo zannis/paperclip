@@ -20,6 +20,7 @@
 import { PatchStrategy, setHeaderOptions } from "@kubernetes/client-node";
 import type { KubeClients } from "./kube-client.js";
 import { isKubeNotFoundError } from "./lease-lifecycle.js";
+import { findPodForSandbox } from "./sandbox-cr-orchestrator.js";
 
 const SANDBOX_GROUP = "agents.x-k8s.io";
 const SANDBOX_VERSION = "v1alpha1";
@@ -72,7 +73,6 @@ interface SandboxObject {
   };
   spec?: { replicas?: number };
   status?: {
-    podName?: string;
     conditions?: Array<{
       type?: string;
       status?: string;
@@ -223,7 +223,15 @@ export async function stopSuspendableSandbox(
   while (true) {
     cr = await getSandbox(clients, input);
     if (!cr) return "destroyed";
-    const suspended = conditionAt(cr, "Suspended", targetGeneration);
+    // A resume that landed after this stop owns the Sandbox now; a Suspended
+    // condition the controller wrote before seeing it is no confirmation.
+    const resumeEpoch = readEpoch(cr, RESUME_EPOCH_ANNOTATION);
+    if (resumeEpoch > input.epoch) {
+      throw new SandboxStopSupersededError(input.name, input.epoch, resumeEpoch);
+    }
+    const suspended = (cr.spec?.replicas ?? 1) === 0
+      ? conditionAt(cr, "Suspended", Math.max(targetGeneration, cr.metadata?.generation ?? 0))
+      : null;
     if (suspended?.status === "True" && suspended.reason === "PodTerminated") break;
     if (Date.now() >= deadline) {
       throw new Error(
@@ -357,7 +365,7 @@ export async function resumeSuspendableSandbox(
     if (!cr) return { outcome: "missing" };
     const ready = conditionAt(cr, "Ready", targetGeneration);
     if (ready?.status === "True") {
-      return { outcome: "ready", podName: cr.status?.podName ?? null, coldStart };
+      return { outcome: "ready", podName: await findPodForSandbox(clients, input.namespace, input.name), coldStart };
     }
     if (Date.now() - startedAt >= input.timeoutMs) {
       throw new SandboxColdResumeNotReadyError(input.name, Date.now() - startedAt);

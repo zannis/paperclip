@@ -10435,7 +10435,16 @@ export function heartbeatService(
       logger.error({ err }, "closed-workspace kept-workspace sweep failed");
       return 0;
     });
-    const stopped = await environmentRuntime.reconcileStoppedLeases();
+    const { stoppedRuns, ...stopped } = await environmentRuntime.reconcileStoppedLeases();
+    // A confirmed stop ends its run's remote execution: acknowledge a pending
+    // Stop and start messages that waited for it, as the cleanup sweep does.
+    for (const { companyId, runId } of stoppedRuns) {
+      await (async () => {
+        await acknowledgeRemoteStop(runId, companyId);
+        const run = await getRun(runId);
+        if (run) await resumeRemoteStopComments(run);
+      })().catch(() => logger.warn({ runId }, "could not reconsider messages after a kept-workspace stop"));
+    }
     return { ...stopped, terminalDestroyed: terminal.destroyed + closedWorkspaces };
   }
 

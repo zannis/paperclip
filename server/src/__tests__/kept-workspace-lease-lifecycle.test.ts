@@ -256,6 +256,10 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
     await db.update(heartbeatRuns).set({ status }).where(eq(heartbeatRuns.id, runId));
   }
 
+  function toLease(row: typeof environmentLeases.$inferSelect) {
+    return { ...row, metadata: (row.metadata as Record<string, unknown> | null) ?? null } as any;
+  }
+
   async function leaseRow(id: string) {
     const [row] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, id));
     return row!;
@@ -768,6 +772,38 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const nextRun = await newRun(seeded);
       await acquire(seeded, provider, nextRun);
       expect(await remoteExecutionHasStopped(db, seeded.companyId, runId)).toBe(true);
+    });
+
+    it("moves the epoch past the last stop when a lifecycle resume brings a stopped Sandbox back", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const first = await stoppedLease(seeded, provider);
+      const environment = (await environmentService(db).getById(seeded.environmentId))!;
+
+      const resumed = await services(provider).runtime.resumeRunLease({
+        environment, lease: toLease(await leaseRow(first.lease.id)),
+      });
+
+      expect(resumed?.providerLeaseId).toBe(first.lease.providerLeaseId);
+      expect(provider.sandboxes.get(first.lease.providerLeaseId!)!.replicas).toBe(1);
+      expect((await leaseRow(first.lease.id)).metadata?.sandboxEpoch).toBe(1);
+    });
+
+    it("keeps a Paperclip Runner lease out of the stopped lifecycle when its run crashed", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await db.update(environmentLeases).set({
+        updatedAt: new Date(Date.now() - 60 * 60_000),
+        metadata: sql`${environmentLeases.metadata} || '{"reusableSandboxLease":{"version":1,"adapterType":"paperclip_runner"}}'::jsonb`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
+      await finishRun(runId, "failed");
+
+      await services(provider).heartbeat.sweepOrphanedActiveLeases({ backoffMs: 5 * 60_000 });
+
+      expect(provider.methods()).not.toContain("environmentStopLease");
+      expect((await leaseRow(acquired.lease.id)).status).toBe("pending_cleanup");
     });
 
     it("releases, rather than stops, an ephemeral lease even when its files would survive", async () => {

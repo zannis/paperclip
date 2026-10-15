@@ -50,6 +50,9 @@ import {
 import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import {
   STOP_KEY_SQL,
+  leaseFencesSandboxEpoch,
+  resumeClaimRunIdSql,
+  stopUnconfirmedSql,
   confirmedStopMetadataSql,
   keepsWorkspaceSql,
   keptWorkspaceStopConfirmed,
@@ -115,6 +118,7 @@ export const RETAINED_LEASE_IDLE_FAILURE_REASON = "retained_lease_idle_timeout";
 // A kept-workspace stop is one provider call of at most a minute. The claim
 // outlasts it, so a concurrent sweep cannot start a second stop meanwhile.
 const KEPT_WORKSPACE_STOP_PAGE_SIZE = 100;
+const KEPT_WORKSPACE_STOP_CONCURRENCY = 4;
 const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
 const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
 const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
@@ -853,7 +857,7 @@ function keptWorkspaceAwareRpcTimeoutMs(
   config: Record<string, unknown>,
 ): number | undefined {
   const configured = resolvePluginSandboxRpcTimeoutMs(config);
-  return leaseKeepsWorkspace(lease)
+  return leaseFencesSandboxEpoch(lease)
     ? Math.max(configured ?? 0, KEPT_WORKSPACE_LIFECYCLE_RPC_TIMEOUT_MS)
     : configured;
 }
@@ -1879,6 +1883,7 @@ function createSandboxEnvironmentDriver(
           cleanupStatus: "failed",
           failureReason: "lease_fingerprint_mismatch",
           releasedAt: new Date(),
+          updatedAt: new Date(),
           metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL}`,
         }).where(and(
           eq(environmentLeases.id, lease.id),
@@ -2131,7 +2136,7 @@ function createSandboxEnvironmentDriver(
                     // A cold resume of a kept workspace waits for its pod
                     // inside the provider; give it the whole resume budget so
                     // the call never times out into an overlapping retry.
-                    leaseKeepsWorkspace(reusableLease)
+                    leaseFencesSandboxEpoch(reusableLease)
                       ? Math.max(configuredResumeTimeoutMs, KEPT_WORKSPACE_LIFECYCLE_RPC_TIMEOUT_MS)
                       : configuredResumeTimeoutMs,
                     Math.max(1, resumeDeadline - Date.now()),
@@ -2816,7 +2821,7 @@ function createSandboxEnvironmentDriver(
             environmentId: input.lease.environmentId ?? "", issueId: input.lease.issueId,
             config: workerConfig, providerLeaseId: input.lease.providerLeaseId,
             leaseMetadata: input.lease.metadata ?? {}, cancelActiveWork: true, resourceDisposition: "stop_and_retain",
-          }, leaseKeepsWorkspace(input.lease)
+          }, leaseFencesSandboxEpoch(input.lease)
             ? KEPT_WORKSPACE_LIFECYCLE_RPC_TIMEOUT_MS
             : Math.min(resolvePluginSandboxRpcTimeoutMs(workerConfig) ?? 60_000, 60_000)));
           if (remoteTerminationReceipt(input.lease, receipt)?.state !== "stopped") {
@@ -3066,11 +3071,24 @@ function createSandboxEnvironmentDriver(
       const config = stripSandboxProviderEnvelope(await resolvePluginSandboxRuntimeConfig({
         environment: input.environment, lease: input.lease, provider: providerKey,
       }) as SandboxEnvironmentConfig);
+      // The provider fences resume on the sandbox epoch. Move it past the last
+      // stop, or this resume is refused as a late one.
+      let leaseMetadata: Record<string, unknown> | undefined = input.lease.metadata ?? undefined;
+      if (leaseFencesSandboxEpoch(input.lease)) {
+        const [bumped] = await db.update(environmentLeases).set({
+          metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || jsonb_build_object(
+            'sandboxEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) + 1)`,
+        }).where(eq(environmentLeases.id, input.lease.id)).returning();
+        if (!bumped) throw new Error("The exact sandbox lease no longer exists.");
+        leaseMetadata = (bumped.metadata as Record<string, unknown> | null) ?? undefined;
+      }
       const resumed = await pluginWorkerManager.call(pluginId, "environmentResumeLease", {
         driverKey: providerKey, companyId: input.lease.companyId, environmentId: input.environment.id,
         issueId: input.lease.issueId, config, providerLeaseId: input.lease.providerLeaseId,
-        leaseMetadata: input.lease.metadata ?? undefined,
-      }, Math.min(resolvePluginSandboxRpcTimeoutMs(config) ?? 60_000, 60_000));
+        ...(leaseMetadata ? { leaseMetadata } : {}),
+      }, leaseFencesSandboxEpoch(input.lease)
+        ? KEPT_WORKSPACE_LIFECYCLE_RPC_TIMEOUT_MS
+        : Math.min(resolvePluginSandboxRpcTimeoutMs(config) ?? 60_000, 60_000));
       if (resumed?.providerLeaseId !== input.lease.providerLeaseId) {
         throw new Error("The provider did not confirm the exact retained sandbox. No replacement was acquired.");
       }
@@ -3436,7 +3454,7 @@ function createSandboxEnvironmentDriver(
     // stopped-lease reconciler stops the Sandbox again if this run ends
     // without handing the lease over. The claim always wins over a stop in
     // flight: that stop either loses its write or is refused by the provider.
-    const keepsWorkspace = leaseKeepsWorkspace(lease);
+    const keepsWorkspace = leaseFencesSandboxEpoch(lease);
     const [touched] = await db
       .update(environmentLeases)
       .set({
@@ -4133,7 +4151,7 @@ export function environmentRuntimeService(
       ? sql`not exists (
           select 1 from heartbeat_runs as live_run
           where live_run.status in ('queued', 'scheduled_retry', 'running')
-            and live_run.id::text = ${environmentLeases.metadata}->>'resumeClaimRunId'
+            and live_run.id = ${resumeClaimRunIdSql()}
             and live_run.id <> ${options.ownRunId}::uuid
         )`
       : sql`not ${leaseHasLiveRunSql()}`;
@@ -4599,6 +4617,9 @@ export function environmentRuntimeService(
                 failureReason,
                 cleanupStatus: "failed",
                 releasedAt: new Date(),
+                // A fresh write keeps the pending_cleanup sweep's backoff from
+                // starting a second destroy while this one runs.
+                updatedAt: new Date(),
                 metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'sandboxStopAndRetain'`,
               })
           .where(
@@ -4881,8 +4902,10 @@ export function environmentRuntimeService(
       confirmed: number;
       destroyed: number;
       failed: number;
+      /** Runs whose remote execution a confirmed stop just ended. */
+      stoppedRuns: Array<{ companyId: string; runId: string }>;
     }> {
-      const result = { confirmed: 0, destroyed: 0, failed: 0 };
+      const result = { confirmed: 0, destroyed: 0, failed: 0, stoppedRuns: [] as Array<{ companyId: string; runId: string }> };
       const driver = getDriver("sandbox");
       if (!driver?.stopKeptWorkspaceLease) return result;
       const rows = await db
@@ -4891,23 +4914,34 @@ export function environmentRuntimeService(
         .where(and(
           eq(environmentLeases.status, "stopped"),
           sql`not ${leaseHasLiveRunSql()}`,
-          sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'confirmedEpoch')::int, -1)
-            <> coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)`,
+          stopUnconfirmedSql(),
           sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)
             <= ${Date.now()}`,
         ))
         .orderBy(asc(environmentLeases.lastUsedAt))
         .limit(input.limit ?? KEPT_WORKSPACE_STOP_PAGE_SIZE);
 
-      for (const row of rows) {
-        try {
-          const outcome = await attemptKeptWorkspaceStop(toEnvironmentLeaseSnapshot(row));
-          if (outcome !== "skipped") result[outcome] += 1;
-        } catch (error) {
-          result.failed += 1;
-          logger.warn({ err: error, leaseId: row.id }, "kept-workspace sandbox stop attempt failed");
+      // A few stops at a time: each can wait most of a minute on the provider.
+      const queue = [...rows];
+      const worker = async () => {
+        for (let row = queue.shift(); row; row = queue.shift()) {
+          try {
+            const lease = toEnvironmentLeaseSnapshot(row);
+            const outcome = await attemptKeptWorkspaceStop(lease);
+            if (outcome === "skipped") continue;
+            result[outcome] += 1;
+            // Only a stop of a released or crashed run has a Stop or waiting
+            // messages to settle; an idle stop's run ended long ago.
+            if (outcome !== "failed" && row.heartbeatRunId && readKeptWorkspaceStop(lease).blocksIssueClaim) {
+              result.stoppedRuns.push({ companyId: row.companyId, runId: row.heartbeatRunId });
+            }
+          } catch (error) {
+            result.failed += 1;
+            logger.warn({ err: error, leaseId: row.id }, "kept-workspace sandbox stop attempt failed");
+          }
         }
-      }
+      };
+      await Promise.all(Array.from({ length: KEPT_WORKSPACE_STOP_CONCURRENCY }, worker));
       return result;
     },
 

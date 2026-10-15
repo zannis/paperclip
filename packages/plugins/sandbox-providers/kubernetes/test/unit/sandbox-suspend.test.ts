@@ -72,14 +72,12 @@ function fakeCluster(input: {
     const gen = cr.metadata.generation;
     if (cr.spec.replicas === 0) {
       podRunning = false;
-      cr.status.podName = undefined;
       cr.status.conditions = [
         { type: "Ready", status: "False", reason: "SandboxSuspended", observedGeneration: gen },
         { type: "Suspended", status: "True", reason: "PodTerminated", observedGeneration: gen },
       ];
     } else if (!input.neverReady) {
       podRunning = true;
-      cr.status.podName = "pc-abc";
       cr.status.conditions = [
         { type: "Ready", status: "True", reason: "DependenciesReady", observedGeneration: gen },
         // The controller leaves a stale Suspended=True behind after a resume.
@@ -127,6 +125,13 @@ function fakeCluster(input: {
     }),
   };
   const core = {
+    // agent-sandbox names the pod after the Sandbox; v1alpha1 status carries
+    // no pod name, so the plugin resolves it with an exact-name GET.
+    readNamespacedPod: vi.fn(async () => {
+      if (!podRunning) throw notFound();
+      return { metadata: { name: "pc-abc" }, status: { phase: "Running" } };
+    }),
+    listNamespacedPod: vi.fn(async () => ({ items: [] })),
     readNamespacedPersistentVolumeClaim: vi.fn(async () => {
       if (!pvcUid) throw notFound();
       return { metadata: { name: "workspace-pc-abc", uid: pvcUid } };
@@ -200,6 +205,28 @@ describe("stopSuspendableSandbox", () => {
     await expect(
       stopSuspendableSandbox(cluster.clients, { ...BASE, epoch: 1, timeoutMs: 30 }),
     ).rejects.toThrow(/not confirmed/);
+  });
+
+  it("does not confirm from a stale Suspended condition once a newer resume took the Sandbox", async () => {
+    const cluster = fakeCluster();
+    const get = cluster.custom.getNamespacedCustomObject.getMockImplementation()!;
+    let reads = 0;
+    cluster.custom.getNamespacedCustomObject.mockImplementation(async () => {
+      reads += 1;
+      const cr = await get();
+      if (reads === 2) {
+        // The controller confirmed the suspend, then a resume at epoch 5
+        // patched the Sandbox before the controller saw it.
+        cluster.setReplicas(1);
+        cluster.cr!.metadata.annotations[RESUME_EPOCH_ANNOTATION] = "5";
+        return structuredClone(cluster.cr!);
+      }
+      return cr;
+    });
+
+    await expect(
+      stopSuspendableSandbox(cluster.clients, { ...BASE, epoch: 4 }),
+    ).rejects.toBeInstanceOf(SandboxStopSupersededError);
   });
 
   it("is idempotent on an already suspended Sandbox", async () => {

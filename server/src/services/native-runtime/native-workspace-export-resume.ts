@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, nativeRunFinalizations, nativeRunResults, type Db } from "@paperclipai/db";
 import { remoteTerminationReceipt } from "../remote-execution-termination.js";
-import { leaseKeepsWorkspace } from "../kept-workspace-leases.js";
+import { confirmedStopStateSql, leaseKeepsWorkspace } from "../kept-workspace-leases.js";
 import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 
 type Lease = {
@@ -121,10 +121,7 @@ export async function settleNativeWorkspaceExportResume(db: Db, lease: Lease, op
       ${stopped ? sql`- 'nativeWorkspaceExportResume'` : sql``}) || ${JSON.stringify({
         ...(stopped ? { remoteExecutionTermination: receipt } : {}),
         pendingCleanupInFlight: false, pendingCleanupLeaseExpiresAtMs: 0,
-      })}::jsonb${keptWorkspace ? sql` || jsonb_build_object('sandboxStop', jsonb_build_object(
-        'attempts', 0, 'retryAfterMs', 0,
-        'confirmedEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0),
-        'confirmedAt', ${now.toISOString()}::text))` : sql``}`,
+      })}::jsonb${keptWorkspace ? sql` || ${confirmedStopStateSql(now)}` : sql``}`,
   }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, lease.companyId),
     eq(environmentLeases.heartbeatRunId, lease.heartbeatRunId!), eq(environmentLeases.provider, lease.provider!),
     eq(environmentLeases.providerLeaseId, lease.providerLeaseId!), eq(environmentLeases.status, "pending_cleanup"),

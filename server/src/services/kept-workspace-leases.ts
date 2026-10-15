@@ -29,12 +29,36 @@ export interface KeptWorkspaceStopState {
   lastError?: string;
   confirmedEpoch?: number;
   confirmedAt?: string;
+  blocksIssueClaim?: boolean;
 }
 
 type LeaseMetadataHolder = { metadata: Record<string, unknown> | null };
 
-export function leaseKeepsWorkspace(lease: LeaseMetadataHolder): boolean {
+/**
+ * The provider keeps this lease's volume across a stop, so it fences stop and
+ * resume on the sandbox epoch. Every resume of such a lease must move the
+ * epoch on, whatever lifecycle the lease follows.
+ */
+export function leaseFencesSandboxEpoch(lease: LeaseMetadataHolder): boolean {
   return lease.metadata?.workspaceSurvivesStop === true && lease.metadata?.sandboxProviderPlugin === true;
+}
+
+function isPaperclipRunnerLease(lease: LeaseMetadataHolder): boolean {
+  const scope = lease.metadata?.reusableSandboxLease;
+  const scopeAdapter = scope && typeof scope === "object" && !Array.isArray(scope)
+    ? (scope as Record<string, unknown>).adapterType
+    : undefined;
+  return (scopeAdapter ?? lease.metadata?.adapterType) === "paperclip_runner";
+}
+
+/**
+ * The lease follows the kept-workspace lifecycle (`stopped`, cold resume on
+ * the same volume). Paperclip Runner leases do not: their harness state lives
+ * outside /workspace, so a cold pod could not continue their session, and
+ * they keep their existing retention.
+ */
+export function leaseKeepsWorkspace(lease: LeaseMetadataHolder): boolean {
+  return leaseFencesSandboxEpoch(lease) && !isPaperclipRunnerLease(lease);
 }
 
 /** True when the provider said this lease's files would NOT survive a stop. */
@@ -57,18 +81,44 @@ export function keptWorkspaceStopConfirmed(lease: LeaseMetadataHolder): boolean 
 }
 
 export function keepsWorkspaceSql() {
-  return sql`coalesce(${environmentLeases.metadata}->'workspaceSurvivesStop' = 'true'::jsonb, false)
-    and coalesce(${environmentLeases.metadata}->'sandboxProviderPlugin' = 'true'::jsonb, false)`;
+  return sql`(coalesce(${environmentLeases.metadata}->'workspaceSurvivesStop' = 'true'::jsonb, false)
+    and coalesce(${environmentLeases.metadata}->'sandboxProviderPlugin' = 'true'::jsonb, false)
+    and coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType',
+      ${environmentLeases.metadata}->>'adapterType', '') <> 'paperclip_runner')`;
+}
+
+/** The run id holding a resume claim, as a uuid the primary key can match. */
+export function resumeClaimRunIdSql() {
+  return sql`(case when ${environmentLeases.metadata}->>'resumeClaimRunId'
+      ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    then (${environmentLeases.metadata}->>'resumeClaimRunId')::uuid end)`;
 }
 
 /** The lease's run, or the run holding its resume claim, is still live. */
 export function leaseHasLiveRunSql() {
-  return sql`exists (
+  return sql`(exists (
     select 1 from heartbeat_runs as live_run
-    where live_run.status in ('queued', 'scheduled_retry', 'running')
-      and (live_run.id = ${environmentLeases.heartbeatRunId}
-        or live_run.id::text = ${environmentLeases.metadata}->>'resumeClaimRunId')
-  )`;
+    where live_run.id = ${environmentLeases.heartbeatRunId}
+      and live_run.status in ('queued', 'scheduled_retry', 'running')
+  ) or exists (
+    select 1 from heartbeat_runs as live_run
+    where live_run.id = ${resumeClaimRunIdSql()}
+      and live_run.status in ('queued', 'scheduled_retry', 'running')
+  ))`;
+}
+
+/** No provider stop has been confirmed at the lease's current epoch. */
+export function stopUnconfirmedSql() {
+  return sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'confirmedEpoch')::int, -1)
+    <> coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)`;
+}
+
+/** The stop state recording a provider-confirmed stop at the current epoch. */
+export function confirmedStopStateSql(confirmedAt: Date = new Date()) {
+  return sql`jsonb_build_object(${STOP_KEY_SQL}, jsonb_build_object(
+    'attempts', 0, 'retryAfterMs', 0,
+    'confirmedEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0),
+    'confirmedAt', ${confirmedAt.toISOString()}::text))`;
 }
 
 /**
@@ -91,16 +141,12 @@ export function unconfirmedStopMetadataSql(options: { blocksIssueClaim?: boolean
 export function stopBlocksIssueClaimSql() {
   return sql`(${environmentLeases.status} = 'stopped'
     and coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}->'blocksIssueClaim' = 'true'::jsonb, false)
-    and coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'confirmedEpoch')::int, -1)
-      <> coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0))`;
+    and ${stopUnconfirmedSql()})`;
 }
 
 /** Metadata for a lease whose stop the provider confirmed at its current epoch. */
 export function confirmedStopMetadataSql(receipt: Record<string, unknown> | undefined) {
   return sql`(coalesce(${environmentLeases.metadata}, '{}'::jsonb) - ${STOP_KEY_SQL} - 'remoteExecutionTermination')
-    || jsonb_build_object(${STOP_KEY_SQL}, jsonb_build_object(
-      'attempts', 0, 'retryAfterMs', 0,
-      'confirmedEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0),
-      'confirmedAt', ${new Date().toISOString()}::text))
+    || ${confirmedStopStateSql()}
     || ${JSON.stringify(receipt ? { remoteExecutionTermination: receipt } : {})}::jsonb`;
 }

@@ -1264,7 +1264,9 @@ async function startServerWithDatabaseTeardown(
         logger.error({ err }, "idle retained environment lease sweep failed");
       })
       // Stop idle kept-workspace sandboxes, and destroy those whose issue
-      // closed, before the pending_cleanup sweep runs.
+      // closed, before the pending_cleanup sweep runs. Stops run a few at a
+      // time, and the destroys claim their rows with a fresh write, so the
+      // pending_cleanup sweep's backoff keeps it off them.
       .then(() => environmentLeaseCleanupHeartbeat.sweepKeptWorkspaceLeases())
       .then((result) => {
         if (result.confirmed > 0 || result.destroyed > 0 || result.failed > 0 || result.terminalDestroyed > 0) {
