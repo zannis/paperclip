@@ -67,6 +67,7 @@ import {
   readKeptWorkspaceStop,
   sandboxEpochSql,
   stopRetryAfterMsSql,
+  runIsLiveSql,
   unconfirmedStopMetadataSql,
 } from "./kept-workspace-leases.js";
 import { HttpError } from "../errors.js";
@@ -3542,6 +3543,9 @@ function createSandboxEnvironmentDriver(
           // A cancelled or crashed run's agent may still run in that pod
           // until its stop is confirmed; no other run may take it over.
           sql`not ${stopBlocksIssueClaimSql()}`,
+          // A run cancelled meanwhile (say, during a stop it waited on) must
+          // not resume the workspace.
+          heartbeatRunId ? runIsLiveSql(heartbeatRunId) : undefined,
         ),
       )
       .returning();
@@ -3560,7 +3564,12 @@ function createSandboxEnvironmentDriver(
       .from(environmentLeases)
       .where(eq(environmentLeases.id, lease.id));
     if (current?.row.status !== "stopped") return null;
-    if (!retried) {
+    const runIsLive = async () => {
+      if (!heartbeatRunId) return false;
+      const [live] = await db.execute<{ live: boolean }>(sql`select ${runIsLiveSql(heartbeatRunId)} as live`);
+      return live?.live === true;
+    };
+    if (!retried && await runIsLive()) {
       // Claimable again: a blocking stop was confirmed since the refused claim.
       let claimable = !current.blocksClaim;
       if (!claimable) {
@@ -3584,15 +3593,12 @@ function createSandboxEnvironmentDriver(
               blocksClaim: sql<boolean>`${stopBlocksIssueClaimSql()}`,
               inFlight: sql<boolean>`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not null
                 and ${stopRetryAfterMsSql()} > ${Date.now()})`,
-              // A run cancelled while it waits must not resume the workspace.
-              runLive: sql<boolean>`exists (select 1 from heartbeat_runs as waiting_run
-                where waiting_run.id = ${heartbeatRunId}::uuid
-                  and waiting_run.status in ('queued', 'scheduled_retry', 'running'))`,
             })
             .from(environmentLeases)
             .where(eq(environmentLeases.id, lease.id));
+          // A run cancelled while it waits fails, whatever the stop settled.
+          if (!(await runIsLive())) break;
           if (reread?.status !== "stopped") return null;
-          if (!reread.runLive) break;
           claimable = !reread.blocksClaim;
           waiting = !claimable && reread.inFlight;
           if (waiting) await new Promise((resolve) => setTimeout(resolve, KEPT_WORKSPACE_STOP_WAIT_POLL_MS));

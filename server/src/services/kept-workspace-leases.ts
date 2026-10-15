@@ -110,6 +110,12 @@ export function resumeClaimRunIdSql() {
     then (${environmentLeases.metadata}->>'resumeClaimRunId')::uuid end)`;
 }
 
+/** The run is queued, waiting to retry or running. */
+export function runIsLiveSql(runId: string) {
+  return sql`exists (select 1 from heartbeat_runs as live_run
+    where live_run.id = ${runId}::uuid and live_run.status in ('queued', 'scheduled_retry', 'running'))`;
+}
+
 /** The lease's run, or the run holding its resume claim, is still live. */
 export function leaseHasLiveRunSql() {
   return sql`(exists (
