@@ -2346,6 +2346,8 @@ describe("sandbox adapter execution targets", () => {
     it("drops host-equal network settings that carry credentials", async () => {
       vi.stubEnv("HTTPS_PROXY", "http://proxy-user:proxy-pass@proxy.internal:3128");
       vi.stubEnv("npm_config_proxy", "http://proxy-user:proxy-pass@proxy.internal:3128");
+      vi.stubEnv("HTTP_PROXY", "proxy-user:proxy-pass@proxy.internal:3128");
+      vi.stubEnv("ALL_PROXY", "socks5://proxy-user:pass word@proxy.internal:1080");
       vi.stubEnv("NO_PROXY", "localhost");
       const runner = { execute: vi.fn(async () => okResult()) };
 
@@ -2354,6 +2356,8 @@ describe("sandbox adapter execution targets", () => {
         env: {
           HTTPS_PROXY: "http://proxy-user:proxy-pass@proxy.internal:3128",
           npm_config_proxy: "http://proxy-user:proxy-pass@proxy.internal:3128",
+          HTTP_PROXY: "proxy-user:proxy-pass@proxy.internal:3128",
+          ALL_PROXY: "socks5://proxy-user:pass word@proxy.internal:1080",
           NO_PROXY: "localhost",
         },
       });

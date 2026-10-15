@@ -30,8 +30,10 @@ function readEnvValueCaseInsensitive(env: NodeJS.ProcessEnv, key: string): strin
 
 // Network settings an operator commonly sets both on the server and in agent
 // config. Installs need them, and they are not server secrets. This only
-// keeps them when the run's env already carries them; a sandbox never gets
-// the server's own network settings.
+// keeps them when the run's env already carries them, and never when the
+// value carries credentials: the guard cannot tell a merged server proxy
+// from an operator who set the same credentialed proxy, so a sandbox that
+// needs one must be given its own.
 const SANDBOX_SETUP_ENV_SHARED_KEYS = new Set([
   "HTTP_PROXY",
   "HTTPS_PROXY",
@@ -67,10 +69,10 @@ export function sanitizeSandboxSetupEnv(
   return sanitized;
 }
 
-// A proxy URL with userinfo (`user:pass@`) is a server credential, not a
-// shared setting.
+// A proxy value with userinfo (`user:pass@`), with or without a scheme, is a
+// server credential, not a shared setting.
 function isSharedNetworkSetting(key: string, value: string): boolean {
-  return SANDBOX_SETUP_ENV_SHARED_KEYS.has(key.toUpperCase()) && !/:\/\/[^/@\s]*@/.test(value);
+  return SANDBOX_SETUP_ENV_SHARED_KEYS.has(key.toUpperCase()) && !/^\s*(?:[a-z][a-z0-9+.-]*:\/\/)?[^/]*@/i.test(value);
 }
 
 export function sanitizeRemoteExecutionEnv(
