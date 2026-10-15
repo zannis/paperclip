@@ -132,6 +132,8 @@ const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
 // A run's stop confirmed outside the reconciler, whose Stop and waiting
 // messages the reconciler still has to settle.
 const REMOTE_STOP_SETTLE_PENDING_KEY = "remoteStopSettlePending";
+// A settle claim older than this belongs to a sweep that died.
+const REMOTE_STOP_SETTLE_CLAIM_MS = 10 * 60_000;
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -3570,6 +3572,14 @@ function createSandboxEnvironmentDriver(
           });
         if (outcome === "destroyed") return null;
         claimable = outcome === "confirmed";
+        if (outcome === "skipped") {
+          // Another attempt held the stop; it may have just settled it.
+          const [now] = await db
+            .select({ blocksClaim: sql<boolean>`${stopBlocksIssueClaimSql()}` })
+            .from(environmentLeases)
+            .where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.status, "stopped")));
+          claimable = now !== undefined && !now.blocksClaim;
+        }
       }
       if (claimable) {
         return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
@@ -4243,7 +4253,7 @@ export function environmentRuntimeService(
     if (!leaseKeepsWorkspace(lease) || keptWorkspaceStopConfirmed(lease)) return "skipped";
     if (!driver.canStopKeptWorkspaceLease?.({ lease })) {
       // Push the row back so a worker that stays down cannot fill every page;
-      // an attempt in flight keeps its claim.
+      // an attempt in flight keeps its claim, one that died does not.
       await db.update(environmentLeases).set({
         metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
           coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}, '{}'::jsonb)
@@ -4251,7 +4261,8 @@ export function environmentRuntimeService(
       }).where(and(
         eq(environmentLeases.id, lease.id),
         eq(environmentLeases.status, "stopped"),
-        sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null`,
+        sql`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null
+          or ${stopRetryAfterMsSql()} <= ${Date.now()})`,
       ));
       return "skipped";
     }
@@ -4295,9 +4306,9 @@ export function environmentRuntimeService(
     if (!claimedRow) return "skipped";
     const claimed = toEnvironmentLeaseSnapshot(claimedRow);
     // A stop that ends a run that did not succeed leaves its Stop and waiting
-    // messages to settle; the mark makes that survive a restart. The
-    // releasing run's own stop is settled by its release.
-    const settleMarker = !options.ownRunId && claimed.heartbeatRunId &&
+    // messages to settle, whoever stopped it; the mark makes that survive a
+    // restart or a failed settle.
+    const settleMarker = claimed.heartbeatRunId &&
       readKeptWorkspaceStop(claimed).blocksIssueClaim
       ? { [REMOTE_STOP_SETTLE_PENDING_KEY]: true }
       : {};
@@ -5094,25 +5105,44 @@ export function environmentRuntimeService(
     },
 
     /**
-     * Runs whose remote execution a confirmed stop ended, by whoever made the
-     * attempt, and whose Stop and waiting messages are not settled yet.
+     * Claim the runs whose remote execution a confirmed stop ended, by
+     * whoever made the attempt, and whose Stop and waiting messages are not
+     * settled yet. A claim swaps the lease's mark for a token, so overlapping
+     * sweeps never settle one run twice; a claim left by a dead sweep is
+     * taken over after a while. A mark whose run is gone is dropped.
      */
-    async listPendingRemoteStopSettles(): Promise<Array<{ leaseId: string; companyId: string; runId: string }>> {
-      const rows = await db
-        .select({ leaseId: environmentLeases.id, companyId: environmentLeases.companyId, runId: environmentLeases.heartbeatRunId })
-        .from(environmentLeases)
-        .where(and(
-          // A confirmed stop leaves the row stopped; a Sandbox found gone, expired.
-          inArray(environmentLeases.status, ["stopped", "expired"]),
-          sql`coalesce(${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text = 'true'::jsonb, false)`,
-        ));
-      return rows.flatMap((row) => (row.runId ? [{ leaseId: row.leaseId, companyId: row.companyId, runId: row.runId }] : []));
-    },
-
-    async clearRemoteStopSettle(leaseId: string): Promise<void> {
+    async claimRemoteStopSettles(): Promise<Array<{ leaseId: string; companyId: string; runId: string; token: string }>> {
+      const mark = sql`${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text`;
+      // A confirmed stop leaves the row stopped; a Sandbox found gone, expired.
+      const marked = and(inArray(environmentLeases.status, ["stopped", "expired"]), sql`${mark} is not null`);
       await db.update(environmentLeases)
         .set({ metadata: sql`${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text` })
-        .where(eq(environmentLeases.id, leaseId));
+        .where(and(marked, isNull(environmentLeases.heartbeatRunId)));
+      const token = randomUUID();
+      const now = Date.now();
+      const rows = await db.update(environmentLeases)
+        .set({
+          metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${REMOTE_STOP_SETTLE_PENDING_KEY}::text,
+            jsonb_build_object('claim', ${token}::text, 'at', ${now}::bigint))`,
+        })
+        .where(and(marked, isNotNull(environmentLeases.heartbeatRunId), sql`(${mark} = 'true'::jsonb
+          or coalesce((${mark}->>'at')::bigint, 0) <= ${now - REMOTE_STOP_SETTLE_CLAIM_MS})`))
+        .returning({ leaseId: environmentLeases.id, companyId: environmentLeases.companyId, runId: environmentLeases.heartbeatRunId });
+      return rows.flatMap((row) => (row.runId ? [{ ...row, runId: row.runId, token }] : []));
+    },
+
+    /** Drop a settled lease's mark, or hand a failed settle back for retry. */
+    async finishRemoteStopSettle(leaseId: string, token: string, settled: boolean): Promise<void> {
+      await db.update(environmentLeases)
+        .set({
+          metadata: settled
+            ? sql`${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text`
+            : sql`${environmentLeases.metadata} || jsonb_build_object(${REMOTE_STOP_SETTLE_PENDING_KEY}::text, true)`,
+        })
+        .where(and(
+          eq(environmentLeases.id, leaseId),
+          sql`${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text->>'claim' = ${token}`,
+        ));
     },
 
     /**

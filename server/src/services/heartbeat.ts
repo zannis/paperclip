@@ -10446,16 +10446,18 @@ export function heartbeatService(
 
   // A confirmed stop ends its run's remote execution: acknowledge a pending
   // Stop and start messages that waited for it, as the cleanup sweep does.
-  // The lease's mark is cleared only after that, so a restart retries it.
+  // Each lease's mark is claimed first, so overlapping sweeps never settle a
+  // run twice, and it is removed only once the settle succeeded; a failed
+  // settle, or a restart, leaves it for a later tick.
   async function settleConfirmedRemoteStops() {
-    const pending = await environmentRuntime.listPendingRemoteStopSettles().catch((err) => {
-      logger.error({ err }, "could not list kept-workspace stops to settle");
+    const claimed = await environmentRuntime.claimRemoteStopSettles().catch((err) => {
+      logger.error({ err }, "could not claim kept-workspace stops to settle");
       return [];
     });
-    for (const { leaseId, companyId, runId } of pending) {
-      await settleRemoteStop(runId, companyId);
-      await environmentRuntime.clearRemoteStopSettle(leaseId).catch((err) => {
-        logger.warn({ err, leaseId }, "could not clear a settled kept-workspace stop");
+    for (const { leaseId, companyId, runId, token } of claimed) {
+      const settled = await settleRemoteStop(runId, companyId);
+      await environmentRuntime.finishRemoteStopSettle(leaseId, token, settled).catch((err) => {
+        logger.warn({ err, leaseId }, "could not record a kept-workspace stop settlement");
       });
     }
   }
@@ -10509,13 +10511,17 @@ export function heartbeatService(
   // A provider receipt just ended this run's remote execution: acknowledge a
   // pending Stop and start the messages that waited for it. Delivery failure
   // must not revert the cleanup; a new message can still use the persisted
-  // receipt on its next admission.
-  async function settleRemoteStop(runId: string, companyId: string) {
-    await (async () => {
+  // receipt on its next admission. Resolves whether the settle succeeded.
+  async function settleRemoteStop(runId: string, companyId: string): Promise<boolean> {
+    return await (async () => {
       await acknowledgeRemoteStop(runId, companyId);
       const run = await getRun(runId);
       if (run) await resumeRemoteStopComments(run);
-    })().catch((err) => logger.warn({ err, runId }, "could not reconsider messages after a remote stop"));
+      return true;
+    })().catch((err) => {
+      logger.warn({ err, runId }, "could not reconsider messages after a remote stop");
+      return false;
+    });
   }
 
   async function acknowledgeRemoteStop(runId: string, companyId: string) {

@@ -266,6 +266,10 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
     return row!;
   }
 
+  async function settleMark(id: string) {
+    return (await leaseRow(id)).metadata?.remoteStopSettlePending;
+  }
+
   async function makeIdle(id: string, minutes = 16) {
     const since = new Date(Date.now() - minutes * 60_000);
     await db.update(environmentLeases)
@@ -530,12 +534,91 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const resumed = await acquire(seeded, provider, blockedRun);
 
       expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
-      // The cancelled run's Stop is still settled, once, on the next tick.
-      const { runtime, heartbeat } = services(provider);
-      expect(await runtime.listPendingRemoteStopSettles())
-        .toEqual([{ leaseId: acquired.lease.id, companyId: seeded.companyId, runId }]);
-      await heartbeat.sweepKeptWorkspaceLeases();
-      expect(await runtime.listPendingRemoteStopSettles()).toEqual([]);
+      // The cancelled run's Stop is still settled, on the next tick.
+      expect(await settleMark(acquired.lease.id)).toBe(true);
+      await services(provider).heartbeat.sweepKeptWorkspaceLeases();
+      expect(await settleMark(acquired.lease.id)).toBeUndefined();
+    });
+
+    it("lets a blocked run resume when a concurrent attempt confirms the stop it was refused by", async () => {
+      const seeded = await seed();
+      let failStop = true;
+      const provider = fakeProvider({ stopFails: () => failStop });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      failStop = false;
+      // Another attempt holds the stop and confirms it right after this run's
+      // own attempt was refused (the second refused write).
+      await db.update(environmentLeases).set({
+        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
+          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 90_000 })}::jsonb)`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
+      await db.execute(sql.raw(`
+        create table test_statements (n int);
+        create function test_confirm_on_second() returns trigger language plpgsql as $$
+        begin
+          insert into test_statements values (1);
+          if (select count(*) from test_statements) = 2 then
+            update environment_leases set metadata = metadata || jsonb_build_object('sandboxStop',
+                jsonb_build_object('attempts', 0, 'retryAfterMs', 0,
+                  'confirmedEpoch', coalesce((metadata->>'sandboxEpoch')::int, 0)))
+              where id = '${acquired.lease.id}';
+          end if;
+          return null;
+        end $$;
+        create trigger test_confirm_on_second after update on environment_leases
+          for each statement when (pg_trigger_depth() < 1) execute function test_confirm_on_second();
+      `));
+      const blockedRun = await newRun(seeded);
+      let resumed;
+      try {
+        resumed = await acquire(seeded, provider, blockedRun);
+      } finally {
+        await db.execute(sql.raw(`
+          drop trigger test_confirm_on_second on environment_leases;
+          drop function test_confirm_on_second();
+          drop table test_statements;
+        `));
+      }
+
+      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+    });
+
+    it("settles each marked stop once across overlapping sweeps, and retries a failed settle", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      const { runtime } = services(provider);
+      expect(await settleMark(acquired.lease.id)).toBe(true);
+
+      const first = await runtime.claimRemoteStopSettles();
+      const overlapping = await runtime.claimRemoteStopSettles();
+      expect(first.map((c) => c.runId)).toEqual([runId]);
+      expect(overlapping).toEqual([]);
+
+      await runtime.finishRemoteStopSettle(acquired.lease.id, first[0]!.token, false);
+      expect(await settleMark(acquired.lease.id)).toBe(true);
+      const retried = await runtime.claimRemoteStopSettles();
+      await runtime.finishRemoteStopSettle(acquired.lease.id, retried[0]!.token, true);
+      expect(await settleMark(acquired.lease.id)).toBeUndefined();
+    });
+
+    it("drops a settle mark whose run is gone", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+
+      expect(await services(provider).runtime.claimRemoteStopSettles()).toEqual([]);
+      expect(await settleMark(acquired.lease.id)).toBeUndefined();
     });
 
     it("marks a blocking stop the sweep confirms for settlement until it is settled", async () => {
@@ -552,10 +635,10 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       // The stop is confirmed, and the process dies before settling it.
       const { runtime, heartbeat } = services(provider);
       expect((await runtime.reconcileStoppedLeases()).confirmed).toBe(1);
-      expect(await runtime.listPendingRemoteStopSettles()).toHaveLength(1);
+      expect(await settleMark(acquired.lease.id)).toBe(true);
 
       await heartbeat.sweepKeptWorkspaceLeases();
-      expect(await runtime.listPendingRemoteStopSettles()).toEqual([]);
+      expect(await settleMark(acquired.lease.id)).toBeUndefined();
     });
 
     it("takes over a blocking stop attempt whose claim expired with its process", async () => {
