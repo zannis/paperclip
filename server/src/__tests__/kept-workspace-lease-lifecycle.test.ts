@@ -602,7 +602,12 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(overlapping).toEqual([]);
 
       await runtime.finishRemoteStopSettle(acquired.lease.id, first[0]!.token, false);
-      expect(await settleMark(acquired.lease.id)).toBe(true);
+      // A failed settle waits out a backoff before it is claimed again.
+      expect(await settleMark(acquired.lease.id)).toMatchObject({ retryAfterMs: expect.any(Number) });
+      expect(await runtime.claimRemoteStopSettles()).toEqual([]);
+      await db.update(environmentLeases).set({
+        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{remoteStopSettlePending,retryAfterMs}', '0'::jsonb)`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
       const retried = await runtime.claimRemoteStopSettles();
       await runtime.finishRemoteStopSettle(acquired.lease.id, retried[0]!.token, true);
       expect(await settleMark(acquired.lease.id)).toBeUndefined();
@@ -661,6 +666,31 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
     });
 
+    it("waits for a blocking stop attempt in flight and resumes once it confirms", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider({ stopFails: () => true });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      await db.update(environmentLeases).set({
+        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
+          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 30_000 })}::jsonb)`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
+      // That attempt confirms the stop a moment later.
+      const confirming = new Promise((resolve) => setTimeout(resolve, 1_500)).then(() =>
+        db.update(environmentLeases).set({
+          metadata: sql`${environmentLeases.metadata} || jsonb_build_object('sandboxStop', jsonb_build_object(
+            'attempts', 0, 'retryAfterMs', 0, 'confirmedEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)))`,
+        }).where(eq(environmentLeases.id, acquired.lease.id)));
+
+      const blockedRun = await newRun(seeded);
+      const resumed = await acquire(seeded, provider, blockedRun);
+      await confirming;
+
+      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+    });
+
     it("never takes over a blocking stop attempt still in flight", async () => {
       const seeded = await seed();
       const provider = fakeProvider({ stopFails: () => true });
@@ -671,7 +701,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       // Another attempt holds the stop claim.
       await db.update(environmentLeases).set({
         metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
-          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 90_000 })}::jsonb)`,
+          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 2_000 })}::jsonb)`,
       }).where(eq(environmentLeases.id, acquired.lease.id));
       const stopsBefore = provider.methods().filter((m) => m === "environmentStopLease").length;
 

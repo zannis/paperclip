@@ -10511,17 +10511,19 @@ export function heartbeatService(
   // A provider receipt just ended this run's remote execution: acknowledge a
   // pending Stop and start the messages that waited for it. Delivery failure
   // must not revert the cleanup; a new message can still use the persisted
-  // receipt on its next admission. Resolves whether the settle succeeded.
+  // receipt on its next admission. Resolves false when the settle failed, or
+  // could not run yet because the run is still finishing here.
   async function settleRemoteStop(runId: string, companyId: string): Promise<boolean> {
-    return await (async () => {
+    try {
       await acknowledgeRemoteStop(runId, companyId);
       const run = await getRun(runId);
+      if (run && (!isHeartbeatRunTerminalStatus(run.status) || adapterExecutionControls.has(run.id))) return false;
       if (run) await resumeRemoteStopComments(run);
       return true;
-    })().catch((err) => {
+    } catch (err) {
       logger.warn({ err, runId }, "could not reconsider messages after a remote stop");
       return false;
-    });
+    }
   }
 
   async function acknowledgeRemoteStop(runId: string, companyId: string) {
