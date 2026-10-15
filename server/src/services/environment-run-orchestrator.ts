@@ -595,6 +595,8 @@ export function environmentRunOrchestrator(
     cancelActiveWork?: boolean;
     /** Explicit paperclip_runner resource lifecycle. Omitted for legacy adapters. */
     providerResourceDisposition?: ProviderResourceDisposition;
+    /** Recorded on a lease the `destroy` disposition tears down. */
+    destroyFailureReason?: string;
     nativeLifecycleTelemetry?: {
       provider: string;
       harness: string;
@@ -615,7 +617,9 @@ export function environmentRunOrchestrator(
         status,
         (leaseId, error) => result.errors.push({ leaseId, error }),
         input.providerResourceDisposition,
-        ...(input.cancelActiveWork ? [true] as const : []),
+        ...(input.destroyFailureReason
+          ? [input.cancelActiveWork, input.destroyFailureReason] as const
+          : input.cancelActiveWork ? [true] as const : []),
       );
     } catch (err) {
       result.errors.push({ leaseId: "*", error: err });

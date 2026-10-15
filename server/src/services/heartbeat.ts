@@ -10255,6 +10255,29 @@ export function heartbeatService(
     return completedRun;
   }
 
+  // A run can close its own issue inside its turn. The issue close hook skips
+  // the run's sandbox while the run is live, so the run itself must not retain
+  // that sandbox afterwards. Destroying it instead of retaining it keeps the
+  // lease `active` until the destroy settles, so no follow-up run can take the
+  // sandbox over in between.
+  async function runClosedItsReusableLeaseIssue(runId: string, companyId: string): Promise<string | null> {
+    const [closed] = await db
+      .select({ status: issues.status })
+      .from(environmentLeases)
+      .innerJoin(issues, eq(issues.id, environmentLeases.issueId))
+      .where(
+        and(
+          eq(environmentLeases.companyId, companyId),
+          eq(environmentLeases.heartbeatRunId, runId),
+          eq(environmentLeases.status, "active"),
+          eq(environmentLeases.leasePolicy, "reuse_by_environment"),
+          inArray(issues.status, ["done", "cancelled"]),
+        ),
+      )
+      .limit(1);
+    return closed?.status ?? null;
+  }
+
   async function releaseEnvironmentLeasesForRun(input: {
     runId: string;
     companyId: string;
@@ -10274,10 +10297,14 @@ export function heartbeatService(
     // Recovery can finish workspace copy-back outside the executor's finally.
     // Successful copy-back does not earn warm retention for a failed turn.
     const status = leaseOwnerRun?.status ?? input.status;
-    const providerResourceDisposition = providerResourceDispositionForTerminalRun(
+    const terminalDisposition = providerResourceDispositionForTerminalRun(
       input.providerResourceDisposition,
       status,
     );
+    const closedIssueStatus = terminalDisposition === "keep_running"
+      ? await runClosedItsReusableLeaseIssue(input.runId, input.companyId)
+      : null;
+    const providerResourceDisposition = closedIssueStatus ? "destroy" : terminalDisposition;
     if (providerResourceDisposition === "destroy") {
       const closeResult = await (
         options.closeWarmNativeSessionsForRun ??
@@ -10349,6 +10376,7 @@ export function heartbeatService(
         status: leaseReleaseStatusForRunStatus(status),
         failureReason: input.failureReason ?? undefined,
         providerResourceDisposition,
+        ...(closedIssueStatus ? { destroyFailureReason: `issue_terminal_${closedIssueStatus}` } : {}),
         nativeLifecycleTelemetry: input.nativeLifecycleTelemetry,
       })
       .catch((err) => {
@@ -10369,6 +10397,12 @@ export function heartbeatService(
       );
     }
     await acknowledgeRemoteStop(input.runId, input.companyId);
+  }
+
+  // Reclaim retained warm sandboxes idle past their environment's
+  // `runnerIdleTimeoutMs`.
+  async function sweepIdleRetainedLeases() {
+    return environmentRuntime.reclaimIdleRetainedLeases();
   }
 
   async function acknowledgeRemoteStop(runId: string, companyId: string) {
@@ -30321,6 +30355,7 @@ export function heartbeatService(
     recoverNativeRunsAfterRestart,
     reapOrphanedRuns,
     sweepOrphanedActiveLeases,
+    sweepIdleRetainedLeases,
     sweepPendingCleanupLeases,
     // Override-aware scheduling-suppression check (honors the worktree
     // run-execution experimental setting). Callers outside the service that

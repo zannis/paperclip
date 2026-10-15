@@ -1509,6 +1509,10 @@ export function environmentService(db: Db) {
                 }
               }
               if (input.replacesReusableLeaseId) {
+                // The new lease takes over the same provider sandbox, so the
+                // old row ends without a teardown. A `retained` row kept the
+                // sandbox running, so it must not read as cleaned up. A
+                // `released` row keeps the cleanup status of its confirmed stop.
                 const retired = await tx
                   .update(environmentLeases)
                   .set({
@@ -1516,7 +1520,8 @@ export function environmentService(db: Db) {
                     releasedAt: now,
                     lastUsedAt: now,
                     updatedAt: now,
-                    cleanupStatus: "success",
+                    failureReason: "reusable_lease_handed_off",
+                    cleanupStatus: sql`case when ${environmentLeases.status} = 'retained' then null else ${environmentLeases.cleanupStatus} end`,
                   })
                   .where(
                     and(
