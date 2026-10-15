@@ -128,7 +128,9 @@ const KEPT_WORKSPACE_STOP_CONCURRENCY = 4;
 const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
 const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
 const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
-const KEPT_WORKSPACE_BLOCKING_STOP_MAX_BACKOFF_MS = 60_000;
+// A run's stop confirmed outside the reconciler, whose Stop and waiting
+// messages the reconciler still has to settle.
+const REMOTE_STOP_SETTLE_PENDING_KEY = "remoteStopSettlePending";
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -1401,6 +1403,10 @@ function createSandboxEnvironmentDriver(
     deferredOrphanCleanupBufferLimit?: number;
     orphanCleanupSpool?: SandboxOrphanCleanupSpool;
     orphanCleanupSpoolDir?: string;
+    /** One guarded stop attempt of a claim-blocking kept-workspace stop. */
+    attemptBlockingKeptWorkspaceStop?: (
+      lease: EnvironmentLease,
+    ) => Promise<"confirmed" | "destroyed" | "failed" | "skipped">;
   } = {},
 ): EnvironmentRuntimeDriver {
   const pluginWorkerManager = options.pluginWorkerManager;
@@ -3544,9 +3550,25 @@ function createSandboxEnvironmentDriver(
       .from(environmentLeases)
       .where(eq(environmentLeases.id, lease.id));
     if (current?.row.status !== "stopped") return null;
-    // A blocking stop was confirmed between the refused claim and this read.
-    if (!retried && !current.blocksClaim) {
-      return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
+    if (!retried) {
+      // Claimable again: a blocking stop was confirmed since the refused claim.
+      let claimable = !current.blocksClaim;
+      if (!claimable) {
+        // A run that did not succeed still holds the pod until its stop is
+        // confirmed. Make the next stop attempt now instead of waiting out the
+        // sweep's backoff, so every retry of this run gets one.
+        const outcome = await (options.attemptBlockingKeptWorkspaceStop?.(toEnvironmentLeaseSnapshot(current.row))
+          ?? Promise.resolve("skipped" as const))
+          .catch((error: unknown) => {
+            logger.warn({ err: error, leaseId: lease.id }, "kept-workspace sandbox stop attempt failed");
+            return "failed" as const;
+          });
+        if (outcome === "destroyed") return null;
+        claimable = outcome === "confirmed";
+      }
+      if (claimable) {
+        return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
+      }
     }
     throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
   }
@@ -4162,6 +4184,7 @@ export function environmentRuntimeService(
       deferredOrphanCleanupBufferLimit: options.deferredOrphanCleanupBufferLimit,
       orphanCleanupSpool: options.orphanCleanupSpool,
       orphanCleanupSpoolDir: options.orphanCleanupSpoolDir,
+      attemptBlockingKeptWorkspaceStop: (lease) => attemptKeptWorkspaceStop(lease, { settleLater: true }),
     }),
     ...(options.pluginWorkerManager
       ? [createPluginEnvironmentDriver(db, options.pluginWorkerManager)]
@@ -4204,7 +4227,14 @@ export function environmentRuntimeService(
    */
   async function attemptKeptWorkspaceStop(
     lease: EnvironmentLease,
-    options: { ownRunId?: string } = {},
+    options: {
+      ownRunId?: string;
+      /**
+       * The caller cannot settle the stopped run's Stop: a stop that ends a
+       * run's remote execution leaves that to the reconciler's next tick.
+       */
+      settleLater?: boolean;
+    } = {},
   ): Promise<"confirmed" | "destroyed" | "failed" | "skipped"> {
     const driver = getDriver("sandbox");
     if (!driver?.stopKeptWorkspaceLease) return "skipped";
@@ -4244,11 +4274,18 @@ export function environmentRuntimeService(
         eq(environmentLeases.status, "stopped"),
         sql`${sandboxEpochSql()} = ${epoch}`,
         sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not distinct from ${previous.attemptId ?? null}::text`,
+        // Never take over an attempt in flight; one whose claim expired died.
+        sql`(${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null
+          or coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0) <= ${Date.now()})`,
         notLive,
       ))
       .returning();
     if (!claimedRow) return "skipped";
     const claimed = toEnvironmentLeaseSnapshot(claimedRow);
+    const settleMarker = options.settleLater && claimed.heartbeatRunId &&
+      readKeptWorkspaceStop(claimed).blocksIssueClaim
+      ? { [REMOTE_STOP_SETTLE_PENDING_KEY]: true }
+      : {};
     // An outcome counts only when the row still belongs to this attempt; a
     // resume that claimed the row meanwhile owns it now.
     const settleAttempt = async (
@@ -4274,10 +4311,14 @@ export function environmentRuntimeService(
           failureReason: "sandbox_missing",
           releasedAt: new Date(),
           metadata: sql`(${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'remoteExecutionTermination')
-            || ${JSON.stringify(termination ? { remoteExecutionTermination: termination } : {})}::jsonb`,
+            || ${JSON.stringify({
+              ...(termination ? { remoteExecutionTermination: termination } : {}), ...settleMarker,
+            })}::jsonb`,
         }) ? "destroyed" : "skipped";
       } else if (state === "stopped") {
-        return await settleAttempt({ metadata: confirmedStopMetadataSql(termination) }) ? "confirmed" : "skipped";
+        return await settleAttempt({
+          metadata: sql`${confirmedStopMetadataSql(termination)} || ${JSON.stringify(settleMarker)}::jsonb`,
+        }) ? "confirmed" : "skipped";
       } else {
         throw new Error("The provider returned no stop receipt.");
       }
@@ -4288,12 +4329,10 @@ export function environmentRuntimeService(
       // row lags the Sandbox's fence, it backs off and warns like any failed
       // stop.
       const attempts = (previous.attempts ?? 0) + 1;
-      // A claim-blocking stop holds up the issue's next run (and any run
-      // resuming the workspace), so it backs off to a minute, not five.
+      // A run refused by a claim-blocking stop makes its own attempt, so the
+      // backoff only paces the sweep.
       const retryAfterMs = Date.now() + Math.min(
-        readKeptWorkspaceStop(claimed).blocksIssueClaim
-          ? KEPT_WORKSPACE_BLOCKING_STOP_MAX_BACKOFF_MS
-          : KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
+        KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
         KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
       );
       const backedOff = await settleAttempt({
@@ -5015,9 +5054,18 @@ export function environmentRuntimeService(
           sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)
             <= ${Date.now()}`,
         ))
-        // Stops that hold up a claim go first, then the longest idle.
-        .orderBy(sql`${stopBlocksIssueClaimSql()} desc`, asc(environmentLeases.lastUsedAt))
+        .orderBy(asc(environmentLeases.lastUsedAt))
         .limit(input.limit ?? KEPT_WORKSPACE_STOP_PAGE_SIZE);
+
+      // Settle the runs whose stop a blocked run confirmed itself.
+      const settled = await db
+        .update(environmentLeases)
+        .set({ metadata: sql`${environmentLeases.metadata} - ${REMOTE_STOP_SETTLE_PENDING_KEY}::text` })
+        .where(sql`coalesce(${environmentLeases.metadata}->${REMOTE_STOP_SETTLE_PENDING_KEY}::text = 'true'::jsonb, false)`)
+        .returning({ companyId: environmentLeases.companyId, runId: environmentLeases.heartbeatRunId });
+      for (const { companyId, runId } of settled) {
+        if (runId) result.stoppedRuns.push({ companyId, runId });
+      }
 
       // A few stops at a time: each can wait most of a minute on the provider.
       const queue = [...rows];

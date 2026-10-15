@@ -511,24 +511,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
     });
 
-    it("keeps a failing claim-blocking stop retrying at least once a minute", async () => {
-      const seeded = await seed();
-      const provider = fakeProvider({ stopFails: () => true });
-      const runId = await newRun(seeded);
-      const acquired = await acquire(seeded, provider, runId);
-      await finishRun(runId, "cancelled");
-      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      for (let i = 0; i < 6; i += 1) {
-        await expireStopBackoff(acquired.lease.id);
-        await services(provider).heartbeat.sweepKeptWorkspaceLeases();
-      }
-
-      const stop = (await leaseRow(acquired.lease.id)).metadata?.sandboxStop as { attempts: number; retryAfterMs: number };
-      expect(stop.attempts).toBeGreaterThanOrEqual(6);
-      expect(stop.retryAfterMs - Date.now()).toBeLessThanOrEqual(60_000);
-    });
-
-    it("stops a claim-blocking lease before longer-idle ones", async () => {
+    it("lets a run refused by a blocking stop on a long backoff stop the pod itself and resume", async () => {
       const seeded = await seed();
       let failStop = true;
       const provider = fakeProvider({ stopFails: () => failStop });
@@ -536,26 +519,42 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const acquired = await acquire(seeded, provider, runId);
       await finishRun(runId, "cancelled");
       await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      await expireStopBackoff(acquired.lease.id);
-      // A longer-idle stop of an ended run is also due.
-      const blocking = await leaseRow(acquired.lease.id);
-      const endedRun = await newRun(seeded, "succeeded");
-      const longAgo = new Date(Date.now() - 2 * 60 * 60_000);
-      const [idle] = await db.insert(environmentLeases).values({
-        companyId: blocking.companyId, environmentId: blocking.environmentId, issueId: blocking.issueId,
-        executionWorkspaceId: blocking.executionWorkspaceId, heartbeatRunId: endedRun, status: "stopped",
-        leasePolicy: blocking.leasePolicy, provider: blocking.provider, providerLeaseId: "pc-idle",
-        cleanupStatus: "pending", lastUsedAt: longAgo,
-        metadata: { ...(blocking.metadata as Record<string, unknown>), sandboxStop: { attempts: 0, retryAfterMs: 0 } },
-      }).returning();
+      // The stop keeps failing until the sweep's backoff is minutes long.
+      for (let i = 0; i < 4; i += 1) {
+        await expireStopBackoff(acquired.lease.id);
+        await services(provider).heartbeat.sweepKeptWorkspaceLeases();
+      }
       failStop = false;
 
-      await services(provider).runtime.reconcileStoppedLeases({ limit: 1 });
+      const blockedRun = await newRun(seeded);
+      const resumed = await acquire(seeded, provider, blockedRun);
 
-      expect(keptWorkspaceStopConfirmed(toLease(await leaseRow(acquired.lease.id)))).toBe(true);
-      expect(await leaseRow(idle!.id)).toMatchObject({ status: "stopped", metadata: expect.objectContaining({
-        sandboxStop: { attempts: 0, retryAfterMs: 0 },
-      }) });
+      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+      // The cancelled run's Stop is still settled, on the reconciler's next tick.
+      const reconciled = await services(provider).runtime.reconcileStoppedLeases();
+      expect(reconciled.stoppedRuns).toEqual([{ companyId: seeded.companyId, runId }]);
+      const again = await services(provider).runtime.reconcileStoppedLeases();
+      expect(again.stoppedRuns).toEqual([]);
+    });
+
+    it("never takes over a blocking stop attempt still in flight", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider({ stopFails: () => true });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      // Another attempt holds the stop claim.
+      await db.update(environmentLeases).set({
+        metadata: sql`jsonb_set(${environmentLeases.metadata}, '{sandboxStop}', ${environmentLeases.metadata}->'sandboxStop'
+          || ${JSON.stringify({ attemptId: randomUUID(), retryAfterMs: Date.now() + 90_000 })}::jsonb)`,
+      }).where(eq(environmentLeases.id, acquired.lease.id));
+      const stopsBefore = provider.methods().filter((m) => m === "environmentStopLease").length;
+
+      const blockedRun = await newRun(seeded);
+      await expect(acquire(seeded, provider, blockedRun)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
+
+      expect(provider.methods().filter((m) => m === "environmentStopLease")).toHaveLength(stopsBefore);
     });
 
     it("never claims a kept lease another live run holds active", async () => {
@@ -581,14 +580,17 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       await isLocked;
       const acquiring = acquire(seeded, provider, runId);
       // Commit only once the claim is waiting on the row lock.
-      for (;;) {
-        const [waiting] = await db.execute<{ n: number }>(sql`select count(*)::int as n from pg_locks where not granted`);
-        if ((waiting?.n ?? 0) > 0) break;
-        await new Promise((resolve) => setTimeout(resolve, 20));
+      let claimWaits = false;
+      for (let i = 0; i < 250 && !claimWaits; i += 1) {
+        const [waiting] = await db.execute<{ n: number }>(sql`select count(*)::int as n from pg_stat_activity
+          where wait_event_type = 'Lock' and query ilike 'update "environment_leases"%'`);
+        claimWaits = (waiting?.n ?? 0) > 0;
+        if (!claimWaits) await new Promise((resolve) => setTimeout(resolve, 20));
       }
       commit();
       await takeBack;
       const acquired = await acquiring;
+      expect(claimWaits).toBe(true);
 
       expect(acquired.lease.providerLeaseId).not.toBe(turn.lease.providerLeaseId);
       const held = await leaseRow(turn.lease.id);
