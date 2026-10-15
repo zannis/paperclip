@@ -190,6 +190,7 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       provider: "fake-plugin",
       providerLeaseId: input.providerLeaseId ?? `pc-${id.slice(0, 8)}`,
       lastUsedAt: input.lastUsedAt ?? new Date(),
+      updatedAt: input.lastUsedAt ?? new Date(),
       cleanupStatus: input.status === "active" ? null : "success",
       releasedAt: input.status === "released" ? new Date() : null,
       metadata: {
@@ -214,16 +215,23 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
 
   const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
 
+  // The lease cleanup tick: queue idle retained leases, then tear down
+  // pending_cleanup leases with the production backoff.
+  async function cleanupTick(pluginWorkerManager: PluginWorkerManager) {
+    const heartbeat = heartbeatService(db, { pluginWorkerManager });
+    const queued = await heartbeat.sweepIdleRetainedLeases();
+    await heartbeat.sweepPendingCleanupLeases({ backoffMs: 5 * 60_000 });
+    return queued;
+  }
+
   describe("idle reclaim", () => {
     it("destroys a retained lease's Sandbox once it has been idle longer than runnerIdleTimeoutMs", async () => {
       const seeded = await seed();
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
       const provider = fakeProvider();
-      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
-      const result = await runtime.reclaimIdleRetainedLeases();
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 1 });
 
-      expect(result).toMatchObject({ reclaimed: 1, failed: 0 });
       const row = await leaseRow(leaseId);
       expect(provider.destroyed).toEqual([row.providerLeaseId]);
       expect(row.status).toBe("expired");
@@ -236,9 +244,8 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       const seeded = await seed();
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(14) });
       const provider = fakeProvider();
-      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
-      expect(await runtime.reclaimIdleRetainedLeases()).toMatchObject({ reclaimed: 0, failed: 0 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
 
       expect(provider.call).not.toHaveBeenCalled();
       expect(await leaseRow(leaseId)).toMatchObject({ status: "retained", cleanupStatus: "success", releasedAt: null });
@@ -257,18 +264,18 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
         invocationSource: "on_demand", status: "running", nextEventSeq: 1,
       });
       await db.update(environmentLeases)
-        .set({ status: "active", heartbeatRunId: nextRunId, lastUsedAt: minutesAgo(10), releasedAt: null, cleanupStatus: null })
+        .set({ status: "active", heartbeatRunId: nextRunId, releasedAt: null, cleanupStatus: null })
         .where(eq(environmentLeases.id, leaseId));
       // Even once the original idle window has passed, an active lease is in use.
       await db.update(environmentLeases).set({ lastUsedAt: minutesAgo(20) }).where(eq(environmentLeases.id, leaseId));
-      expect(await runtime.reclaimIdleRetainedLeases()).toMatchObject({ reclaimed: 0 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
       expect((await leaseRow(leaseId)).status).toBe("active");
 
       // The run ends warm: releasing it as retained stamps a fresh lastUsedAt.
       await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, nextRunId));
       await runtime.releaseRunLeases(nextRunId, "released", undefined, "keep_running");
       expect((await leaseRow(leaseId)).status).toBe("retained");
-      expect(await runtime.reclaimIdleRetainedLeases()).toMatchObject({ reclaimed: 0 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
 
       expect(provider.call).not.toHaveBeenCalled();
       expect((await leaseRow(leaseId)).status).toBe("retained");
@@ -278,9 +285,8 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       const seeded = await seed({ lifecycle: { runnerLifecycleMode: "per_turn" } });
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(24 * 60) });
       const provider = fakeProvider();
-      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
-      expect(await runtime.reclaimIdleRetainedLeases()).toMatchObject({ reclaimed: 0, failed: 0 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
 
       expect(provider.call).not.toHaveBeenCalled();
       expect((await leaseRow(leaseId)).status).toBe("retained");
@@ -290,33 +296,14 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       const seeded = await seed();
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
       const provider = fakeProvider({ destroyFails: true });
-      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
-      expect(await runtime.reclaimIdleRetainedLeases()).toMatchObject({ reclaimed: 0, failed: 1 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 1 });
 
       expect(provider.call.mock.calls.map((call) => call[1])).toEqual(["environmentDestroyLease"]);
-      const row = await leaseRow(leaseId);
-      expect(row.status).toBe("pending_cleanup");
-      expect(row.cleanupStatus).toBe("failed");
-      // The pending_cleanup sweep retries it on its normal backoff.
-      expect(row.metadata).toMatchObject({ pendingCleanupInFlight: false });
-      expect(row.metadata?.pendingCleanupRetryAfterMs).toBeGreaterThan(Date.now());
-      expect(row.metadata?.pendingCleanupRetryAfterMs).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+      expect(await leaseRow(leaseId)).toMatchObject({ status: "pending_cleanup", cleanupStatus: "failed" });
     });
 
-    it("runs on the heartbeat lease cleanup sweep", async () => {
-      const seeded = await seed();
-      const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
-      const provider = fakeProvider();
-      const heartbeat = heartbeatService(db, { pluginWorkerManager: provider.pluginWorkerManager });
-
-      await heartbeat.sweepIdleRetainedLeases();
-
-      const row = await leaseRow(leaseId);
-      expect(provider.destroyed).toEqual([row.providerLeaseId]);
-      expect(row).toMatchObject({ status: "expired", cleanupStatus: "success" });
-    });
-    it("reclaims a Sandbox once when two sweeps race for it", async () => {
+    it("queues a Sandbox once when two sweeps race for it", async () => {
       const seeded = await seed();
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
       const provider = fakeProvider();
@@ -324,8 +311,9 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       const second = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
       const results = await Promise.all([first.reclaimIdleRetainedLeases(), second.reclaimIdleRetainedLeases()]);
+      await cleanupTick(provider.pluginWorkerManager);
 
-      expect(results.reduce((sum, result) => sum + result.reclaimed, 0)).toBe(1);
+      expect(results.reduce((sum, result) => sum + result.claimed, 0)).toBe(1);
       expect(provider.destroyed).toHaveLength(1);
       expect(await leaseRow(leaseId)).toMatchObject({ status: "expired", cleanupStatus: "success" });
     });
@@ -338,26 +326,11 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
         metadata: { reusableSandboxLease: { version: 1, adapterType: "paperclip_runner" } },
       });
       const provider = fakeProvider();
-      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
-      expect(await runtime.reclaimIdleRetainedLeases()).toMatchObject({ reclaimed: 0, failed: 0 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
 
       expect(provider.call).not.toHaveBeenCalled();
       expect((await leaseRow(leaseId)).status).toBe("retained");
-    });
-
-    it("waits for the provider worker instead of parking the lease as a failed cleanup", async () => {
-      const seeded = await seed();
-      const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
-      const provider = fakeProvider();
-      const runtime = environmentRuntimeService(db, {
-        pluginWorkerManager: { ...provider.pluginWorkerManager, isRunning: () => false } as unknown as PluginWorkerManager,
-      });
-
-      expect(await runtime.reclaimIdleRetainedLeases()).toEqual({ reclaimed: 0, failed: 0 });
-
-      expect(provider.call).not.toHaveBeenCalled();
-      expect(await leaseRow(leaseId)).toMatchObject({ status: "retained", cleanupStatus: "success" });
     });
 
     it("never destroys a Sandbox another reusable lease row still holds", async () => {
@@ -366,9 +339,8 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       const leaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16), providerLeaseId });
       await insertLease(seeded, { status: "released", providerLeaseId });
       const provider = fakeProvider();
-      const runtime = environmentRuntimeService(db, { pluginWorkerManager: provider.pluginWorkerManager });
 
-      expect(await runtime.reclaimIdleRetainedLeases()).toEqual({ reclaimed: 0, failed: 0 });
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 0 });
 
       expect(provider.call).not.toHaveBeenCalled();
       expect((await leaseRow(leaseId)).status).toBe("retained");
@@ -377,7 +349,7 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
     it("does not destroy a Sandbox that a new run is resuming when the sweep runs", async () => {
       const seeded = await seed({ runStatus: "running" });
       const destroyed: string[] = [];
-      let sweepDuringResume: { reclaimed: number; failed: number } | null = null;
+      let sweepDuringResume: { claimed: number } | null = null;
       let runtime!: ReturnType<typeof environmentRuntimeService>;
       const call = vi.fn(async (_pluginId: string, method: string, input: { providerLeaseId?: string }) => {
         if (method === "environmentAcquireLease") {
@@ -426,7 +398,7 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
       });
       const next = await acquire(nextRunId);
 
-      expect(sweepDuringResume).toEqual({ reclaimed: 0, failed: 0 });
+      expect(sweepDuringResume).toEqual({ claimed: 0 });
       expect(destroyed).toEqual([]);
       expect(next.lease).toMatchObject({ status: "active", providerLeaseId: "pc-warm" });
     });

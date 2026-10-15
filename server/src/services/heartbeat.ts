@@ -609,6 +609,8 @@ import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.j
 import { retryChatControlAdmission } from "./chat-control-admission-retry.js";
 import {
   environmentRuntimeService,
+  notPaperclipRunnerLeaseSql,
+  RETAINED_LEASE_IDLE_FAILURE_REASON,
   type ProviderResourceDisposition,
 } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
@@ -10271,9 +10273,7 @@ export function heartbeatService(
           eq(environmentLeases.heartbeatRunId, runId),
           eq(environmentLeases.status, "active"),
           eq(environmentLeases.leasePolicy, "reuse_by_environment"),
-          // A Paperclip Runner lease carries harness state its issue may need
-          // again; it keeps the existing retention and close-hook lifecycle.
-          sql`coalesce(${environmentLeases.metadata}->'reusableSandboxLease'->>'adapterType', '') <> 'paperclip_runner'`,
+          notPaperclipRunnerLeaseSql(),
           inArray(issues.status, ["done", "cancelled"]),
         ),
       )
@@ -18909,7 +18909,11 @@ export function heartbeatService(
           const result = await environmentRuntime.destroyRunLease({
             environment,
             lease,
-            failureReason: "pending_cleanup_retry",
+            // An idle reclaim keeps its reason, so the row says why the
+            // sandbox went away.
+            failureReason: lease.failureReason === RETAINED_LEASE_IDLE_FAILURE_REASON
+              ? RETAINED_LEASE_IDLE_FAILURE_REASON
+              : "pending_cleanup_retry",
           });
           if (result && result.status !== "pending_cleanup") {
             destroyed += 1;

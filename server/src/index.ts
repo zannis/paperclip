@@ -1247,14 +1247,14 @@ async function startServerWithDatabaseTeardown(
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
-  // Reclaim idle retained warm sandboxes first. A reclaim whose provider
-  // destroy fails stays `pending_cleanup`, and the sweep below retries it.
+  // Queue idle retained warm sandboxes first, so the pending_cleanup sweep
+  // below tears them down on the same tick.
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
       .sweepIdleRetainedLeases()
       .then((result) => {
-        if (result.reclaimed > 0 || result.failed > 0) {
-          logger.info(result, "environment lease cleanup sweep reclaimed idle retained sandboxes");
+        if (result.claimed > 0) {
+          logger.info(result, "environment lease cleanup sweep queued idle retained sandboxes for teardown");
         }
       })
       .catch((err) => {
