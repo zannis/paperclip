@@ -29,16 +29,25 @@ function readEnvValueCaseInsensitive(env: NodeJS.ProcessEnv, key: string): strin
 }
 
 // Network settings an operator commonly sets both on the server and in agent
-// config. Installs need them, and they are not server secrets.
+// config. Installs need them, and they are not server secrets. This only
+// keeps them when the run's env already carries them; a sandbox never gets
+// the server's own network settings.
 const SANDBOX_SETUP_ENV_SHARED_KEYS = new Set([
   "HTTP_PROXY",
   "HTTPS_PROXY",
   "NO_PROXY",
   "ALL_PROXY",
   "NPM_CONFIG_REGISTRY",
+  "NPM_CONFIG_PROXY",
+  "NPM_CONFIG_HTTPS_PROXY",
+  "NPM_CONFIG_NOPROXY",
+  "NPM_CONFIG_CAFILE",
+  "NPM_CONFIG_STRICT_SSL",
   "NODE_EXTRA_CA_CERTS",
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+  "REQUESTS_CA_BUNDLE",
 ]);
 
 // Drops every key whose value is the one the server process inherited, so a

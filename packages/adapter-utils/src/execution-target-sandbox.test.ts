@@ -2322,21 +2322,25 @@ describe("sandbox adapter execution targets", () => {
     it("keeps operator network settings that equal the host's", async () => {
       vi.stubEnv("HTTPS_PROXY", "http://proxy.internal:3128");
       vi.stubEnv("NODE_EXTRA_CA_CERTS", "/etc/ssl/internal-ca.pem");
+      vi.stubEnv("npm_config_https_proxy", "http://proxy.internal:3128");
+      vi.stubEnv("NPM_CONFIG_CAFILE", "/etc/ssl/internal-ca.pem");
+      vi.stubEnv("CURL_CA_BUNDLE", "/etc/ssl/internal-ca.pem");
       vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
       const runner = { execute: vi.fn(async () => okResult()) };
+      const networkSettings = {
+        HTTPS_PROXY: "http://proxy.internal:3128",
+        NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem",
+        npm_config_https_proxy: "http://proxy.internal:3128",
+        NPM_CONFIG_CAFILE: "/etc/ssl/internal-ca.pem",
+        CURL_CA_BUNDLE: "/etc/ssl/internal-ca.pem",
+      };
 
       await runAdapterExecutionTargetShellCommand("run-env-3", sandboxTarget(runner), "npm install -g agent-cli", {
         cwd: "/local/workspace",
-        env: {
-          HTTPS_PROXY: "http://proxy.internal:3128",
-          NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem",
-          HOST_ONLY_SECRET: "host-secret-value",
-        },
+        env: { ...networkSettings, HOST_ONLY_SECRET: "host-secret-value" },
       });
 
-      expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({
-        env: { HTTPS_PROXY: "http://proxy.internal:3128", NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem" },
-      }));
+      expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({ env: networkSettings }));
     });
 
     it("drops host-inherited values from sandbox shell commands but keeps run-set values", async () => {
