@@ -5,6 +5,7 @@ import { hasNativeWorkspaceExportResume, releaseCompletedNativeWorkspaceExportRe
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import { companySecrets, companySecretVersions, environmentLeases, environments, heartbeatRuns, issues } from "@paperclipai/db";
 import type {
   Environment,
@@ -49,6 +50,7 @@ import {
 } from "./environment-config.js";
 import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import {
+  KEPT_WORKSPACE_STOP_KEY,
   STOP_KEY_SQL,
   bumpSandboxEpochSql,
   stopBlocksIssueClaimSql,
@@ -127,8 +129,6 @@ const KEPT_WORKSPACE_STOP_CONCURRENCY = 4;
 const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
 const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
 const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
-// Matches the bounded resume retries of a run blocked by the stop.
-const KEPT_WORKSPACE_BLOCKING_STOP_FAST_ATTEMPTS = 2;
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -3482,8 +3482,10 @@ function createSandboxEnvironmentDriver(
    * Mark a reusable lease as in use before the provider resume. The idle sweep
    * claims a retained lease only while its `lastUsedAt` is past the idle bound,
    * so stamping it first means the sweep cannot destroy a sandbox this
-   * acquisition is about to resume. A lease the sweep already claimed is no
-   * longer reusable, and the acquisition creates a new sandbox instead.
+   * acquisition is about to resume. A lease the sweep already claimed, or
+   * another live run holds, is not reusable, and the acquisition creates a
+   * new sandbox instead; a still-stopped kept workspace is the exception, and
+   * a refused claim on it fails the run with a retryable resume error.
    */
   async function claimReusableLeaseForResume(
     lease: EnvironmentLease | null | undefined,
@@ -3513,7 +3515,14 @@ function createSandboxEnvironmentDriver(
       .where(
         and(
           eq(environmentLeases.id, lease.id),
-          inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
+          // An active lease is claimable only by its own run, as in
+          // reusableLeaseCanBeResumed: the row can change after the listing.
+          or(
+            inArray(environmentLeases.status, ["released", "retained", "stopped"]),
+            heartbeatRunId
+              ? and(eq(environmentLeases.status, "active"), eq(environmentLeases.heartbeatRunId, heartbeatRunId))
+              : undefined,
+          ),
           // A cancelled or crashed run's agent may still run in that pod
           // until its stop is confirmed; no other run may take it over.
           sql`not ${stopBlocksIssueClaimSql()}`,
@@ -3539,6 +3548,16 @@ function createSandboxEnvironmentDriver(
     if (!retried && !current.blocksClaim) {
       return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
     }
+    // This run now waits on the stop: retry it on the next sweep tick, so
+    // each retry of the run finds a fresh stop attempt, whatever the stop's
+    // backoff. An attempt already in flight keeps its claim.
+    await db.update(environmentLeases).set({
+      metadata: sql`jsonb_set(${environmentLeases.metadata}, ${sql.raw(`'{${KEPT_WORKSPACE_STOP_KEY},retryAfterMs}'`)}, '0'::jsonb)`,
+    }).where(and(
+      eq(environmentLeases.id, lease.id),
+      stopBlocksIssueClaimSql(),
+      sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null`,
+    ));
     throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
   }
 
@@ -4240,34 +4259,35 @@ export function environmentRuntimeService(
       .returning();
     if (!claimedRow) return "skipped";
     const claimed = toEnvironmentLeaseSnapshot(claimedRow);
-    const sameAttempt = and(
-      eq(environmentLeases.id, lease.id),
-      eq(environmentLeases.status, "stopped"),
-      sql`${sandboxEpochSql()} = ${epoch}`,
-      sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' = ${attemptId}`,
-    );
+    // An outcome counts only when the row still belongs to this attempt; a
+    // resume that claimed the row meanwhile owns it now.
+    const settleAttempt = async (
+      set: PgUpdateSetSource<typeof environmentLeases>,
+    ): Promise<boolean> => {
+      const settled = await db.update(environmentLeases).set(set).where(and(
+        eq(environmentLeases.id, lease.id),
+        eq(environmentLeases.status, "stopped"),
+        sql`${sandboxEpochSql()} = ${epoch}`,
+        sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' = ${attemptId}`,
+      )).returning({ id: environmentLeases.id });
+      return settled.length > 0;
+    };
     try {
       const receipt = await driver.stopKeptWorkspaceLease({ lease: claimed });
       const state = (receipt as { state?: unknown } | null)?.state;
       const termination = remoteTerminationReceipt(claimed, receipt);
-      // An outcome counts only when the row still belongs to this attempt; a
-      // resume that claimed the row meanwhile owns it now.
       if (state === "destroyed") {
         // The Sandbox, and with it the volume, is already gone.
-        const settled = await db.update(environmentLeases).set({
+        return await settleAttempt({
           status: "expired",
           cleanupStatus: "success",
           failureReason: "sandbox_missing",
           releasedAt: new Date(),
           metadata: sql`(${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'remoteExecutionTermination')
             || ${JSON.stringify(termination ? { remoteExecutionTermination: termination } : {})}::jsonb`,
-        }).where(sameAttempt).returning({ id: environmentLeases.id });
-        return settled.length > 0 ? "destroyed" : "skipped";
+        }) ? "destroyed" : "skipped";
       } else if (state === "stopped") {
-        const settled = await db.update(environmentLeases)
-          .set({ metadata: confirmedStopMetadataSql(termination) })
-          .where(sameAttempt).returning({ id: environmentLeases.id });
-        return settled.length > 0 ? "confirmed" : "skipped";
+        return await settleAttempt({ metadata: confirmedStopMetadataSql(termination) }) ? "confirmed" : "skipped";
       } else {
         throw new Error("The provider returned no stop receipt.");
       }
@@ -4278,22 +4298,18 @@ export function environmentRuntimeService(
       // row lags the Sandbox's fence, it backs off and warns like any failed
       // stop.
       const attempts = (previous.attempts ?? 0) + 1;
-      // A run blocked by this stop retries twice, 30 s apart; the stop keeps
-      // that pace while it can still unblock the run, then backs off.
-      const retryAfterMs = Date.now() + (
-        readKeptWorkspaceStop(claimed).blocksIssueClaim && attempts <= KEPT_WORKSPACE_BLOCKING_STOP_FAST_ATTEMPTS
-        ? KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS
-        : Math.min(
-          KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
-          KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
-        ));
-      const backedOff = await db.update(environmentLeases).set({
+      // A run refused by a claim-blocking stop pulls its next attempt forward.
+      const retryAfterMs = Date.now() + Math.min(
+        KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
+        KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
+      );
+      const backedOff = await settleAttempt({
         metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
           (${environmentLeases.metadata}->${STOP_KEY_SQL}) - 'attemptId' || ${JSON.stringify({
             attempts, retryAfterMs, lastError: error instanceof Error ? error.name : "unknown",
           })}::jsonb)`,
-      }).where(sameAttempt).returning({ id: environmentLeases.id });
-      if (backedOff.length === 0) return "skipped";
+      });
+      if (!backedOff) return "skipped";
       if (attempts === KEPT_WORKSPACE_STOP_WARN_ATTEMPTS) {
         // The error itself can carry provider detail; log the identifiers only.
         logger.warn(

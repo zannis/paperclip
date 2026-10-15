@@ -511,6 +511,63 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
     });
 
+    it("retries a blocking stop on the next tick when a run is refused by it, whatever its backoff", async () => {
+      const seeded = await seed();
+      let failStop = true;
+      const provider = fakeProvider({ stopFails: () => failStop });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      // The stop keeps failing until it sits on a long backoff.
+      for (let i = 0; i < 4; i += 1) {
+        await expireStopBackoff(acquired.lease.id);
+        await services(provider).heartbeat.sweepKeptWorkspaceLeases();
+      }
+      failStop = false;
+
+      const blockedRun = await newRun(seeded);
+      await expect(acquire(seeded, provider, blockedRun)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
+      const kept = await services(provider).heartbeat.sweepKeptWorkspaceLeases();
+
+      expect(kept.confirmed).toBe(1);
+      const resumed = await acquire(seeded, provider, blockedRun);
+      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+    });
+
+    it("never claims a kept lease another live run holds active", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const turn = await warmTurn(seeded, provider, ["notes.md", "kept"]);
+      const holderRun = await newRun(seeded);
+      const runId = await newRun(seeded);
+      const before = await leaseRow(turn.lease.id);
+      // Another run takes the lease back in a transaction that commits only
+      // once this run's claim is waiting on the row; this run lists the lease
+      // as retained, and its claim re-checks the row it finally gets.
+      let locked!: () => void;
+      let commit!: () => void;
+      const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+      const committed = new Promise<void>((resolve) => { commit = resolve; });
+      const takeBack = db.transaction(async (tx) => {
+        await tx.update(environmentLeases).set({ status: "active", heartbeatRunId: holderRun })
+          .where(eq(environmentLeases.id, turn.lease.id));
+        locked();
+        await committed;
+      });
+      await isLocked;
+      const acquiring = acquire(seeded, provider, runId);
+      setTimeout(commit, 500);
+      await takeBack;
+      const acquired = await acquiring;
+
+      expect(acquired.lease.providerLeaseId).not.toBe(turn.lease.providerLeaseId);
+      const held = await leaseRow(turn.lease.id);
+      expect(held).toMatchObject({ status: "active", heartbeatRunId: holderRun });
+      expect(held.metadata?.sandboxEpoch).toBe(before.metadata?.sandboxEpoch);
+      expect(held.metadata?.resumeClaimRunId).not.toBe(runId);
+    });
+
     it("loses the handoff when a concurrent claim moved the epoch past this resume", async () => {
       const seeded = await seed();
       let concurrentRun = "";
