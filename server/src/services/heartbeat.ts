@@ -10425,8 +10425,16 @@ export function heartbeatService(
   // Destroy kept workspaces of closed issues, then issue the provider stop
   // for every stopped lease whose stop is not confirmed yet.
   async function sweepKeptWorkspaceLeases() {
-    const terminal = await environmentRuntime.reconcileTerminalKeptLeases();
-    const closedWorkspaces = await destroyKeptLeasesOfClosedWorkspaces();
+    // Each phase runs even when an earlier one fails, so a broken destroy can
+    // never hold back the stops that free quota and unblock issue claims.
+    const terminal = await environmentRuntime.reconcileTerminalKeptLeases().catch((err) => {
+      logger.error({ err }, "closed-issue kept-workspace sweep failed");
+      return { destroyed: 0 };
+    });
+    const closedWorkspaces = await destroyKeptLeasesOfClosedWorkspaces().catch((err) => {
+      logger.error({ err }, "closed-workspace kept-workspace sweep failed");
+      return 0;
+    });
     const stopped = await environmentRuntime.reconcileStoppedLeases();
     return { ...stopped, terminalDestroyed: terminal.destroyed + closedWorkspaces };
   }
@@ -10453,17 +10461,22 @@ export function heartbeatService(
       .limit(100);
     let destroyed = 0;
     for (const row of rows) {
-      const fenced = await executionWorkspacesSvc.fenceClosedWorkspaceDestruction({
-        workspaceId: row.executionWorkspaceId,
-        capturedGeneration: readExecutionWorkspaceLifecycleGeneration(row.metadata as Record<string, unknown> | null),
-        destroy: () => environmentRuntime.destroyReusableSandboxLeases({
-          companyId: row.companyId,
-          executionWorkspaceId: row.executionWorkspaceId,
-          failureReason: "execution_workspace_closed",
-        }),
-      });
-      if (!fenced.skippedReopened) {
-        destroyed += fenced.result.filter((record) => record.lease.status === "expired").length;
+      try {
+        const fenced = await executionWorkspacesSvc.fenceClosedWorkspaceDestruction({
+          workspaceId: row.executionWorkspaceId,
+          capturedGeneration: readExecutionWorkspaceLifecycleGeneration(row.metadata as Record<string, unknown> | null),
+          destroy: () => environmentRuntime.destroyReusableSandboxLeases({
+            companyId: row.companyId,
+            executionWorkspaceId: row.executionWorkspaceId,
+            failureReason: "execution_workspace_closed",
+          }),
+        });
+        if (!fenced.skippedReopened) {
+          destroyed += fenced.result.filter((record) => record.lease.status === "expired").length;
+        }
+      } catch (err) {
+        logger.warn({ err, executionWorkspaceId: row.executionWorkspaceId },
+          "kept-workspace destroy for a closed execution workspace failed");
       }
     }
     return destroyed;

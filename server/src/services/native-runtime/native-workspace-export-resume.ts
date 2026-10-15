@@ -9,6 +9,7 @@ type Lease = {
   id: string; companyId: string; heartbeatRunId: string | null;
   provider: string | null; providerLeaseId: string | null;
   metadata: Record<string, unknown> | null;
+  leasePolicy?: string;
 };
 
 export const NATIVE_WORKSPACE_EXPORT_RESUME_KEY = "nativeWorkspaceExportResume";
@@ -108,7 +109,9 @@ export async function settleNativeWorkspaceExportResume(db: Db, lease: Lease, op
   const stopped = receipt?.state === "stopped";
   // A stopped Sandbox that keeps its workspace volume still holds provider
   // storage, so it settles as `stopped`, never as cleaned up.
-  const keptWorkspace = stopped && leaseKeepsWorkspace(lease);
+  // Only a reusable lease is ever resumed or destroyed by an issue or workspace
+  // close, so only a reusable lease may be left holding its volume.
+  const keptWorkspace = stopped && lease.leasePolicy === "reuse_by_environment" && leaseKeepsWorkspace(lease);
   const now = new Date();
   const [row] = await db.update(environmentLeases).set({
     status: keptWorkspace ? "stopped" : stopped ? options.status ?? "released" : "pending_cleanup",

@@ -206,8 +206,11 @@ export async function stopSuspendableSandbox(
     if (resumeEpoch > input.epoch) {
       throw new SandboxStopSupersededError(input.name, input.epoch, resumeEpoch);
     }
+    // Never lower the fence: a stale stop must not re-open it for a resume
+    // that a newer stop already refused.
+    const stopEpoch = Math.max(readEpoch(cr, STOP_EPOCH_ANNOTATION), input.epoch);
     return {
-      metadata: { annotations: { [STOP_EPOCH_ANNOTATION]: String(input.epoch) } },
+      metadata: { annotations: { [STOP_EPOCH_ANNOTATION]: String(stopEpoch) } },
       spec: { replicas: 0 },
     };
   });
@@ -299,31 +302,53 @@ export async function resumeSuspendableSandbox(
     if (liveVolumeUid !== recordedVolumeUid) return { outcome: "volume_replaced" };
   }
 
-  const coldStart = (initial.spec?.replicas ?? 1) === 0;
   const fenceResume = (cr: SandboxObject) => {
     const stopEpoch = readEpoch(cr, STOP_EPOCH_ANNOTATION);
     if (stopEpoch >= input.epoch) {
       throw new SandboxResumeFencedError(input.name, input.epoch, stopEpoch);
     }
+    // A newer resume owns the Sandbox; this one is stale.
+    const resumeEpoch = readEpoch(cr, RESUME_EPOCH_ANNOTATION);
+    if (resumeEpoch > input.epoch) {
+      throw new SandboxResumeFencedError(input.name, input.epoch, resumeEpoch);
+    }
   };
-  if (coldStart) {
-    fenceResume(initial);
-    await refreshEnvSecret(clients, {
-      namespace: input.namespace,
-      secretName: input.secretName,
-      adapterEnv: input.adapterEnv,
-    });
-  }
 
-  const result = await fencedPatch(clients, input, (cr) => {
+  // Decide on a cold start from the read the patch is conditioned on, so a
+  // stop that lands after the first read still gets a refreshed Secret.
+  let refreshed = false;
+  let coldStart = false;
+  let targetGeneration = 0;
+  for (let attempt = 0; ; attempt += 1) {
+    const cr = await getSandbox(clients, input);
+    if (!cr) return { outcome: "missing" };
     fenceResume(cr);
-    return {
-      metadata: { annotations: { [RESUME_EPOCH_ANNOTATION]: String(input.epoch) } },
-      spec: { replicas: 1 },
-    };
-  });
-  if (!result) return { outcome: "missing" };
-  const targetGeneration = result.patched?.metadata?.generation ?? result.cr.metadata?.generation ?? 0;
+    const suspended = (cr.spec?.replicas ?? 1) === 0;
+    if (suspended && !refreshed) {
+      await refreshEnvSecret(clients, {
+        namespace: input.namespace,
+        secretName: input.secretName,
+        adapterEnv: input.adapterEnv,
+      });
+      refreshed = true;
+      continue;
+    }
+    try {
+      const patched = await patchSandbox(clients, input, {
+        metadata: {
+          annotations: { [RESUME_EPOCH_ANNOTATION]: String(input.epoch) },
+          resourceVersion: cr.metadata?.resourceVersion,
+        },
+        spec: { replicas: 1 },
+      });
+      coldStart = suspended;
+      targetGeneration = patched.metadata?.generation ?? cr.metadata?.generation ?? 0;
+      break;
+    } catch (err) {
+      if (isKubeNotFoundError(err)) return { outcome: "missing" };
+      if (!isConflict(err) || attempt >= MAX_CONFLICT_RETRIES) throw err;
+    }
+  }
 
   const pollMs = input.pollMs ?? 1_000;
   const startedAt = Date.now();

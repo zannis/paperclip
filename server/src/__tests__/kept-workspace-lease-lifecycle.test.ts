@@ -561,6 +561,28 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
   });
 
   describe("terminal paths delete the kept volume", () => {
+    it("keeps an unreachable kept workspace while another run still holds a resume claim on it", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider();
+      const first = await stoppedLease(seeded, provider);
+      const claimingRun = await newRun(seeded);
+      await db.update(environmentLeases).set({
+        metadata: sql`${environmentLeases.metadata} || ${JSON.stringify({
+          sandboxEpoch: 1, resumeClaimRunId: claimingRun, resumeClaimedAt: new Date().toISOString(),
+        })}::jsonb`,
+      }).where(eq(environmentLeases.id, first.lease.id));
+
+      const runId = await newRun(seeded);
+      const environment = (await environmentService(db).getById(seeded.environmentId))!;
+      await services(provider).runtime.acquireRunLease({
+        companyId: seeded.companyId, environment, issueId: seeded.issueId, agentId: seeded.agentId,
+        adapterType: "codex_local", heartbeatRunId: runId, persistedExecutionWorkspace: null,
+      });
+
+      expect(provider.sandboxes.has(first.lease.providerLeaseId!)).toBe(true);
+      expect((await leaseRow(first.lease.id)).status).toBe("stopped");
+    });
+
     it("destroys a stopped kept workspace that an adapter change made unreachable", async () => {
       const seeded = await seed();
       const provider = fakeProvider();
@@ -746,6 +768,24 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const nextRun = await newRun(seeded);
       await acquire(seeded, provider, nextRun);
       expect(await remoteExecutionHasStopped(db, seeded.companyId, runId)).toBe(true);
+    });
+
+    it("releases, rather than stops, an ephemeral lease even when its files would survive", async () => {
+      const seeded = await seed();
+      await db.update(environments)
+        .set({ config: sql`${environments.config} || '{"reuseLease":false}'::jsonb` })
+        .where(eq(environments.id, seeded.environmentId));
+      const provider = fakeProvider();
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      expect(acquired.lease.leasePolicy).toBe("ephemeral");
+      await finishRun(runId, "cancelled");
+
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+
+      expect(provider.methods()).not.toContain("environmentStopLease");
+      expect(provider.sandboxes.has(acquired.lease.providerLeaseId!)).toBe(false);
+      expect((await leaseRow(acquired.lease.id)).status).not.toBe("stopped");
     });
 
     it("releases, rather than stops, a lease whose workspace would not survive", async () => {

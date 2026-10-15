@@ -826,14 +826,16 @@ const plugin = definePlugin({
       kubeconfig: config.kubeconfig,
     }));
 
-    uploadInterceptorsByLease.delete(params.providerLeaseId);
-    readySandboxesByLease.delete(params.providerLeaseId);
     const state = await stopSuspendableSandbox(clients, {
       namespace,
       name: params.providerLeaseId,
       epoch,
       timeoutMs: SUSPEND_CONFIRM_TIMEOUT_MS,
     });
+    // Drop per-lease state only once this stop owns the outcome: a stop the
+    // fence refused must not wipe the state of the run that resumed the lease.
+    uploadInterceptorsByLease.delete(params.providerLeaseId);
+    readySandboxesByLease.delete(params.providerLeaseId);
     return { providerLeaseId: params.providerLeaseId, state };
   },
 

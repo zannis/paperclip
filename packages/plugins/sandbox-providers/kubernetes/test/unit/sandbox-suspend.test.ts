@@ -223,6 +223,21 @@ describe("stopSuspendableSandbox", () => {
     expect(cluster.cr?.spec.replicas).toBe(1);
   });
 
+  it("never lowers the stop fence when a stale stop lands after a newer one", async () => {
+    const cluster = fakeCluster({
+      replicas: 0,
+      annotations: { [STOP_EPOCH_ANNOTATION]: "5", [RESUME_EPOCH_ANNOTATION]: "4" },
+    });
+
+    await stopSuspendableSandbox(cluster.clients, { ...BASE, epoch: 4 });
+
+    expect(cluster.cr?.metadata.annotations[STOP_EPOCH_ANNOTATION]).toBe("5");
+    // A late resume at epoch 5 is therefore still refused.
+    await expect(resumeSuspendableSandbox(cluster.clients, {
+      ...BASE, epoch: 5, secretName: "pc-abc-env", adapterEnv: {},
+    })).rejects.toBeInstanceOf(SandboxResumeFencedError);
+  });
+
   it("re-reads and re-checks the fence when the patch loses a resourceVersion race", async () => {
     const cluster = fakeCluster({
       conflictOnFirstPatch: true,
@@ -278,6 +293,37 @@ describe("resumeSuspendableSandbox", () => {
       resumeSuspendableSandbox(cluster.clients, { ...BASE, ...REFRESH, epoch: 3 }),
     ).rejects.toBeInstanceOf(SandboxResumeFencedError);
     expect(cluster.cr?.spec.replicas).toBe(0);
+  });
+
+  it("refuses a stale resume once a newer resume has stamped the Sandbox", async () => {
+    const cluster = fakeCluster({ replicas: 1, annotations: { [RESUME_EPOCH_ANNOTATION]: "6" } });
+
+    await expect(
+      resumeSuspendableSandbox(cluster.clients, { ...BASE, ...REFRESH, epoch: 5 }),
+    ).rejects.toBeInstanceOf(SandboxResumeFencedError);
+    expect(cluster.cr?.metadata.annotations[RESUME_EPOCH_ANNOTATION]).toBe("6");
+  });
+
+  it("refreshes the Secret when a stop lands between its first read and its patch", async () => {
+    let raced = false;
+    const cluster = fakeCluster({
+      replicas: 1,
+      conflictOnFirstPatch: true,
+      beforePatch: (cr) => {
+        if (raced) return;
+        raced = true;
+        // An in-flight stop at the previous epoch suspends the Sandbox.
+        cr.spec.replicas = 0;
+        cr.metadata.generation += 1;
+        cr.metadata.annotations[STOP_EPOCH_ANNOTATION] = "1";
+      },
+    });
+
+    const result = await resumeSuspendableSandbox(cluster.clients, { ...BASE, ...REFRESH, epoch: 2 });
+
+    expect(result).toEqual({ outcome: "ready", podName: "pc-abc", coldStart: true });
+    expect(cluster.secretValue("NEW_KEY")).toBe("new");
+    expect(cluster.cr?.spec.replicas).toBe(1);
   });
 
   it("reports missing when the Sandbox CR is gone", async () => {
