@@ -128,9 +128,6 @@ const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
 // harness state only through the reusable lease row.
-export function notPaperclipRunnerLeaseSql() {
-  return notPaperclipRunnerLeaseMetadataSql();
-}
 
 // The idle bound of a retained warm lease is its environment's warm runner idle
 // timeout. An environment that is not warm, or whose config no longer parses,
@@ -862,6 +859,10 @@ function keptWorkspaceAwareRpcTimeoutMs(
   return leaseFencesSandboxEpoch(lease)
     ? Math.max(configured ?? 0, KEPT_WORKSPACE_LIFECYCLE_RPC_TIMEOUT_MS)
     : configured;
+}
+
+function runnerLeaseOnKeptVolume(lease: Pick<EnvironmentLease, "metadata">): boolean {
+  return leaseFencesSandboxEpoch(lease) && !leaseKeepsWorkspace(lease);
 }
 
 function delay(ms: number): Promise<void> {
@@ -2759,6 +2760,12 @@ function createSandboxEnvironmentDriver(
           throw new Error("Workspace export resume ownership changed before cleanup.");
         }
       };
+      // A Paperclip Runner lease on a kept volume cannot be stopped: a cold pod
+      // would lose its harness state. Its stop intent waits, as it does on a
+      // provider without a stop, until a terminal path destroys the lease.
+      if (exportResume && runnerLeaseOnKeptVolume(input.lease)) {
+        throw new Error("A Paperclip Runner sandbox on a kept volume cannot be stopped without losing its harness state.");
+      }
       if (exportResume) await assertExportResumeOwnership();
       // Resolve the teardown from the immutable orphan lease row, not from the
       // current environment. The row keeps the provider, the provider lease id,
@@ -2951,6 +2958,7 @@ function createSandboxEnvironmentDriver(
       // toward the cap.
       if (!pluginWorkerManager) return true;
       if (hasStopOnlyCleanup(input.lease)) {
+        if (runnerLeaseOnKeptVolume(input.lease)) return false;
         const pinnedPluginId = readString(input.lease.metadata?.pluginId);
         if (!pinnedPluginId) return true; // Permanent invalid intent, never a by-key fallback.
         const pinned = await resolvePluginSandboxProviderDriverById({ db, pluginId: pinnedPluginId, driverKey: recordedProvider });
@@ -4387,13 +4395,9 @@ export function environmentRuntimeService(
           // A stop cannot keep this lease's files, or nothing would ever resume
           // or destroy what it kept (an ephemeral lease), so it is released
           // instead.
-          // A Paperclip Runner lease on a kept volume is released too: a cold
-          // pod would not have its harness state, and its next turn restores
-          // from the verified backup instead.
           const leaseDisposition = providerResourceDisposition === "stop_and_retain" && (
             leaseLosesWorkspaceOnStop(leaseSnapshot) ||
-            (leaseFencesSandboxEpoch(leaseSnapshot) &&
-              (!leaseKeepsWorkspace(leaseSnapshot) || leaseSnapshot.leasePolicy !== "reuse_by_environment"))
+            (leaseKeepsWorkspace(leaseSnapshot) && leaseSnapshot.leasePolicy !== "reuse_by_environment")
           )
             ? undefined
             : providerResourceDisposition;
@@ -4837,7 +4841,7 @@ export function environmentRuntimeService(
             eq(environmentLeases.leasePolicy, "reuse_by_environment"),
             eq(environments.driver, "sandbox"),
             sql`${environments.config}->>'runnerLifecycleMode' = 'warm'`,
-            notPaperclipRunnerLeaseSql(),
+            notPaperclipRunnerLeaseMetadataSql(),
             workspaceKind,
             sql`not exists (
               select 1 from ${environmentLeases} as other
@@ -4850,9 +4854,26 @@ export function environmentRuntimeService(
         )
         .orderBy(asc(environmentLeases.lastUsedAt))
         .limit(RETAINED_LEASE_IDLE_SWEEP_PAGE_SIZE);
+      // Only kept-workspace leases whose pinned worker can stop them now: the
+      // others are skipped, and must not fill the oldest-first page.
+      const sandboxDriver = getDriver("sandbox");
+      const stoppablePluginIds = (await db
+        .selectDistinct({ pluginId: sql<string | null>`${environmentLeases.metadata}->>'pluginId'` })
+        .from(environmentLeases)
+        .where(and(eq(environmentLeases.status, "retained"), keepsWorkspaceSql())))
+        .map((row) => row.pluginId)
+        .filter((pluginId): pluginId is string => Boolean(pluginId) &&
+          sandboxDriver?.canStopKeptWorkspaceLease?.({
+            lease: { metadata: { pluginId } } as unknown as EnvironmentLease,
+          }) === true);
       const leaseRows = [
         ...(await selectIdleCandidates(sql`not (${keepsWorkspaceSql()})`)),
-        ...(await selectIdleCandidates(keepsWorkspaceSql())),
+        ...(stoppablePluginIds.length > 0
+          ? await selectIdleCandidates(sql`(${keepsWorkspaceSql()} and ${inArray(
+              sql`${environmentLeases.metadata}->>'pluginId'`,
+              stoppablePluginIds,
+            )})`)
+          : []),
       ];
 
       let claimed = 0;
@@ -4931,6 +4952,7 @@ export function environmentRuntimeService(
         .from(environmentLeases)
         .where(and(
           eq(environmentLeases.status, "stopped"),
+          keepsWorkspaceSql(),
           sql`not ${leaseHasLiveRunSql()}`,
           stopUnconfirmedSql(),
           sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)

@@ -809,7 +809,7 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(provider.sandboxes.get(first.lease.providerLeaseId!)!.replicas).toBe(0);
     });
 
-    it("releases a Paperclip Runner lease instead of suspending it when its turn is stopped", async () => {
+    it("never suspends a Paperclip Runner lease on a kept volume: its stop waits until the issue closes", async () => {
       const seeded = await seed();
       const provider = fakeProvider();
       const runId = await newRun(seeded);
@@ -820,8 +820,17 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       await finishRun(runId, "cancelled");
 
       await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      await cleanupTick(provider);
 
+      // A cold pod would lose the runner's harness state, so the stop intent
+      // waits as it does on a provider without a stop.
       expect(provider.methods()).not.toContain("environmentStopLease");
+      expect(provider.sandboxes.get(acquired.lease.providerLeaseId!)!.replicas).toBe(1);
+      expect((await leaseRow(acquired.lease.id)).status).toBe("pending_cleanup");
+
+      await services(provider).runtime.destroyReusableSandboxLeases({
+        companyId: seeded.companyId, issueId: seeded.issueId, failureReason: "issue_terminal_done",
+      });
       expect(provider.sandboxes.has(acquired.lease.providerLeaseId!)).toBe(false);
     });
 

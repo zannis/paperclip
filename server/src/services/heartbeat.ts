@@ -611,6 +611,7 @@ import { retryChatControlAdmission } from "./chat-control-admission-retry.js";
 import {
   keepsWorkspaceSql,
   leaseHasLiveRunSql,
+  notPaperclipRunnerLeaseMetadataSql,
   leaseKeepsWorkspace,
   stopBlocksIssueClaimSql,
   unconfirmedStopMetadataSql,
@@ -619,7 +620,6 @@ import {
   environmentRuntimeService,
   REUSABLE_SANDBOX_RESUME_FAILED_CODE,
   reusableSandboxResumeFailureCode,
-  notPaperclipRunnerLeaseSql,
   RETAINED_LEASE_IDLE_FAILURE_REASON,
   type ProviderResourceDisposition,
 } from "./environment-runtime.js";
@@ -10283,7 +10283,7 @@ export function heartbeatService(
           eq(environmentLeases.heartbeatRunId, runId),
           eq(environmentLeases.status, "active"),
           eq(environmentLeases.leasePolicy, "reuse_by_environment"),
-          notPaperclipRunnerLeaseSql(),
+          notPaperclipRunnerLeaseMetadataSql(),
           inArray(issues.status, ["done", "cancelled"]),
         ),
       )

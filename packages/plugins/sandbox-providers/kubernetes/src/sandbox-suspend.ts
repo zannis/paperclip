@@ -391,8 +391,10 @@ export async function resumeSuspendableSandbox(
     const ready = conditionAt(cr, "Ready", targetGeneration);
     if (ready?.status === "True") {
       const podName = await readyPodName(clients, input);
-      // Ready with no pod left means the Sandbox was deleted meanwhile.
-      if (!podName) return { outcome: "missing" };
+      // Only a Sandbox that is gone is missing: the server destroys a missing
+      // lease, kept volume included. A pod it cannot name yet (draining,
+      // adopted under another name) is resolved again at the first exec.
+      if (!podName && !(await getSandbox(clients, input))) return { outcome: "missing" };
       return { outcome: "ready", podName, coldStart };
     }
     if (Date.now() - startedAt >= input.timeoutMs) {

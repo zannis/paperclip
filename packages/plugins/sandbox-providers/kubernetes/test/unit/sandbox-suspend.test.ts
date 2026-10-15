@@ -356,15 +356,25 @@ describe("resumeSuspendableSandbox", () => {
   it("reports missing when the Sandbox is deleted right after it became Ready", async () => {
     const cluster = fakeCluster({ replicas: 1 });
     cluster.core.readNamespacedPod.mockImplementation(async () => {
-      throw Object.assign(new Error("not found"), { code: 404 });
-    });
-    cluster.core.listNamespacedPod.mockImplementation(async () => {
+      // The Sandbox, and its pod with it, is deleted after the Ready read.
+      await cluster.custom.deleteNamespacedCustomObject();
       throw Object.assign(new Error("not found"), { code: 404 });
     });
 
     await expect(
       resumeSuspendableSandbox(cluster.clients, { ...BASE, ...REFRESH, epoch: 1 }),
     ).resolves.toEqual({ outcome: "missing" });
+  });
+
+  it("never reports a Sandbox that still exists as missing when its pod cannot be named", async () => {
+    const cluster = fakeCluster({ replicas: 1 });
+    cluster.core.readNamespacedPod.mockImplementation(async () => {
+      throw Object.assign(new Error("not found"), { code: 404 });
+    });
+
+    await expect(
+      resumeSuspendableSandbox(cluster.clients, { ...BASE, ...REFRESH, epoch: 1 }),
+    ).resolves.toEqual({ outcome: "ready", podName: null, coldStart: false });
   });
 
   it("reports missing when the Sandbox CR is gone", async () => {
