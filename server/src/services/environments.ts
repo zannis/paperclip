@@ -1188,7 +1188,7 @@ export function environmentService(db: Db) {
               select 1 from ${environmentLeases}
               where ${environmentLeases.environmentId} = ${environments.id}
                 and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
-                and ${environmentLeases.status} in ('active', 'released', 'retained')
+                and ${environmentLeases.status} in ('active', 'released', 'retained', 'stopped')
             )`,
           ),
         )
@@ -1303,7 +1303,7 @@ export function environmentService(db: Db) {
             and(
               eq(environmentLeases.environmentId, id),
               eq(environmentLeases.leasePolicy, "reuse_by_environment"),
-              inArray(environmentLeases.status, ["active", "released", "retained"]),
+              inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
             ),
           ),
         db
@@ -1511,8 +1511,11 @@ export function environmentService(db: Db) {
               if (input.replacesReusableLeaseId) {
                 // The new lease takes over the same provider sandbox, so the
                 // old row ends without a teardown. A `retained` row kept the
-                // sandbox running, so it must not read as cleaned up. A
-                // `released` row keeps the cleanup status of its confirmed stop.
+                // sandbox running, and a `stopped` row kept its volume, so
+                // neither may read as cleaned up. A `released` row keeps the
+                // cleanup status of its confirmed stop. A `stopped` row is
+                // marked as retired by a resume, which keeps its stop receipt
+                // valid as proof that its own run's execution ended.
                 const retired = await tx
                   .update(environmentLeases)
                   .set({
@@ -1520,7 +1523,10 @@ export function environmentService(db: Db) {
                     releasedAt: now,
                     lastUsedAt: now,
                     updatedAt: now,
-                    cleanupStatus: sql`case when ${environmentLeases.status} = 'retained' then null else ${environmentLeases.cleanupStatus} end`,
+                    cleanupStatus: sql`case when ${environmentLeases.status} in ('retained', 'stopped') then null else ${environmentLeases.cleanupStatus} end`,
+                    metadata: sql`case when ${environmentLeases.status} = 'stopped'
+                      then coalesce(${environmentLeases.metadata}, '{}'::jsonb) || '{"retiredByResume":true}'::jsonb
+                      else ${environmentLeases.metadata} end`,
                   })
                   .where(
                     and(
@@ -1542,6 +1548,7 @@ export function environmentService(db: Db) {
                       inArray(environmentLeases.status, [
                         "released",
                         "retained",
+                        "stopped",
                       ]),
                     ),
                   )
@@ -1590,6 +1597,7 @@ export function environmentService(db: Db) {
                         "active",
                         "released",
                         "retained",
+                        "stopped",
                       ]),
                     ),
                   )

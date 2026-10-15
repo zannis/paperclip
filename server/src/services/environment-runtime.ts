@@ -3,9 +3,9 @@ import { readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
 import { remoteTerminationReceipt } from "./remote-execution-termination.js";
 import { hasNativeWorkspaceExportResume, releaseCompletedNativeWorkspaceExportRetention } from "./native-runtime/native-workspace-export-resume.js";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { companySecrets, companySecretVersions, environmentLeases, environments, heartbeatRuns } from "@paperclipai/db";
+import { companySecrets, companySecretVersions, environmentLeases, environments, heartbeatRuns, issues } from "@paperclipai/db";
 import type {
   Environment,
   EnvironmentLease,
@@ -48,6 +48,18 @@ import {
   stripSandboxProviderEnvelope,
 } from "./environment-config.js";
 import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
+import {
+  STOP_KEY_SQL,
+  confirmedStopMetadataSql,
+  keepsWorkspaceSql,
+  keptWorkspaceStopConfirmed,
+  leaseHasLiveRunSql,
+  leaseKeepsWorkspace,
+  leaseLosesWorkspaceOnStop,
+  leaseSandboxEpoch,
+  readKeptWorkspaceStop,
+  unconfirmedStopMetadataSql,
+} from "./kept-workspace-leases.js";
 import {
   createEffectiveRunConfigFingerprints,
   type EffectiveRunConfigFingerprint,
@@ -99,6 +111,14 @@ const SANDBOX_ORPHAN_CLEANUP_WRITE_ERROR_KIND = "sandbox_orphan_cleanup_write_fa
 // idle sweep reads is small. The page bounds one tick; the oldest rows go first.
 const RETAINED_LEASE_IDLE_SWEEP_PAGE_SIZE = 500;
 export const RETAINED_LEASE_IDLE_FAILURE_REASON = "retained_lease_idle_timeout";
+
+// A kept-workspace stop is one provider call of at most a minute. The claim
+// outlasts it, so a concurrent sweep cannot start a second stop meanwhile.
+const KEPT_WORKSPACE_STOP_PAGE_SIZE = 100;
+const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
+const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
+const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
+const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
 // harness state only through the reusable lease row.
@@ -688,6 +708,11 @@ export interface EnvironmentRuntimeDriver {
    * toward the cap. It reports `false` only for the transient worker-down window.
    */
   isPendingCleanupWorkerReady?(input: { environment: Environment | null; lease: EnvironmentLease }): Promise<boolean>;
+  /** Stop the provider compute of a lease that keeps its workspace, keeping
+   * the volume. Resolves to the provider's termination receipt. */
+  stopKeptWorkspaceLease?(input: { lease: EnvironmentLease }): Promise<unknown>;
+  /** Whether the pinned provider worker can serve that stop right now. */
+  canStopKeptWorkspaceLease?(input: { lease: EnvironmentLease }): boolean;
   /**
    * Flush the in-process buffer of orphan pending-cleanup records that every
    * synchronous database write could not land. The acquire buffers an orphan
@@ -753,6 +778,23 @@ export class ReusableSandboxResumeError extends Error {
     this.provider = input.provider;
     this.providerLeaseId = input.providerLeaseId;
   }
+}
+
+export const REUSABLE_SANDBOX_RESUME_FAILED_CODE = "reusable_sandbox_resume_failed";
+
+/**
+ * The run error code for a setup failure caused by a reusable sandbox that
+ * could not be resumed, or null for any other failure. Such a run did no
+ * provider work and its lease is preserved, so it is retried like a transient
+ * setup failure.
+ */
+export function reusableSandboxResumeFailureCode(error: unknown): string | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current; depth += 1) {
+    if (current instanceof ReusableSandboxResumeError) return REUSABLE_SANDBOX_RESUME_FAILED_CODE;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
 }
 
 export class RunnerHarnessBackupUnavailableError extends Error {
@@ -1079,6 +1121,8 @@ function reusableSandboxLeaseScopeMatches(input: {
   config: Record<string, unknown>;
   leaseFingerprint?: EffectiveRunConfigFingerprint | null;
   allowLegacyRuntimeFingerprint?: boolean;
+  /** Compare fingerprints even for a lease that keeps its workspace. */
+  strict?: boolean;
 }): boolean {
   if ((!input.executionWorkspaceId && !input.issueId) || !input.agentId) return false;
   const scope = input.lease.metadata?.reusableSandboxLease;
@@ -1093,6 +1137,11 @@ function reusableSandboxLeaseScopeMatches(input: {
     scope.adapterType === adapterType &&
     scope.provider === input.provider;
   if (!baseScopeMatches) return false;
+  // A kept workspace holds the agent's files for this issue. A plugin upgrade,
+  // a secret rotation or a config edit changes the fingerprint, but must not
+  // reset that workspace: the lease resumes, its secrets are refreshed on the
+  // way, and its pod keeps the image it was built with until the issue closes.
+  if (!input.strict && leaseKeepsWorkspace(input.lease)) return true;
 
   const expectedLeaseFingerprint = input.leaseFingerprint?.fingerprint ?? null;
   if (expectedLeaseFingerprint) {
@@ -1114,7 +1163,9 @@ function reusableLeaseCanBeResumed(input: {
   lease: Pick<EnvironmentLease, "status" | "heartbeatRunId">;
   heartbeatRunId: string | null;
 }): boolean {
-  if (input.lease.status === "released" || input.lease.status === "retained") return true;
+  if (input.lease.status === "released" || input.lease.status === "retained" || input.lease.status === "stopped") {
+    return true;
+  }
   return input.lease.status === "active" && input.heartbeatRunId !== null && input.lease.heartbeatRunId === input.heartbeatRunId;
 }
 
@@ -1980,12 +2031,17 @@ function createSandboxEnvironmentDriver(
           input.heartbeatRunId !== null &&
           (input.executionWorkspaceId !== null || input.issueId !== null) &&
           input.agentId !== null
-          ? findReusableSandboxLeaseId({ config: storedConfig, leases: reusableExistingLeases })
+          ? findReusableSandboxLeaseId({ config: storedConfig, leases: reusableExistingLeases }) ??
+            // A kept workspace resumes even after its environment config
+            // changed; its pod keeps the image it was built with.
+            reusableExistingLeases.find((lease) => leaseKeepsWorkspace(lease) && lease.providerLeaseId)
+              ?.providerLeaseId ?? null
           : null;
         const reusableLease = await claimReusableLeaseForResume(
           reusableProviderLeaseId
             ? reusableExistingLeases.find((lease) => lease.providerLeaseId === reusableProviderLeaseId)
             : null,
+          input.heartbeatRunId,
         );
 
         let providerLease: PluginEnvironmentLease | null = null;
@@ -2234,7 +2290,40 @@ function createSandboxEnvironmentDriver(
                 nativeWorkspaceSync: reusableLease.metadata.nativeWorkspaceSync,
               }
             : {}),
-          ...(reusableScope ? { reusableSandboxLease: reusableScope } : {}),
+          ...(reusableScope
+            ? {
+                reusableSandboxLease: providerLease && reusableLease && !reusableSandboxLeaseScopeMatches({
+                  lease: reusableLease,
+                  companyId: input.companyId,
+                  environmentId: input.environment.id,
+                  executionWorkspaceId: input.executionWorkspaceId,
+                  issueId: input.issueId,
+                  agentId: input.agentId,
+                  adapterType: input.adapterType,
+                  provider: parsed.config.provider,
+                  config: providerConfigForLease,
+                  leaseFingerprint,
+                  strict: true,
+                })
+                  ? {
+                      ...reusableScope,
+                      // The kept workspace was resumed although the environment,
+                      // its plugin or its secrets changed since it was built.
+                      resumedAcrossConfigChange: {
+                        fromLeaseFingerprint: isRecord(reusableLease.metadata?.reusableSandboxLease)
+                          ? readLeaseFingerprint(reusableLease.metadata.reusableSandboxLease.leaseFingerprint)
+                          : null,
+                        at: new Date().toISOString(),
+                      },
+                    }
+                  : reusableScope,
+              }
+            : {}),
+          // The epoch fences provider stops and resumes of a kept workspace;
+          // a resumed lease carries the epoch its claim moved to.
+          ...(sanitizedProviderMetadata.workspaceSurvivesStop === true
+            ? { sandboxEpoch: providerLease && reusableLease ? leaseSandboxEpoch(reusableLease) : 0 }
+            : {}),
         };
         try {
           return await environmentsSvc.acquireLease({
@@ -2397,6 +2486,7 @@ function createSandboxEnvironmentDriver(
         reusableProviderLeaseId
           ? reusableExistingLeases.find((lease) => lease.providerLeaseId === reusableProviderLeaseId)
           : null,
+        input.heartbeatRunId,
       );
 
       let providerLease;
@@ -2611,7 +2701,7 @@ function createSandboxEnvironmentDriver(
         const [current] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, input.lease.id)).limit(1);
         const [otherOwner] = await db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
           ne(environmentLeases.id, input.lease.id), eq(environmentLeases.provider, input.lease.provider!),
-          eq(environmentLeases.providerLeaseId, input.lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "pending_cleanup"]),
+          eq(environmentLeases.providerLeaseId, input.lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "stopped", "pending_cleanup"]),
         )).limit(1);
         if (!current || current.status !== "pending_cleanup" || current.companyId !== input.lease.companyId
           || current.metadata?.pendingCleanupAttemptId !== input.lease.metadata?.pendingCleanupAttemptId
@@ -2747,6 +2837,49 @@ function createSandboxEnvironmentDriver(
         config: cleanupConfig,
         providerLeaseId: input.lease.providerLeaseId,
       });
+    },
+
+    canStopKeptWorkspaceLease({ lease }) {
+      const pluginId = readString(lease.metadata?.pluginId);
+      return Boolean(pluginId && pluginWorkerManager?.isRunning(pluginId) &&
+        pluginWorkerVerifiesLifecycleMethod(pluginId, "environmentStopLease"));
+    },
+
+    async stopKeptWorkspaceLease({ lease }) {
+      // Like the pending-cleanup teardown, resolve the stop from the lease row:
+      // its pinned plugin and its recorded config, never the current
+      // environment, so a config edit cannot redirect it.
+      const recordedProvider = lease.provider ?? readString(lease.metadata?.provider);
+      const pluginId = readString(lease.metadata?.pluginId);
+      if (!recordedProvider || !pluginId || !pluginWorkerManager) {
+        throw new Error(`Lease "${lease.id}" has no pinned provider plugin to stop.`);
+      }
+      const metadataConfig = sandboxConfigFromLeaseMetadataLoose(lease);
+      if (!metadataConfig || metadataConfig.provider !== recordedProvider) {
+        throw new Error(`Lease "${lease.id}" has no recorded config for provider "${recordedProvider}".`);
+      }
+      const pluginProvider = await resolveSandboxProviderPlugin({ provider: recordedProvider, pluginId });
+      if (pluginProvider.state !== "running") {
+        throw new Error(`Sandbox provider plugin for "${recordedProvider}" is ${pluginProvider.state}.`);
+      }
+      if (!pluginWorkerVerifiesLifecycleMethod(pluginId, "environmentStopLease")) {
+        throw new Error(`Sandbox provider plugin for "${recordedProvider}" does not verify environmentStopLease.`);
+      }
+      const config = await resolveSandboxCleanupConfigSecrets(db, lease.companyId, metadataConfig, {
+        issueId: lease.issueId,
+        heartbeatRunId: lease.heartbeatRunId,
+      });
+      const workerConfig = stripSandboxProviderEnvelope(config as SandboxEnvironmentConfig);
+      return await pluginWorkerManager.call(pluginId, "environmentStopLease", {
+        driverKey: recordedProvider,
+        companyId: lease.companyId,
+        environmentId: lease.environmentId ?? "",
+        issueId: lease.issueId,
+        config: workerConfig,
+        providerLeaseId: lease.providerLeaseId,
+        leaseMetadata: lease.metadata ?? {},
+        resourceDisposition: "stop_and_retain",
+      }, Math.min(resolvePluginSandboxRpcTimeoutMs(workerConfig) ?? 60_000, 60_000));
     },
 
     async isPendingCleanupWorkerReady(input) {
@@ -3250,19 +3383,37 @@ function createSandboxEnvironmentDriver(
    */
   async function claimReusableLeaseForResume(
     lease: EnvironmentLease | null | undefined,
+    heartbeatRunId: string | null,
   ): Promise<EnvironmentLease | null> {
     if (!lease) return null;
+    const now = new Date();
+    // A lease that keeps its workspace gets a new epoch and records which run
+    // claimed it. The provider fences stop and resume on the epoch, and the
+    // stopped-lease reconciler stops the Sandbox again if this run ends
+    // without handing the lease over. The claim always wins over a stop in
+    // flight: that stop either loses its write or is refused by the provider.
+    const keepsWorkspace = leaseKeepsWorkspace(lease);
     const [touched] = await db
       .update(environmentLeases)
-      .set({ lastUsedAt: new Date() })
+      .set({
+        lastUsedAt: now,
+        ...(keepsWorkspace
+          ? {
+              metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || jsonb_build_object(
+                'sandboxEpoch', coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) + 1,
+                'resumeClaimRunId', ${heartbeatRunId}::text,
+                'resumeClaimedAt', ${now.toISOString()}::text)`,
+            }
+          : {}),
+      })
       .where(
         and(
           eq(environmentLeases.id, lease.id),
-          inArray(environmentLeases.status, ["active", "released", "retained"]),
+          inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
         ),
       )
-      .returning({ id: environmentLeases.id });
-    return touched ? lease : null;
+      .returning();
+    return touched ? toEnvironmentLeaseSnapshot(touched) : null;
   }
 
   /**
@@ -3910,6 +4061,111 @@ export function environmentRuntimeService(
     return driver;
   }
 
+  /**
+   * One provider stop of a `stopped` lease that keeps its workspace, claimed
+   * on the row first so concurrent callers never stop the same Sandbox twice.
+   * A stop is confirmed only at the epoch it ran at; a failed attempt backs
+   * off before the next one.
+   */
+  async function attemptKeptWorkspaceStop(
+    lease: EnvironmentLease,
+    options: { ownRunId?: string } = {},
+  ): Promise<"confirmed" | "destroyed" | "failed" | "skipped"> {
+    const driver = getDriver("sandbox");
+    if (!driver?.stopKeptWorkspaceLease) return "skipped";
+    if (!leaseKeepsWorkspace(lease) || keptWorkspaceStopConfirmed(lease)) return "skipped";
+    if (!driver.canStopKeptWorkspaceLease?.({ lease })) return "skipped";
+    // The releasing run stops its own lease inline; anyone else waits until
+    // the lease's run, and any run holding a resume claim, has ended.
+    const notLive = options.ownRunId
+      ? sql`not exists (
+          select 1 from heartbeat_runs as live_run
+          where live_run.status in ('queued', 'scheduled_retry', 'running')
+            and live_run.id::text = ${environmentLeases.metadata}->>'resumeClaimRunId'
+            and live_run.id <> ${options.ownRunId}::uuid
+        )`
+      : sql`not ${leaseHasLiveRunSql()}`;
+    const previous = readKeptWorkspaceStop(lease);
+    const epoch = leaseSandboxEpoch(lease);
+    const attemptId = randomUUID();
+    const [claimedRow] = await db
+      .update(environmentLeases)
+      .set({
+        metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
+          coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}, '{}'::jsonb) || ${JSON.stringify({
+            attemptId, epoch, retryAfterMs: Date.now() + KEPT_WORKSPACE_STOP_CLAIM_MS,
+          })}::jsonb)`,
+      })
+      .where(and(
+        eq(environmentLeases.id, lease.id),
+        eq(environmentLeases.status, "stopped"),
+        sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${epoch}`,
+        sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is not distinct from ${previous.attemptId ?? null}::text`,
+        notLive,
+      ))
+      .returning();
+    if (!claimedRow) return "skipped";
+    const claimed = toEnvironmentLeaseSnapshot(claimedRow);
+    const sameAttempt = and(
+      eq(environmentLeases.id, lease.id),
+      eq(environmentLeases.status, "stopped"),
+      sql`coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0) = ${epoch}`,
+      sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' = ${attemptId}`,
+    );
+    try {
+      const receipt = await driver.stopKeptWorkspaceLease({ lease: claimed });
+      const state = (receipt as { state?: unknown } | null)?.state;
+      const termination = remoteTerminationReceipt(claimed, receipt);
+      if (state === "destroyed") {
+        // The Sandbox, and with it the volume, is already gone.
+        await db.update(environmentLeases).set({
+          status: "expired",
+          cleanupStatus: "success",
+          failureReason: "sandbox_missing",
+          releasedAt: new Date(),
+          metadata: sql`(${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'remoteExecutionTermination')
+            || ${JSON.stringify(termination ? { remoteExecutionTermination: termination } : {})}::jsonb`,
+        }).where(sameAttempt);
+        return "destroyed";
+      } else if (state === "stopped") {
+        await db.update(environmentLeases)
+          .set({ metadata: confirmedStopMetadataSql(termination) })
+          .where(sameAttempt);
+        return "confirmed";
+      } else {
+        throw new Error("The provider returned no stop receipt.");
+      }
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === "sandbox_stop_superseded") {
+        // A newer resume owns the Sandbox at the provider.
+        await db.update(environmentLeases).set({
+          metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
+            (${environmentLeases.metadata}->${STOP_KEY_SQL}) - 'attemptId' || '{"retryAfterMs":0}'::jsonb)`,
+        }).where(sameAttempt);
+        return "skipped";
+      }
+      const attempts = (previous.attempts ?? 0) + 1;
+      const retryAfterMs = Date.now() + Math.min(
+        KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
+        KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
+      );
+      await db.update(environmentLeases).set({
+        metadata: sql`${environmentLeases.metadata} || jsonb_build_object(${STOP_KEY_SQL},
+          (${environmentLeases.metadata}->${STOP_KEY_SQL}) - 'attemptId' || ${JSON.stringify({
+            attempts, retryAfterMs, lastError: error instanceof Error ? error.name : "unknown",
+          })}::jsonb)`,
+      }).where(sameAttempt);
+      if (attempts === KEPT_WORKSPACE_STOP_WARN_ATTEMPTS) {
+        // The error itself can carry provider detail; log the identifiers only.
+        logger.warn(
+          { leaseId: lease.id, provider: lease.provider, providerLeaseId: lease.providerLeaseId, attempts },
+          "kept-workspace sandbox stop keeps failing; its pod still holds quota",
+        );
+      }
+    }
+    return "failed";
+  }
+
   return {
     getDriver,
 
@@ -4017,11 +4273,41 @@ export function environmentRuntimeService(
             ? await environmentsSvc.getById(leaseRow.environmentId)
             : null;
           let leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
+          if (
+            providerResourceDisposition === "stop_and_retain" &&
+            leaseRow.status === "active" &&
+            !hasStopOnlyCleanup(leaseSnapshot) &&
+            leaseKeepsWorkspace(leaseSnapshot)
+          ) {
+            // The stopped-lease reconciler issues the provider stop and records
+            // its receipt; the row says `stopped` from now on, never released.
+            const [stopped] = await db.update(environmentLeases).set({
+              status: "stopped", cleanupStatus: "pending", failureReason: null,
+              releasedAt: new Date(), updatedAt: new Date(),
+              metadata: unconfirmedStopMetadataSql(),
+            }).where(and(eq(environmentLeases.id, leaseRow.id), eq(environmentLeases.heartbeatRunId, heartbeatRunId),
+              eq(environmentLeases.status, "active"))).returning();
+            if (!stopped) continue;
+            // Stop now, so the run's remote execution ends before a follow-up
+            // run can claim the issue; a failed stop is retried by the sweep.
+            await attemptKeptWorkspaceStop(toEnvironmentLeaseSnapshot(stopped), { ownRunId: heartbeatRunId });
+            const [settled] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, stopped.id));
+            if (settled && environment) {
+              released.push({ environment, lease: toEnvironmentLeaseSnapshot(settled),
+                leaseContext: { executionWorkspaceId: stopped.executionWorkspaceId,
+                  executionWorkspaceMode: (stopped.metadata?.executionWorkspaceMode as ExecutionWorkspace["mode"] | null | undefined) ?? null } });
+            }
+            continue;
+          }
+          // A stop cannot keep this lease's files, so it is released instead.
+          const leaseDisposition = providerResourceDisposition === "stop_and_retain" && leaseLosesWorkspaceOnStop(leaseSnapshot)
+            ? undefined
+            : providerResourceDisposition;
           if (hasNativeWorkspaceExportResume(leaseSnapshot) && providerResourceDisposition === "destroy") {
             const completed = await releaseCompletedNativeWorkspaceExportRetention(db, leaseSnapshot);
             if (completed) leaseSnapshot = toEnvironmentLeaseSnapshot(completed);
           }
-          if (providerResourceDisposition === "stop_and_retain" && !hasStopOnlyCleanup(leaseSnapshot)
+          if (leaseDisposition === "stop_and_retain" && !hasStopOnlyCleanup(leaseSnapshot)
             && getLeaseDriverKey(leaseSnapshot, environment) === "sandbox") {
             const prepared = await prepareSandboxStopAndRetain(db, leaseSnapshot);
             if (!prepared) continue;
@@ -4113,13 +4399,13 @@ export function environmentRuntimeService(
             : driver
               ? await driver.releaseRunLease({
                   ...(cancelActiveWork ? { cancelActiveWork: true } : {}),
-                  ...(providerResourceDisposition === "stop_and_retain" ? { resourceDisposition: "stop_and_retain" as const } : {}),
+                  ...(leaseDisposition === "stop_and_retain" ? { resourceDisposition: "stop_and_retain" as const } : {}),
                   environment,
                   lease: leaseSnapshot,
                   // A stopped reusable provider resource must remain eligible
                   // for exact-lease resume independently of turn outcome.
                   status:
-                    providerResourceDisposition === "stop_and_retain" &&
+                    leaseDisposition === "stop_and_retain" &&
                     leaseSnapshot.leasePolicy === "reuse_by_environment"
                       ? "released"
                       : status,
@@ -4210,6 +4496,7 @@ export function environmentRuntimeService(
         input.executionWorkspaceId ? eq(environmentLeases.executionWorkspaceId, input.executionWorkspaceId) : undefined,
       ].filter((condition): condition is NonNullable<typeof condition> => Boolean(condition));
       if (scopeConditions.length === 0) return [];
+      const failureReason = input.failureReason ?? "reusable_lease_destroyed";
 
       const leaseRows = await db
         .select()
@@ -4218,60 +4505,57 @@ export function environmentRuntimeService(
           and(
             eq(environmentLeases.companyId, input.companyId),
             eq(environmentLeases.leasePolicy, "reuse_by_environment"),
-            inArray(environmentLeases.status, ["active", "released", "retained", "pending_cleanup"]),
+            inArray(environmentLeases.status, ["active", "released", "retained", "stopped", "pending_cleanup"]),
             ...scopeConditions,
           ),
         );
 
-      const holdingRunIds = leaseRows
-        .map((row) => row.heartbeatRunId)
-        .filter((runId): runId is string => Boolean(runId));
-      const liveRunIds = new Set<string>();
-      if (holdingRunIds.length > 0) {
-        const liveRuns = await db
-          .select({ id: heartbeatRuns.id })
-          .from(heartbeatRuns)
-          .where(
-            and(
-              inArray(heartbeatRuns.id, holdingRunIds),
-              inArray(heartbeatRuns.status, [
-                "queued",
-                "scheduled_retry",
-                "running",
-              ]),
-            ),
-          );
-        for (const liveRun of liveRuns) liveRunIds.add(liveRun.id);
-      }
-
       const destroyed: EnvironmentRuntimeLeaseRecord[] = [];
       for (const leaseRow of leaseRows) {
-        // An issue may become terminal inside its provider turn. Do not tear
-        // down the sandbox while that run is still exporting its workspace or
-        // polling the callback bridge. The heartbeat finalizer observes the
-        // terminal issue and destroys the resource after those boundaries
-        // (`runClosedItsReusableLeaseIssue` turns its warm retention into a
-        // destroy).
-        if (
-          leaseRow.heartbeatRunId &&
-          liveRunIds.has(leaseRow.heartbeatRunId)
-        ) {
-          continue;
-        }
         const environment = leaseRow.environmentId
           ? await environmentsSvc.getById(leaseRow.environmentId)
           : null;
         if (!environment) continue;
-        const leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
+        // Claim the row before the provider call, in one conditional update.
+        // An issue may become terminal inside its provider turn, so a lease
+        // whose run, or whose resume claim, is still live is skipped: do not
+        // tear down the sandbox while that run is still exporting its
+        // workspace or polling the callback bridge. The heartbeat finalizer
+        // observes the terminal issue and destroys the resource after those
+        // boundaries (`runClosedItsReusableLeaseIssue` turns its warm retention
+        // into a destroy). The claim drops any stop in progress, so a stop
+        // that finishes later loses its write and the sweep retries a destroy,
+        // never a stop.
+        const [claimedRow] = await db
+          .update(environmentLeases)
+          .set(leaseRow.status === "pending_cleanup"
+            ? { metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'sandboxStopAndRetain'` }
+            : {
+                status: "pending_cleanup",
+                failureReason,
+                cleanupStatus: "failed",
+                releasedAt: new Date(),
+                metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL} - 'sandboxStopAndRetain'`,
+              })
+          .where(
+            and(
+              eq(environmentLeases.id, leaseRow.id),
+              eq(environmentLeases.status, leaseRow.status),
+              sql`not ${leaseHasLiveRunSql()}`,
+            ),
+          )
+          .returning();
+        if (!claimedRow) continue;
+        const leaseSnapshot = toEnvironmentLeaseSnapshot(claimedRow);
         const driver = getDriver(getLeaseDriverKey(leaseSnapshot, environment));
         const lease = driver?.destroyRunLease
           ? await driver.destroyRunLease({
               environment,
               lease: leaseSnapshot,
-              failureReason: input.failureReason ?? "reusable_lease_destroyed",
+              failureReason,
             })
           : await environmentsSvc.releaseLease(leaseSnapshot.id, "pending_cleanup", {
-              failureReason: input.failureReason ?? "reusable_lease_destroyed",
+              failureReason,
               cleanupStatus: "failed",
             });
         if (!lease) continue;
@@ -4311,7 +4595,7 @@ export function environmentRuntimeService(
           and(
             eq(environmentLeases.environmentId, input.environmentId),
             eq(environmentLeases.leasePolicy, "reuse_by_environment"),
-            inArray(environmentLeases.status, ["active", "released", "retained"]),
+            inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
           ),
         );
 
@@ -4367,16 +4651,14 @@ export function environmentRuntimeService(
             releasedAt: now,
             lastUsedAt: now,
             updatedAt: now,
+            // A stop in progress loses its write; the sweep retries a destroy.
+            metadata: sql`${environmentLeases.metadata} - ${STOP_KEY_SQL}`,
           })
           .where(
             and(
               eq(environmentLeases.id, leaseRow.id),
-              inArray(environmentLeases.status, ["active", "released", "retained"]),
-              sql`NOT EXISTS (
-                SELECT 1 FROM ${heartbeatRuns}
-                WHERE ${heartbeatRuns.id} = ${environmentLeases.heartbeatRunId}
-                  AND ${heartbeatRuns.status} IN ('queued', 'scheduled_retry', 'running')
-              )`,
+              inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
+              sql`not ${leaseHasLiveRunSql()}`,
             ),
           )
           .returning()
@@ -4455,7 +4737,7 @@ export function environmentRuntimeService(
               where other.id <> ${environmentLeases.id}
                 and other.provider = ${environmentLeases.provider}
                 and other.provider_lease_id = ${environmentLeases.providerLeaseId}
-                and other.status in ('active', 'released', 'retained', 'pending_cleanup')
+                and other.status in ('active', 'released', 'retained', 'stopped', 'pending_cleanup')
             )`,
           ),
         )
@@ -4468,6 +4750,32 @@ export function environmentRuntimeService(
         if (idleTimeoutMs === null) continue;
         const idleSince = new Date(now.getTime() - idleTimeoutMs);
         if (leaseRow.lastUsedAt > idleSince) continue;
+        const leaseSnapshot = toEnvironmentLeaseSnapshot(leaseRow);
+        if (leaseKeepsWorkspace(leaseSnapshot)) {
+          // The workspace survives a stop, so stop the Sandbox and keep the
+          // volume instead of destroying both. Never fall back to a destroy:
+          // while the pinned worker cannot stop, the lease waits a tick.
+          if (!getDriver("sandbox")?.canStopKeptWorkspaceLease?.({ lease: leaseSnapshot })) continue;
+          const stopped = await db
+            .update(environmentLeases)
+            .set({
+              status: "stopped",
+              cleanupStatus: "pending",
+              failureReason: null,
+              releasedAt: now,
+              metadata: unconfirmedStopMetadataSql(),
+            })
+            .where(
+              and(
+                eq(environmentLeases.id, leaseRow.id),
+                eq(environmentLeases.status, "retained"),
+                lte(environmentLeases.lastUsedAt, idleSince),
+              ),
+            )
+            .returning({ id: environmentLeases.id });
+          if (stopped.length > 0) claimed += 1;
+          continue;
+        }
         const flipped = await db
           .update(environmentLeases)
           .set({
@@ -4487,6 +4795,84 @@ export function environmentRuntimeService(
         if (flipped.length > 0) claimed += 1;
       }
       return { claimed };
+    },
+
+    /**
+     * Issue the provider stop for every `stopped` lease whose stop is not
+     * confirmed at its current epoch: a fresh idle stop, a recovery stop, an
+     * orphaned lease, a failed stop, or a resume claim that ended without a
+     * handoff. A lease whose run or resume claim is still live is left alone.
+     * Each attempt claims the row first, so concurrent sweeps never stop the
+     * same Sandbox twice, and a failed attempt backs off before the next one.
+     */
+    async reconcileStoppedLeases(input: { limit?: number } = {}): Promise<{
+      confirmed: number;
+      destroyed: number;
+      failed: number;
+    }> {
+      const result = { confirmed: 0, destroyed: 0, failed: 0 };
+      const driver = getDriver("sandbox");
+      if (!driver?.stopKeptWorkspaceLease) return result;
+      const rows = await db
+        .select()
+        .from(environmentLeases)
+        .where(and(
+          eq(environmentLeases.status, "stopped"),
+          sql`not ${leaseHasLiveRunSql()}`,
+          sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'confirmedEpoch')::int, -1)
+            <> coalesce((${environmentLeases.metadata}->>'sandboxEpoch')::int, 0)`,
+          sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)
+            <= ${Date.now()}`,
+        ))
+        .orderBy(asc(environmentLeases.lastUsedAt))
+        .limit(input.limit ?? KEPT_WORKSPACE_STOP_PAGE_SIZE);
+
+      for (const row of rows) {
+        const outcome = await attemptKeptWorkspaceStop(toEnvironmentLeaseSnapshot(row));
+        if (outcome !== "skipped") result[outcome] += 1;
+      }
+      return result;
+    },
+
+    /**
+     * Destroy the kept workspace of a closed projectless issue even when its
+     * close hook never ran or skipped the lease: a failed run on a self-closed
+     * issue, a resume claim that ended after the close, or a restart between
+     * the close and its hook. The destroy goes through the same claim as the
+     * hook.
+     */
+    async reconcileTerminalKeptLeases(input: { limit?: number } = {}): Promise<{ destroyed: number }> {
+      const rows = await db
+        .selectDistinct({
+          companyId: environmentLeases.companyId,
+          issueId: environmentLeases.issueId,
+          issueStatus: issues.status,
+        })
+        .from(environmentLeases)
+        .innerJoin(issues, eq(issues.id, environmentLeases.issueId))
+        .where(and(
+          eq(environmentLeases.leasePolicy, "reuse_by_environment"),
+          inArray(environmentLeases.status, ["retained", "stopped"]),
+          // A lease bound to an execution workspace ends with that workspace,
+          // which can be reopened for a closed issue; the workspace sweep owns
+          // it, under the reopen fence.
+          isNull(environmentLeases.executionWorkspaceId),
+          keepsWorkspaceSql(),
+          inArray(issues.status, ["done", "cancelled"]),
+          sql`not ${leaseHasLiveRunSql()}`,
+        ))
+        .limit(input.limit ?? KEPT_WORKSPACE_STOP_PAGE_SIZE);
+      let destroyed = 0;
+      for (const row of rows) {
+        if (!row.issueId) continue;
+        const records = await this.destroyReusableSandboxLeases({
+          companyId: row.companyId,
+          issueId: row.issueId,
+          failureReason: `issue_terminal_${row.issueStatus}`,
+        });
+        destroyed += records.filter((record) => record.lease.status === "expired").length;
+      }
+      return { destroyed };
     },
 
     async resumeRunLease(input: EnvironmentDriverLeaseInput): Promise<PluginEnvironmentLease | EnvironmentLease | null> {

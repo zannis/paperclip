@@ -1247,10 +1247,11 @@ async function startServerWithDatabaseTeardown(
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
-  // Queue idle retained warm sandboxes first. The pending_cleanup sweep below
-  // tears a queued lease down once its last write is older than its backoff,
-  // so the effective idle bound is the larger of `runnerIdleTimeoutMs` and
-  // that backoff.
+  // Reclaim idle retained warm sandboxes first. One whose workspace survives a
+  // stop is stopped in this same tick by the kept-workspace sweep, so its idle
+  // bound is `runnerIdleTimeoutMs` plus one tick. Any other is queued for the
+  // pending_cleanup sweep below, which tears it down once its last write is
+  // older than its backoff, so its bound is the larger of the two.
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
       .sweepIdleRetainedLeases()
@@ -1261,6 +1262,17 @@ async function startServerWithDatabaseTeardown(
       })
       .catch((err) => {
         logger.error({ err }, "idle retained environment lease sweep failed");
+      })
+      // Stop idle kept-workspace sandboxes, and destroy those whose issue
+      // closed, before the pending_cleanup sweep runs.
+      .then(() => environmentLeaseCleanupHeartbeat.sweepKeptWorkspaceLeases())
+      .then((result) => {
+        if (result.confirmed > 0 || result.destroyed > 0 || result.failed > 0 || result.terminalDestroyed > 0) {
+          logger.info(result, "environment lease cleanup sweep reconciled kept-workspace sandboxes");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "kept-workspace environment lease sweep failed");
       })
       .then(() => environmentLeaseCleanupHeartbeat.sweepPendingCleanupLeases({ backoffMs }))
       .then((result) => {
