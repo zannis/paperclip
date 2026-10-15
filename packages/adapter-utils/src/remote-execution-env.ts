@@ -61,10 +61,16 @@ export function sanitizeSandboxSetupEnv(
 ): Record<string, string> {
   const sanitized: Record<string, string> = {};
   for (const [key, value] of Object.entries(sanitizeRemoteExecutionEnv(env, inheritedEnv))) {
-    if (inheritedEnv[key] === value && !SANDBOX_SETUP_ENV_SHARED_KEYS.has(key.toUpperCase())) continue;
+    if (inheritedEnv[key] === value && !isSharedNetworkSetting(key, value)) continue;
     sanitized[key] = value;
   }
   return sanitized;
+}
+
+// A proxy URL with userinfo (`user:pass@`) is a server credential, not a
+// shared setting.
+function isSharedNetworkSetting(key: string, value: string): boolean {
+  return SANDBOX_SETUP_ENV_SHARED_KEYS.has(key.toUpperCase()) && !/:\/\/[^/@\s]*@/.test(value);
 }
 
 export function sanitizeRemoteExecutionEnv(

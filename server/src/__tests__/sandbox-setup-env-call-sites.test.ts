@@ -41,10 +41,10 @@ import { execute as grokExecute, testEnvironment as grokTest } from "@paperclipa
 import { execute as kimiExecute, testEnvironment as kimiTest } from "@paperclipai/adapter-kimi-local/server";
 import { execute as opencodeExecute, testEnvironment as opencodeTest } from "@paperclipai/adapter-opencode-local/server";
 import { execute as piExecute, testEnvironment as piTest } from "@paperclipai/adapter-pi-local/server";
-import { resolveClaudeExecutionEngineForRun } from "../../../packages/adapters/claude-local/src/server/acp.js";
-import { resolveCodexExecutionEngineForRun } from "../../../packages/adapters/codex-local/src/server/acp.js";
-import { resolveGeminiExecutionEngineForRun } from "../../../packages/adapters/gemini-local/src/server/acp.js";
-import { resolveKimiExecutionEngineForRun } from "../../../packages/adapters/kimi-local/src/server/acp.js";
+import { resolveClaudeExecutionEngineForRun, testClaudeAcpEnvironment } from "../../../packages/adapters/claude-local/src/server/acp.js";
+import { resolveCodexExecutionEngineForRun, testCodexAcpEnvironment } from "../../../packages/adapters/codex-local/src/server/acp.js";
+import { resolveGeminiExecutionEngineForRun, testGeminiAcpEnvironment } from "../../../packages/adapters/gemini-local/src/server/acp.js";
+import { resolveKimiExecutionEngineForRun, testKimiAcpEnvironment } from "../../../packages/adapters/kimi-local/src/server/acp.js";
 
 const SERVER_SECRET_KEY = "SANDBOX_CALL_SITE_SERVER_ONLY";
 
@@ -64,6 +64,13 @@ const ACP_ENGINES = [
   ["codex", resolveCodexExecutionEngineForRun, "codex-acp"],
   ["gemini", resolveGeminiExecutionEngineForRun, "gemini"],
   ["kimi", resolveKimiExecutionEngineForRun, "kimi"],
+] as const;
+
+const ACP_TESTS = [
+  ["claude_local", testClaudeAcpEnvironment, "claude-agent-acp"],
+  ["codex_local", testCodexAcpEnvironment, "codex-acp"],
+  ["gemini_local", testGeminiAcpEnvironment, "gemini"],
+  ["kimi_local", testKimiAcpEnvironment, "kimi"],
 ] as const;
 
 describe("adapter setup call sites", () => {
@@ -190,7 +197,8 @@ describe("adapter setup call sites", () => {
 
   // SSH resolves the local `ssh` binary, so its probe must keep the host PATH.
   // pi and opencode reach the SSH host before their probe, so they are not
-  // covered here; ACP rejects SSH targets before probing.
+  // covered here. ACP engine resolution rejects SSH targets before probing,
+  // but the ACP environment test probes them.
   it.each(ADAPTERS.filter(([adapterType]) => adapterType !== "pi_local" && adapterType !== "opencode_local"))(
     "%s testEnvironment keeps the host PATH on the SSH probe",
     async (adapterType, _execute, testEnvironment) => {
@@ -202,4 +210,17 @@ describe("adapter setup call sites", () => {
     },
     30_000,
   );
+
+  it.each(ACP_TESTS)("%s ACP testEnvironment keeps the host PATH on the SSH probe", async (adapterType, testAcpEnvironment, agentCommand) => {
+    await testAcpEnvironment({
+      companyId: "company-1",
+      adapterType,
+      config: { engine: "acp", agentCommand, acpAgentCommand: agentCommand, command: agentCommand, cwd: root },
+      executionTarget: sshTarget(),
+    } as Parameters<typeof testAcpEnvironment>[0]).catch(() => undefined);
+
+    const sshCalls = setup.calls.filter((call) => call.transport === "ssh");
+    expect(sshCalls.length).toBeGreaterThan(0);
+    expect(sshCalls.every((call) => call.env.PATH === savedEnv.PATH)).toBe(true);
+  }, 30_000);
 });

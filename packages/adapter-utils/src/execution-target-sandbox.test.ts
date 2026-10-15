@@ -2343,6 +2343,24 @@ describe("sandbox adapter execution targets", () => {
       expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({ env: networkSettings }));
     });
 
+    it("drops host-equal network settings that carry credentials", async () => {
+      vi.stubEnv("HTTPS_PROXY", "http://proxy-user:proxy-pass@proxy.internal:3128");
+      vi.stubEnv("npm_config_proxy", "http://proxy-user:proxy-pass@proxy.internal:3128");
+      vi.stubEnv("NO_PROXY", "localhost");
+      const runner = { execute: vi.fn(async () => okResult()) };
+
+      await runAdapterExecutionTargetShellCommand("run-env-4", sandboxTarget(runner), "npm install -g agent-cli", {
+        cwd: "/local/workspace",
+        env: {
+          HTTPS_PROXY: "http://proxy-user:proxy-pass@proxy.internal:3128",
+          npm_config_proxy: "http://proxy-user:proxy-pass@proxy.internal:3128",
+          NO_PROXY: "localhost",
+        },
+      });
+
+      expect(runner.execute).toHaveBeenCalledWith(expect.objectContaining({ env: { NO_PROXY: "localhost" } }));
+    });
+
     it("drops host-inherited values from sandbox shell commands but keeps run-set values", async () => {
       vi.stubEnv("HOST_ONLY_SECRET", "host-secret-value");
       vi.stubEnv("SHARED_KEY", "host-value");
