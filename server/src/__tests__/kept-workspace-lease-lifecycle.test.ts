@@ -26,7 +26,7 @@ import { environmentRuntimeService, ReusableSandboxResumeError } from "../servic
 import { environmentService } from "../services/environments.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { remoteExecutionHasStopped } from "../services/remote-execution-termination.ts";
-import { stopBlocksIssueClaimSql } from "../services/kept-workspace-leases.ts";
+import { keptWorkspaceStopConfirmed, stopBlocksIssueClaimSql } from "../services/kept-workspace-leases.ts";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -511,7 +511,24 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(provider.methods().filter((m) => m === "environmentAcquireLease")).toHaveLength(1);
     });
 
-    it("retries a blocking stop on the next tick when a run is refused by it, whatever its backoff", async () => {
+    it("keeps a failing claim-blocking stop retrying at least once a minute", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider({ stopFails: () => true });
+      const runId = await newRun(seeded);
+      const acquired = await acquire(seeded, provider, runId);
+      await finishRun(runId, "cancelled");
+      await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
+      for (let i = 0; i < 6; i += 1) {
+        await expireStopBackoff(acquired.lease.id);
+        await services(provider).heartbeat.sweepKeptWorkspaceLeases();
+      }
+
+      const stop = (await leaseRow(acquired.lease.id)).metadata?.sandboxStop as { attempts: number; retryAfterMs: number };
+      expect(stop.attempts).toBeGreaterThanOrEqual(6);
+      expect(stop.retryAfterMs - Date.now()).toBeLessThanOrEqual(60_000);
+    });
+
+    it("stops a claim-blocking lease before longer-idle ones", async () => {
       const seeded = await seed();
       let failStop = true;
       const provider = fakeProvider({ stopFails: () => failStop });
@@ -519,20 +536,26 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       const acquired = await acquire(seeded, provider, runId);
       await finishRun(runId, "cancelled");
       await services(provider).runtime.releaseRunLeases(runId, "released", undefined, "stop_and_retain");
-      // The stop keeps failing until it sits on a long backoff.
-      for (let i = 0; i < 4; i += 1) {
-        await expireStopBackoff(acquired.lease.id);
-        await services(provider).heartbeat.sweepKeptWorkspaceLeases();
-      }
+      await expireStopBackoff(acquired.lease.id);
+      // A longer-idle stop of an ended run is also due.
+      const blocking = await leaseRow(acquired.lease.id);
+      const endedRun = await newRun(seeded, "succeeded");
+      const longAgo = new Date(Date.now() - 2 * 60 * 60_000);
+      const [idle] = await db.insert(environmentLeases).values({
+        companyId: blocking.companyId, environmentId: blocking.environmentId, issueId: blocking.issueId,
+        executionWorkspaceId: blocking.executionWorkspaceId, heartbeatRunId: endedRun, status: "stopped",
+        leasePolicy: blocking.leasePolicy, provider: blocking.provider, providerLeaseId: "pc-idle",
+        cleanupStatus: "pending", lastUsedAt: longAgo,
+        metadata: { ...(blocking.metadata as Record<string, unknown>), sandboxStop: { attempts: 0, retryAfterMs: 0 } },
+      }).returning();
       failStop = false;
 
-      const blockedRun = await newRun(seeded);
-      await expect(acquire(seeded, provider, blockedRun)).rejects.toBeInstanceOf(ReusableSandboxResumeError);
-      const kept = await services(provider).heartbeat.sweepKeptWorkspaceLeases();
+      await services(provider).runtime.reconcileStoppedLeases({ limit: 1 });
 
-      expect(kept.confirmed).toBe(1);
-      const resumed = await acquire(seeded, provider, blockedRun);
-      expect(resumed.lease.providerLeaseId).toBe(acquired.lease.providerLeaseId);
+      expect(keptWorkspaceStopConfirmed(toLease(await leaseRow(acquired.lease.id)))).toBe(true);
+      expect(await leaseRow(idle!.id)).toMatchObject({ status: "stopped", metadata: expect.objectContaining({
+        sandboxStop: { attempts: 0, retryAfterMs: 0 },
+      }) });
     });
 
     it("never claims a kept lease another live run holds active", async () => {
@@ -557,7 +580,13 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       });
       await isLocked;
       const acquiring = acquire(seeded, provider, runId);
-      setTimeout(commit, 500);
+      // Commit only once the claim is waiting on the row lock.
+      for (;;) {
+        const [waiting] = await db.execute<{ n: number }>(sql`select count(*)::int as n from pg_locks where not granted`);
+        if ((waiting?.n ?? 0) > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      commit();
       await takeBack;
       const acquired = await acquiring;
 

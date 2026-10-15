@@ -50,7 +50,6 @@ import {
 } from "./environment-config.js";
 import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import {
-  KEPT_WORKSPACE_STOP_KEY,
   STOP_KEY_SQL,
   bumpSandboxEpochSql,
   stopBlocksIssueClaimSql,
@@ -129,6 +128,7 @@ const KEPT_WORKSPACE_STOP_CONCURRENCY = 4;
 const KEPT_WORKSPACE_STOP_CLAIM_MS = 90_000;
 const KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS = 30_000;
 const KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS = 5 * 60_000;
+const KEPT_WORKSPACE_BLOCKING_STOP_MAX_BACKOFF_MS = 60_000;
 const KEPT_WORKSPACE_STOP_WARN_ATTEMPTS = 5;
 
 // Paperclip Runner leases keep their retention: their next turn restores
@@ -3548,16 +3548,6 @@ function createSandboxEnvironmentDriver(
     if (!retried && !current.blocksClaim) {
       return await claimReusableLeaseForResume(toEnvironmentLeaseSnapshot(current.row), heartbeatRunId, true);
     }
-    // This run now waits on the stop: retry it on the next sweep tick, so
-    // each retry of the run finds a fresh stop attempt, whatever the stop's
-    // backoff. An attempt already in flight keeps its claim.
-    await db.update(environmentLeases).set({
-      metadata: sql`jsonb_set(${environmentLeases.metadata}, ${sql.raw(`'{${KEPT_WORKSPACE_STOP_KEY},retryAfterMs}'`)}, '0'::jsonb)`,
-    }).where(and(
-      eq(environmentLeases.id, lease.id),
-      stopBlocksIssueClaimSql(),
-      sql`${environmentLeases.metadata}->${STOP_KEY_SQL}->>'attemptId' is null`,
-    ));
     throw new ReusableSandboxResumeError({ provider: lease.provider, providerLeaseId: lease.providerLeaseId });
   }
 
@@ -4298,9 +4288,12 @@ export function environmentRuntimeService(
       // row lags the Sandbox's fence, it backs off and warns like any failed
       // stop.
       const attempts = (previous.attempts ?? 0) + 1;
-      // A run refused by a claim-blocking stop pulls its next attempt forward.
+      // A claim-blocking stop holds up the issue's next run (and any run
+      // resuming the workspace), so it backs off to a minute, not five.
       const retryAfterMs = Date.now() + Math.min(
-        KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
+        readKeptWorkspaceStop(claimed).blocksIssueClaim
+          ? KEPT_WORKSPACE_BLOCKING_STOP_MAX_BACKOFF_MS
+          : KEPT_WORKSPACE_STOP_MAX_BACKOFF_MS,
         KEPT_WORKSPACE_STOP_BASE_BACKOFF_MS * 2 ** Math.min(attempts - 1, 10),
       );
       const backedOff = await settleAttempt({
@@ -5022,7 +5015,8 @@ export function environmentRuntimeService(
           sql`coalesce((${environmentLeases.metadata}->${STOP_KEY_SQL}->>'retryAfterMs')::bigint, 0)
             <= ${Date.now()}`,
         ))
-        .orderBy(asc(environmentLeases.lastUsedAt))
+        // Stops that hold up a claim go first, then the longest idle.
+        .orderBy(sql`${stopBlocksIssueClaimSql()} desc`, asc(environmentLeases.lastUsedAt))
         .limit(input.limit ?? KEPT_WORKSPACE_STOP_PAGE_SIZE);
 
       // A few stops at a time: each can wait most of a minute on the provider.
