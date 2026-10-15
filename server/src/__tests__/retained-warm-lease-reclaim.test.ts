@@ -23,6 +23,7 @@ vi.mock("../telemetry.ts", () => ({ getTelemetryClient: () => mockTelemetryClien
 import { environmentRuntimeService } from "../services/environment-runtime.ts";
 import { environmentService } from "../services/environments.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { leaseHoldsIssueClaimSql } from "../services/kept-workspace-leases.ts";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.ts";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -290,6 +291,46 @@ describeEmbeddedPostgres("retained warm lease reclaim", () => {
 
       expect(provider.call).not.toHaveBeenCalled();
       expect((await leaseRow(leaseId)).status).toBe("retained");
+    });
+
+    it("reaches an idle lease behind a full page of older leases that are not idle yet", async () => {
+      const seeded = await seed();
+      const patientEnvironmentId = randomUUID();
+      await db.insert(environments).values({
+        id: patientEnvironmentId, companyId: seeded.companyId, name: "Patient Sandbox", driver: "sandbox", status: "active",
+        config: { provider: "fake-plugin", image: "fake:test", reuseLease: true,
+          runnerLifecycleMode: "warm", runnerIdleTimeoutMs: 24 * 60 * 60_000 },
+      });
+      const patientLeaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(60) });
+      const patient = await leaseRow(patientLeaseId);
+      await db.delete(environmentLeases).where(eq(environmentLeases.id, patientLeaseId));
+      // A page's worth of leases, older than the idle one but inside their own bound.
+      await db.insert(environmentLeases).values(Array.from({ length: 500 }, (_, i) => ({
+        ...patient, id: randomUUID(), environmentId: patientEnvironmentId, providerLeaseId: `pc-patient-${i}`,
+      })));
+      const idleLeaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(30) });
+      const provider = fakeProvider();
+
+      expect(await cleanupTick(provider.pluginWorkerManager)).toEqual({ claimed: 1 });
+
+      expect(provider.destroyed).toEqual([(await leaseRow(idleLeaseId)).providerLeaseId]);
+    });
+
+    it("does not hold up the issue's next run while an idle destroy is retried", async () => {
+      const seeded = await seed();
+      const idleLeaseId = await insertLease(seeded, { status: "retained", lastUsedAt: minutesAgo(16) });
+      const failedLeaseId = await insertLease(seeded, { status: "active" });
+      await db.update(environmentLeases).set({ status: "pending_cleanup", cleanupStatus: "failed", releasedAt: new Date() })
+        .where(eq(environmentLeases.id, failedLeaseId));
+      const provider = fakeProvider({ destroyFails: true });
+      await cleanupTick(provider.pluginWorkerManager);
+      expect(await leaseRow(idleLeaseId)).toMatchObject({ status: "pending_cleanup", cleanupStatus: "failed" });
+
+      const holding = await db.select({ id: environmentLeases.id }).from(environmentLeases)
+        .where(leaseHoldsIssueClaimSql());
+
+      // A teardown left over from a run's own release still holds the claim.
+      expect(holding.map((row) => row.id)).toEqual([failedLeaseId]);
     });
 
     it("records a failed provider destroy as a failure, never as cleaned up", async () => {

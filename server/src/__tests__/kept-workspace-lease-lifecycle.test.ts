@@ -642,6 +642,29 @@ describeEmbeddedPostgres("kept workspace lease lifecycle", () => {
       expect(provider.methods().filter((m) => m === "environmentStopLease")).toHaveLength(stopsBefore);
     });
 
+    it("resumes a free kept workspace when another one in the same scope is held by a blocking stop", async () => {
+      const seeded = await seed();
+      const provider = fakeProvider({ stopFails: () => true });
+      // Two concurrent runs, each with its own kept workspace.
+      const cancelledRun = await newRun(seeded);
+      const blocked = await acquire(seeded, provider, cancelledRun);
+      const warmRun = await newRun(seeded);
+      const free = await acquire(seeded, provider, warmRun);
+      expect(free.lease.providerLeaseId).not.toBe(blocked.lease.providerLeaseId);
+      await finishRun(warmRun);
+      await services(provider).runtime.releaseRunLeases(warmRun, "released", undefined, "keep_running");
+      await finishRun(cancelledRun, "cancelled");
+      await services(provider).runtime.releaseRunLeases(cancelledRun, "released", undefined, "stop_and_retain");
+      // The blocked workspace is the most recently used, so it is listed first.
+      await db.update(environmentLeases).set({ lastUsedAt: new Date(Date.now() + 60_000) })
+        .where(eq(environmentLeases.id, blocked.lease.id));
+
+      const nextRun = await newRun(seeded);
+      const resumed = await acquire(seeded, provider, nextRun);
+
+      expect(resumed.lease.providerLeaseId).toBe(free.lease.providerLeaseId);
+    });
+
     it("does not resume the workspace for a run cancelled before its claim", async () => {
       const seeded = await seed();
       const provider = fakeProvider();

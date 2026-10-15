@@ -613,7 +613,7 @@ import {
   leaseHasLiveRunSql,
   notPaperclipRunnerLeaseMetadataSql,
   leaseKeepsWorkspace,
-  stopBlocksIssueClaimSql,
+  leaseHoldsIssueClaimSql,
   unconfirmedStopMetadataSql,
 } from "./kept-workspace-leases.js";
 import {
@@ -17722,17 +17722,7 @@ export function heartbeatService(
           .from(environmentLeases).where(and(
             eq(environmentLeases.companyId, run.companyId),
             eq(environmentLeases.heartbeatRunId, owner.executionRunId),
-            or(and(isNull(environmentLeases.releasedAt),
-                // Warm release deliberately retains the sandbox. Its successful
-                // receipt settles the old run without destroying the resource.
-                sql`not coalesce(${environmentLeases.status} = 'retained'
-                  and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
-                  and ${environmentLeases.cleanupStatus} = 'success', false)`),
-              eq(environmentLeases.status, "pending_cleanup"),
-              eq(environmentLeases.cleanupStatus, "failed"),
-              // A kept-workspace stop of a cancelled or crashed run that the
-              // provider has not confirmed yet: its agent may still be running.
-              stopBlocksIssueClaimSql()),
+            leaseHoldsIssueClaimSql(),
           )).limit(1);
         const [finalization] = await tx.select({
           phase: nativeRunFinalizations.phase, leaseOwner: nativeRunFinalizations.leaseOwner,

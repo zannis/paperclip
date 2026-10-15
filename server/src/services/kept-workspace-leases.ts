@@ -17,6 +17,9 @@ import { environmentLeases } from "@paperclipai/db";
  * unconfirmed and the reconciler stops the Sandbox again once that run ends.
  */
 
+/** A retained lease the idle sweep queued for teardown after its run ended cleanly. */
+export const RETAINED_LEASE_IDLE_FAILURE_REASON = "retained_lease_idle_timeout";
+
 export const KEPT_WORKSPACE_STOP_KEY = "sandboxStop";
 /** The key as a SQL literal: a bound parameter has no type for jsonb operators. */
 export const STOP_KEY_SQL = sql.raw(`'${KEPT_WORKSPACE_STOP_KEY}'`);
@@ -169,6 +172,27 @@ export function stopBlocksIssueClaimSql() {
   return sql`(${environmentLeases.status} = 'stopped'
     and coalesce(${environmentLeases.metadata}->${STOP_KEY_SQL}->'blocksIssueClaim' = 'true'::jsonb, false)
     and ${stopUnconfirmedSql()})`;
+}
+
+/**
+ * The lease still holds its run's issue claim: the run's resource is neither
+ * released nor settled, so a new run must not claim the issue yet.
+ */
+export function leaseHoldsIssueClaimSql() {
+  return sql`((${environmentLeases.releasedAt} is null
+      -- Warm release deliberately retains the sandbox. Its successful receipt
+      -- settles the old run without destroying the resource.
+      and not coalesce(${environmentLeases.status} = 'retained'
+        and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
+        and ${environmentLeases.cleanupStatus} = 'success', false))
+    or ${environmentLeases.status} = 'pending_cleanup'
+    or ${environmentLeases.cleanupStatus} = 'failed'
+    -- A kept-workspace stop of a cancelled or crashed run that the provider
+    -- has not confirmed yet: its agent may still be running.
+    or ${stopBlocksIssueClaimSql()})
+    -- An idle teardown comes after the run ended cleanly and its lease was
+    -- retained; retrying a failed destroy must not hold up the issue.
+    and ${environmentLeases.failureReason} is distinct from ${RETAINED_LEASE_IDLE_FAILURE_REASON}`;
 }
 
 /** Metadata for a lease whose stop the provider confirmed at its current epoch. */

@@ -48,7 +48,7 @@ import {
   resolveSandboxCleanupConfigSecrets,
   stripSandboxProviderEnvelope,
 } from "./environment-config.js";
-import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
+import { DEFAULT_WARM_RUNNER_IDLE_TIMEOUT_MS, warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import {
   STOP_KEY_SQL,
   bumpSandboxEpochSql,
@@ -69,6 +69,7 @@ import {
   stopRetryAfterMsSql,
   runIsLiveSql,
   unconfirmedStopMetadataSql,
+  RETAINED_LEASE_IDLE_FAILURE_REASON,
 } from "./kept-workspace-leases.js";
 import { HttpError } from "../errors.js";
 import {
@@ -121,7 +122,7 @@ const SANDBOX_ORPHAN_CLEANUP_WRITE_ERROR_KIND = "sandbox_orphan_cleanup_write_fa
 // Each retained lease holds one live provider sandbox, so the population the
 // idle sweep reads is small. The page bounds one tick; the oldest rows go first.
 const RETAINED_LEASE_IDLE_SWEEP_PAGE_SIZE = 500;
-export const RETAINED_LEASE_IDLE_FAILURE_REASON = "retained_lease_idle_timeout";
+export { RETAINED_LEASE_IDLE_FAILURE_REASON };
 
 // A kept-workspace stop is one provider call of at most a minute. The claim
 // outlasts it, so a concurrent sweep cannot start a second stop meanwhile.
@@ -2089,18 +2090,32 @@ function createSandboxEnvironmentDriver(
           input.heartbeatRunId !== null &&
           (input.executionWorkspaceId !== null || input.issueId !== null) &&
           input.agentId !== null
-          ? findReusableSandboxLeaseId({ config: storedConfig, leases: reusableExistingLeases }) ??
-            // A kept workspace resumes even after its environment config
-            // changed; its pod keeps the image it was built with.
-            reusableExistingLeases.find((lease) => leaseKeepsWorkspace(lease) && lease.providerLeaseId)
-              ?.providerLeaseId ?? null
+          ? findReusableSandboxLeaseId({ config: storedConfig, leases: reusableExistingLeases })
           : null;
-        const reusableLease = await claimReusableLeaseForResume(
-          reusableProviderLeaseId
-            ? reusableExistingLeases.find((lease) => lease.providerLeaseId === reusableProviderLeaseId)
-            : null,
-          input.heartbeatRunId,
-        );
+        // A kept workspace resumes even after its environment config changed;
+        // its pod keeps the image it was built with. Each one in scope is
+        // tried in turn, so a workspace held by a blocking stop does not hide
+        // a free one; the run fails only when none could be claimed.
+        const resumeCandidates = [
+          ...(reusableProviderLeaseId
+            ? reusableExistingLeases.filter((lease) => lease.providerLeaseId === reusableProviderLeaseId).slice(0, 1)
+            : []),
+          ...reusableExistingLeases.filter((lease) =>
+            leaseKeepsWorkspace(lease) && lease.providerLeaseId && lease.providerLeaseId !== reusableProviderLeaseId),
+        ];
+        let reusableLease: EnvironmentLease | null = null;
+        let resumeRefusal: unknown = null;
+        for (const candidate of resumeCandidates) {
+          try {
+            reusableLease = await claimReusableLeaseForResume(candidate, input.heartbeatRunId);
+          } catch (error) {
+            if (!(error instanceof ReusableSandboxResumeError)) throw error;
+            resumeRefusal ??= error;
+            continue;
+          }
+          if (reusableLease) break;
+        }
+        if (!reusableLease && resumeRefusal) throw resumeRefusal;
 
         let providerLease: PluginEnvironmentLease | null = null;
         let replacementReason:
@@ -4934,6 +4949,12 @@ export function environmentRuntimeService(
             eq(environmentLeases.leasePolicy, "reuse_by_environment"),
             eq(environments.driver, "sandbox"),
             sql`${environments.config}->>'runnerLifecycleMode' = 'warm'`,
+            // Idle by its own environment's bound, so leases that are older
+            // but not idle yet never fill the page.
+            sql`extract(epoch from ${environmentLeases.lastUsedAt}) * 1000 <= ${now.getTime()}::bigint - (case
+              when jsonb_typeof(${environments.config}->'runnerIdleTimeoutMs') = 'number'
+                then (${environments.config}->>'runnerIdleTimeoutMs')::numeric
+              else ${DEFAULT_WARM_RUNNER_IDLE_TIMEOUT_MS}::numeric end)`,
             notPaperclipRunnerLeaseMetadataSql(),
             workspaceKind,
             sql`not exists (

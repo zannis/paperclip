@@ -1285,9 +1285,16 @@ async function startServerWithDatabaseTeardown(
       .catch((err) => {
         logger.error({ err }, "environment lease cleanup sweep failed");
       });
+  // A tick whose kept-workspace stops wait on a slow provider can outlast the
+  // interval; the next tick starts only once it has finished.
+  let environmentLeaseCleanupSweepRunning = false;
   const scheduleEnvironmentLeaseCleanupSweep = () => {
-    if (heartbeatSchedulerStopped) return;
-    trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS));
+    if (heartbeatSchedulerStopped || environmentLeaseCleanupSweepRunning) return;
+    environmentLeaseCleanupSweepRunning = true;
+    trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS)
+      .finally(() => {
+        environmentLeaseCleanupSweepRunning = false;
+      }));
   };
   const githubConnectionEvents = githubConnectionEventService(db as any, {
     wakeup: environmentLeaseCleanupHeartbeat.wakeup,
