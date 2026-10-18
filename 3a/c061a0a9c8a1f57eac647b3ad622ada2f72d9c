@@ -12,6 +12,8 @@ packages/shared/src/app-definitions.ts
   s_135b141e55ac3c::t_6acc2b4fd04b2b 13
 packages/shared/src/app-definitions.generated.ts
   s_135b141e55ac3c::t_b1cbd4d2b1ea5a 2-3
+doc/connections/tool-method-permission-reviews.json
+  s_bb59cae3bb56bf::t_36a4ee10f15a2c 2193-2205
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -31,6 +33,14 @@ packages/shared/src/app-definitions.generated.ts
       "agent_id": {
         "tool": "claude",
         "id": "a62769b5-68db-405b-86de-753df6c27df0",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
         "model": "claude-opus-5-5"
       },
       "human_author": "zannis <zkalampoukis@gmail.com>"
