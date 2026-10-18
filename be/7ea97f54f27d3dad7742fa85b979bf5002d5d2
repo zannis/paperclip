@@ -1,0 +1,19 @@
+server/src/services/tool-access.ts
+  s_135b141e55ac3c::t_771af7c112d9b4 14396-14403,14413-14427
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "be7ea97f54f27d3dad7742fa85b979bf5002d5d2",
+  "prompts": {},
+  "sessions": {
+    "s_135b141e55ac3c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1b2563a0-8184-40c7-83c2-e3b5d514928a",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}

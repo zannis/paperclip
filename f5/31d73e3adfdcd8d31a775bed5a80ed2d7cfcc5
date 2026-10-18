@@ -1,0 +1,23 @@
+server/src/services/tool-access.ts
+  s_bb59cae3bb56bf::t_8f851cd2058259 14195-14203,14206-14213
+doc/connections/TYPESAFE.md
+  s_bb59cae3bb56bf::t_55fcf79cbcd7ef 83-84
+server/src/__tests__/typesafe-connector.integration.test.ts
+  s_bb59cae3bb56bf::t_969e074323e757 296-329
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f531d73e3adfdcd8d31a775bed5a80ed2d7cfcc5",
+  "prompts": {},
+  "sessions": {
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}

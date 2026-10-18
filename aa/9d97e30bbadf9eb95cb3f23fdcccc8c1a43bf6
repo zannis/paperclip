@@ -1,0 +1,27 @@
+ui/storybook/stories/connection-setup/TypesafeConnection.stories.tsx
+  s_bb59cae3bb56bf::t_85684f4971135b 69,77-78,158,239,489,498-499,511-512,521,528,536,541,611,653-668,712,717,722,730,735,740,750,755,760,768
+doc/observability.md
+  s_bb59cae3bb56bf::t_5d180d23539a7e 303
+server/src/services/connector-runtime.ts
+  s_bb59cae3bb56bf::t_02304a8ccab402 30,124,127
+server/src/services/connectors/typesafe-skill.ts
+  s_bb59cae3bb56bf::t_b76e07697c64d4 1-2,9,20,26,29-30,32-33,37,62,64-66,68-69,71,73-75,83,104,106,108,110,118-119,122
+server/src/services/execution-preparation-timing.ts
+  s_bb59cae3bb56bf::t_d5f284b8d7dfac 65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aa9d97e30bbadf9eb95cb3f23fdcccc8c1a43bf6",
+  "prompts": {},
+  "sessions": {
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
