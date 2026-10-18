@@ -1,0 +1,29 @@
+doc/connections/TYPESAFE.md
+  s_bb59cae3bb56bf::t_d6d87b8853cce0 94-96
+server/src/__tests__/connection-intents-service.test.ts
+  s_bb59cae3bb56bf::t_d43a0fcb84e5cd 742-747,751,753-755,762
+server/src/services/connection-intent-delivery.ts
+  s_bb59cae3bb56bf::t_b9f09083f64b7c 157
+server/src/services/connection-intents.ts
+  s_bb59cae3bb56bf::t_bf27d4a05799c7 271-272,296,464,551,780,1155
+server/src/services/connectors/typesafe.ts
+  s_bb59cae3bb56bf::t_46465d079c0268 164-165
+server/src/services/satisfied-connection-intents.ts
+  s_bb59cae3bb56bf::t_8bb4441b4d4f89 33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d7a0b69237225ee4f32a5dee0f4c132d78f23ed8",
+  "prompts": {},
+  "sessions": {
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
