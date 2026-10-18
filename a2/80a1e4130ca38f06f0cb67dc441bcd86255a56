@@ -1,0 +1,28 @@
+server/src/services/restricted-chat-run.ts
+  s_bb59cae3bb56bf::t_9015d9da7c8a38 1-8
+server/src/__tests__/typesafe-connector.integration.test.ts
+  s_bb59cae3bb56bf::t_caff256da40ffe 378-413
+  s_bb59cae3bb56bf::t_6c3023d9dc5a09 414
+doc/connections/TYPESAFE.md
+  s_bb59cae3bb56bf::t_a81681d7a58eab 70-73
+server/src/services/connectors/typesafe.ts
+  s_bb59cae3bb56bf::t_236f2febbc6472 3,7,138-147
+server/src/services/native-runtime/paperclip-runner-tool-authority.ts
+  s_bb59cae3bb56bf::t_415098cbe1209e 41,394
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a280a1e4130ca38f06f0cb67dc441bcd86255a56",
+  "prompts": {},
+  "sessions": {
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
