@@ -1,0 +1,19 @@
+server/src/services/connector-runtime.test.ts
+  s_bb59cae3bb56bf::t_5a47152d97791f 6,12,25,29-30,39
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b794aed126ce7f669dcad42fe7510f5da46cd090",
+  "prompts": {},
+  "sessions": {
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
