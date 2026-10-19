@@ -610,6 +610,10 @@ export function environmentRunOrchestrator(
     const status = input.status ?? "released";
     const result: EnvironmentReleaseResult = { released: [], errors: [] };
 
+    const trailingArgs: [cancelActiveWork?: boolean, destroyFailureReason?: string] =
+      input.destroyFailureReason
+        ? [input.cancelActiveWork, input.destroyFailureReason]
+        : input.cancelActiveWork ? [true] : [];
     let releasedLeases: EnvironmentRuntimeLeaseRecord[];
     try {
       releasedLeases = await environmentRuntime.releaseRunLeases(
@@ -617,9 +621,7 @@ export function environmentRunOrchestrator(
         status,
         (leaseId, error) => result.errors.push({ leaseId, error }),
         input.providerResourceDisposition,
-        ...(input.destroyFailureReason
-          ? [input.cancelActiveWork, input.destroyFailureReason] as const
-          : input.cancelActiveWork ? [true] as const : []),
+        ...trailingArgs,
       );
     } catch (err) {
       result.errors.push({ leaseId: "*", error: err });
