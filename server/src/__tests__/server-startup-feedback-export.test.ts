@@ -85,6 +85,7 @@ const {
     scanSilentActiveRuns: vi.fn(async () => ({ created: 0, escalated: 0 })),
     sweepStaleIssueLocks: vi.fn(async () => ({ cleared: 0 })),
     sweepIdleRetainedLeases: vi.fn(async () => ({ claimed: 0 })),
+    sweepKeptWorkspaceLeases: vi.fn(async () => ({ confirmed: 0, destroyed: 0, failed: 0, terminalDestroyed: 0 })),
     sweepPendingCleanupLeases: vi.fn(async () => ({ swept: 0, destroyed: 0, capped: 0 })),
     sweepExpiredRuntimeStatuses: vi.fn(() => 0),
     tickTimers: vi.fn(async () => ({ checked: 0, enqueued: 0, skipped: 0 })),
