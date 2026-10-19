@@ -17,6 +17,7 @@ import {
 import { parseObject } from "../adapters/utils.js";
 import { getStartupTracer } from "../instrumentation.js";
 import { resolveEnvironmentDriverConfigForRuntime } from "./environment-config.js";
+import { warmRunnerIdleTimeoutMs } from "./runner-environment-lifecycle.js";
 import type { EnvironmentRuntimeService } from "./environment-runtime.js";
 import { getEnvironmentDriverTraits } from "./environment-driver-traits.js";
 
@@ -361,6 +362,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
         enableSandboxDuplexBridge = false;
       }
     }
+    const warmIdleTimeoutMs = warmRunnerIdleTimeoutMs(parsed.config);
 
     return {
       kind: "remote",
@@ -370,14 +372,8 @@ export async function resolveEnvironmentExecutionTarget(input: {
       remoteCwd,
       enableSandboxDuplexBridge,
       runnerLifecyclePolicy:
-        parsed.config.runnerLifecycleMode === "warm"
-          ? {
-              mode: "warm",
-              idleTimeoutMs:
-                typeof parsed.config.runnerIdleTimeoutMs === "number"
-                  ? parsed.config.runnerIdleTimeoutMs
-                  : 300_000,
-            }
+        warmIdleTimeoutMs !== null
+          ? { mode: "warm", idleTimeoutMs: warmIdleTimeoutMs }
           : parsed.config.runnerLifecycleMode === "per_turn"
             ? { mode: "per_turn", idleTimeoutMs: null }
             : null,

@@ -1126,8 +1126,11 @@ export function heartbeatService(
     recoverNativeRunsAfterRestart,
     reapOrphanedRuns,
     sweepOrphanedActiveLeases,
+    sweepIdleRetainedLeases,
+    sweepKeptWorkspaceLeases,
     drainRunningRunsForShutdown,
   } = createHeartbeatRecovery(db, {
+    executionWorkspacesSvc,
     enterShutdown: () => { shutdownInProgress = true; },
     scheduleBoundedRetryForRun,
     appendRunEvent,
@@ -5312,6 +5315,8 @@ export function heartbeatService(
     recoverNativeRunsAfterRestart,
     reapOrphanedRuns,
     sweepOrphanedActiveLeases,
+    sweepIdleRetainedLeases,
+    sweepKeptWorkspaceLeases,
     sweepPendingCleanupLeases,
     // Override-aware scheduling-suppression check (honors the worktree
     // run-execution experimental setting). Callers outside the service that

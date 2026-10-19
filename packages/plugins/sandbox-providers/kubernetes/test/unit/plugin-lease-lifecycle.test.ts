@@ -72,6 +72,8 @@ describe("onEnvironmentResumeLease", () => {
     });
 
     expect(lease.providerLeaseId).toBe("pc-abc");
+    // An emptyDir lease says so explicitly, so the server never asks to stop it.
+    expect(lease.metadata?.workspaceSurvivesStop).toBe(false);
     expect(lease.metadata).toEqual(
       expect.objectContaining({
         namespace: "paperclip-acme",

@@ -165,6 +165,7 @@ import type { budgetService } from "../budgets.js";
 import type { instanceSettingsService } from "../instance-settings.js";
 import type { createRunDispatch } from "../../modules/run-dispatch/index.js";
 import type { PostCommitEffect as WakeQueuePostCommitEffect, createWakeQueue } from "../../modules/wake-queue/index.js";
+import { leaseHoldsIssueClaimSql } from "../kept-workspace-leases.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type HeartbeatRunState = ReturnType<typeof createHeartbeatRunState>;
@@ -1174,14 +1175,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           .from(environmentLeases).where(and(
             eq(environmentLeases.companyId, run.companyId),
             eq(environmentLeases.heartbeatRunId, previousRunId),
-            or(and(isNull(environmentLeases.releasedAt),
-                // Warm release deliberately retains the sandbox. Its successful
-                // receipt settles the old run without destroying the resource.
-                sql`not coalesce(${environmentLeases.status} = 'retained'
-                  and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
-                  and ${environmentLeases.cleanupStatus} = 'success', false)`),
-              eq(environmentLeases.status, "pending_cleanup"),
-              eq(environmentLeases.cleanupStatus, "failed")),
+            leaseHoldsIssueClaimSql(),
           )).limit(1);
         const [finalization] = await tx.select({
           phase: nativeRunFinalizations.phase, leaseOwner: nativeRunFinalizations.leaseOwner,

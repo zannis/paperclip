@@ -27,6 +27,13 @@ export const kubernetesProviderConfigSchema = z
       })
       .optional(),
 
+    reuseLease: z.boolean().default(false),
+
+    workspaceStorage: z.object({
+      storageClassName: z.string().min(1),
+      size: z.string().min(1),
+    }).optional(),
+
     runtimeClassName: z.string().optional(),
     serviceAccountAnnotations: z.record(z.string()).default({}),
 
@@ -68,6 +75,10 @@ export const kubernetesProviderConfigSchema = z
     backend: z.enum(["sandbox-cr", "job"]).default("sandbox-cr"),
   })
   .refine(
+    (cfg) => !cfg.workspaceStorage || cfg.backend === "sandbox-cr",
+    { message: "workspaceStorage requires the sandbox-cr backend" },
+  )
+  .refine(
     (cfg) => cfg.inCluster || cfg.kubeconfig,
     {
       message:
@@ -82,6 +93,8 @@ export function parseKubernetesProviderConfig(input: unknown): KubernetesProvide
 }
 
 export interface KubernetesLeaseMetadata {
+  /** Workspace root shared by command execution and file-sync confinement. */
+  remoteCwd: string;
   namespace: string;
   /** Name of the workload resource (Job name for job backend, Sandbox CR name for sandbox-cr backend). */
   jobName: string;
@@ -105,4 +118,12 @@ export interface KubernetesLeaseMetadata {
    * sync may be used when the worker advertises the verbs.
    */
   nativeFileSyncUnsupported?: boolean;
+  /** Adapter this Sandbox was built for; a cold resume rebuilds its env from it. */
+  adapterType?: string;
+  /**
+   * True when /workspace is the Sandbox's PVC, so a stop (replicas 0) keeps
+   * the files. Set at acquire and carried through resume, never re-derived
+   * from current config.
+   */
+  workspaceSurvivesStop?: boolean;
 }

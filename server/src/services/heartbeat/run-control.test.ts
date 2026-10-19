@@ -130,12 +130,15 @@ describe("heartbeat run-control module boundary", () => {
   });
 
   it("uses the persisted terminal outcome when choosing warm resource retention", async () => {
-    const database = guardedDatabase();
+    // Retention first asks whether the run closed its own issue; nothing else touches the database.
+    const lookup = { from: () => lookup, innerJoin: () => lookup, where: () => lookup, limit: async () => [] };
+    const select = vi.fn(() => lookup);
+    const database = { db: { select } as unknown as Db };
     const deps = callbacks(database.db);
     deps.getRun.mockResolvedValue({ status: "failed", runtimeMode: "legacy" } as Run);
     await createHeartbeatRunControl(database.db, deps).releaseEnvironmentLeasesForRun({ runId: "failed", companyId: "company", agentId: "agent", status: "succeeded", providerResourceDisposition: "keep_running" });
     expect(deps.envOrchestrator.releaseForRun).toHaveBeenCalledWith(expect.objectContaining({ heartbeatRunId: "failed", status: "failed", providerResourceDisposition: "stop_and_retain" }));
-    expect(database.access).not.toHaveBeenCalled();
+    expect(select).toHaveBeenCalledTimes(1);
   });
 
   it("defers destruction when a warm session remains busy", async () => {

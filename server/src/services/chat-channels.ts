@@ -23,6 +23,7 @@ import { slackChatRegistrationService, slackRegistrationProjection } from "./cha
 import { chatSlackRegistrations } from "@paperclipai/db";
 import { SLACK_CHAT_BOT_SCOPES } from "@paperclipai/shared";
 import { authorizationService, canActorReadIssuePrivacy, canPublishIssueToChatAudience } from "./authorization.js";
+import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { withSlackBoardLease } from "./slack-board-lease.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { authorizeSlackBoardPublication } from "./slack-board-authority.js";
@@ -12217,9 +12218,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     if (
       leases.some(
         (lease) =>
-          !["released", "expired", "failed"].includes(lease.status) ||
-          lease.cleanupStatus !== "success" ||
-          !lease.releasedAt,
+          // A kept workspace whose stop the provider confirmed holds its
+          // volume, so it never reads as cleaned up, but its run has ended.
+          !hasRemoteTerminationReceipt(lease) && (
+            !["released", "expired", "failed"].includes(lease.status) ||
+            lease.cleanupStatus !== "success" ||
+            !lease.releasedAt
+          ),
       )
     )
       throw failedChatRetryDenied();
