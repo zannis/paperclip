@@ -473,7 +473,8 @@ async function commandIsResolvable(
         trimmed,
         target,
         resolveAdapterExecutionTargetCwd(target, asString(input?.config.cwd, ""), process.cwd()),
-        {},
+        // The sandbox probe needs no server env; SSH needs PATH to find `ssh`.
+        target.transport === "sandbox" ? {} : process.env,
         {
           // Fresh sandboxes need the same ACP server that ships with this
           // adapter. Only bootstrap our default command; an operator's custom
