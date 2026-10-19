@@ -48,6 +48,7 @@ import type { getRunLogStore, RunLogHandle } from "../run-log-store.js";
 import type { createHeartbeatRunState, getAdapterSessionCodec } from "./run-state.js";
 import type { EffectiveRunSessionConfigMetadata } from "./workspaces.js";
 import type { Db, agents } from "@paperclipai/db";
+import { REUSABLE_SANDBOX_RESUME_FAILED_CODE, reusableSandboxResumeFailureCode } from "../environment-runtime.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Agent = typeof agents.$inferSelect;
@@ -1326,6 +1327,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const setupFailureErrorCode =
       (controllerLeaseLost ? CONTROLLER_LEASE_LOST_FAILURE_CODE : null) ??
       workspaceGitScanFailure?.code ??
+      reusableSandboxResumeFailureCode(outerErr) ??
       workspaceValidationSetupFailure?.code ??
       configurationIncompleteSetupFailure?.code ??
       (unresolvedBaseRefSetupFailure ||
@@ -1462,7 +1464,10 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // No provider work began. Retry temporary host scan failures with
         // the existing durable failure budget, before releasing execution.
         // Generic recovery must not grant a second budget on exhaustion.
-        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+        // A kept workspace whose resume failed (a cold pod that was not
+        // Ready in time) is retried the same way; the lease is preserved.
+        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode) ||
+          livenessRun.errorCode === REUSABLE_SANDBOX_RESUME_FAILED_CODE
           ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
           : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
         ).catch((retryError) => {

@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { classifyEnvironmentCapabilities, environmentRuntimeService } from "../environment-runtime.js";
+import { executionWorkspaceService } from "../execution-workspaces.js";
 import { environmentService } from "../environments.js";
 import { createHeartbeatRecovery, type HeartbeatRecoveryDependencies } from "./recovery.js";
 import type { HotRestartIntent } from "../hot-restart.js";
@@ -57,6 +58,7 @@ function callbacks(db: Db) {
     releaseIssueExecutionAndPromote: vi.fn(async () => undefined),
     finalizeAgentStatus: vi.fn(async () => undefined),
     environmentRuntime: environmentRuntimeService(db),
+    executionWorkspacesSvc: executionWorkspaceService(db),
     environmentsSvc: environmentService(db),
     instructionCopies: {
       recoverStopped: vi.fn(async () => 0),

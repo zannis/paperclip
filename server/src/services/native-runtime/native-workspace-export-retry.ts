@@ -41,7 +41,7 @@ export async function retryNativeWorkspaceExport(input: {
       || lease.providerLeaseId !== reference.providerLeaseId || !lease.environmentId
       || typeof lease.metadata?.pluginId !== "string" || !lease.metadata.pluginId) throw changed();
     const [otherLease] = await db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
-      ne(environmentLeases.id, lease.id), eq(environmentLeases.provider, lease.provider!), eq(environmentLeases.providerLeaseId, lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "pending_cleanup"]),
+      ne(environmentLeases.id, lease.id), eq(environmentLeases.provider, lease.provider!), eq(environmentLeases.providerLeaseId, lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "stopped", "pending_cleanup"]),
     )).limit(1);
     if (otherLease) throw changed();
     const [result] = await db.select().from(nativeRunResults).where(and(eq(nativeRunResults.companyId, input.companyId), eq(nativeRunResults.issueId, issue.id), eq(nativeRunResults.runId, run.id), eq(nativeRunResults.id, coordinator.resultId ?? "00000000-0000-0000-0000-000000000000"))).limit(1);
@@ -167,7 +167,7 @@ export async function retryNativeWorkspaceExport(input: {
             sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${resumeRequestId}`)).limit(1);
           const [otherOwner] = await input.db.select({ id: environmentLeases.id }).from(environmentLeases).where(and(
             ne(environmentLeases.id, initial.lease.id), eq(environmentLeases.provider, initial.lease.provider!),
-            eq(environmentLeases.providerLeaseId, initial.lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "pending_cleanup"]),
+            eq(environmentLeases.providerLeaseId, initial.lease.providerLeaseId!), inArray(environmentLeases.status, ["active", "retained", "stopped", "pending_cleanup"]),
           )).limit(1);
           if (lease && !otherOwner && readNativeWorkspaceExportResume(lease)?.requestId === resumeRequestId) {
             let termination: ReturnType<typeof remoteTerminationReceipt>;

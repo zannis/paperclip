@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { definePlugin } from "@paperclipai/plugin-sdk";
 import type {
   PluginEnvironmentAcquireLeaseParams,
+  PluginEnvironmentTerminationReceipt,
   PluginEnvironmentDestroyLeaseParams,
   PluginEnvironmentExecuteParams,
   PluginEnvironmentExecuteResult,
@@ -39,6 +40,11 @@ import {
 import { execInPod, execInPodStreaming, wrapCommandWithEnv } from "./pod-exec.js";
 import { performSyncIn, performSyncOut, type PodStreamExec } from "./file-sync.js";
 import { checkLeaseResumable, destroyLeaseResources } from "./lease-lifecycle.js";
+import {
+  resumeSuspendableSandbox,
+  stopSuspendableSandbox,
+  waitForSandboxGone,
+} from "./sandbox-suspend.js";
 import {
   appendNetworkEgressDenyHint,
   createScopedNetworkEgressPolicyOrReleaseWorkload,
@@ -119,8 +125,49 @@ const readySandboxesByLease = new Set<string>();
 const RESUME_READY_TIMEOUT_MS = 30_000;
 const RESUME_READY_POLL_MS = 1_000;
 
+// Bounds for suspending and cold-resuming a Sandbox whose workspace is kept on
+// a PVC. Each stays below the server's 60 s lifecycle RPC budget so the worker
+// answers before the server gives up on the call.
+const SUSPEND_CONFIRM_TIMEOUT_MS = 40_000;
+const COLD_RESUME_READY_TIMEOUT_MS = 40_000;
+const SANDBOX_GONE_TIMEOUT_MS = 40_000;
+
+/**
+ * A stop can keep this lease's files only when /workspace is the Sandbox's
+ * PVC. An emptyDir workspace dies with the pod, so it must never be stopped.
+ */
+export function leaseWorkspaceSurvivesStop(
+  config: Pick<KubernetesProviderConfig, "backend"> & { workspaceStorage?: unknown },
+): boolean {
+  return config.backend === "sandbox-cr" && Boolean(config.workspaceStorage);
+}
+
+function readLeaseWorkspaceSurvivesStop(metadata: Record<string, unknown> | undefined): boolean {
+  return metadata?.workspaceSurvivesStop === true && metadata.backend === "sandbox-cr";
+}
+
+function readLeaseSandboxEpoch(metadata: Record<string, unknown> | undefined): number | null {
+  const epoch = metadata?.sandboxEpoch;
+  return typeof epoch === "number" && Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : null;
+}
+
+// The env Secret mounted into the Sandbox pod: adapter defaults, the adapter
+// keys from this worker's environment, and the egress grant the lease carries.
+function buildSandboxAdapterEnv(input: {
+  adapterType: string;
+  config: KubernetesProviderConfig;
+  scopedNetworkEgress: { allowFqdns: string[]; allowCidrs: string[] };
+}): Record<string, string> {
+  const adapterEnv = buildAdapterEnv(getAdapterDefaults(input.adapterType, input.config.adapters));
+  adapterEnv.PAPERCLIP_NETWORK_EGRESS_POLICY = "kubernetes-default-deny";
+  adapterEnv.PAPERCLIP_NETWORK_EGRESS_GRANT_PATH = NETWORK_EGRESS_GRANT_PATH;
+  adapterEnv.PAPERCLIP_NETWORK_EGRESS_ALLOW_FQDNS = input.scopedNetworkEgress.allowFqdns.join(",");
+  adapterEnv.PAPERCLIP_NETWORK_EGRESS_ALLOW_CIDRS = input.scopedNetworkEgress.allowCidrs.join(",");
+  return adapterEnv;
+}
+
 // The workspace remote dir is the confinement root for native file sync. It is
-// recorded on the lease metadata at realizeWorkspace time (`remoteCwd`); require
+// recorded when acquiring the lease (`remoteCwd`); require
 // it so a sync can never run without a concrete root to confine every sandbox
 // path against.
 function resolveSyncRemoteDir(lease: PluginEnvironmentLease): string {
@@ -199,6 +246,80 @@ async function resolveSyncPodExec(
       timeoutMs: io.timeoutMs ?? timeoutMs,
     });
   return { exec, timeoutMs };
+}
+
+
+async function resumeKeptWorkspaceLease(input: {
+  params: PluginEnvironmentResumeLeaseParams;
+  config: KubernetesProviderConfig;
+  clients: ReturnType<typeof makeKubeClients>;
+  namespace: string;
+  secretName: string;
+}): Promise<PluginEnvironmentLease> {
+  const { params } = input;
+  const epoch = readLeaseSandboxEpoch(params.leaseMetadata);
+  if (epoch === null) {
+    throw new Error(`Lease ${params.providerLeaseId} carries no sandbox epoch; refusing an unfenced resume.`);
+  }
+  const adapterType = resolveRunAdapterType(
+    typeof params.leaseMetadata?.adapterType === "string" ? params.leaseMetadata.adapterType : undefined,
+    input.config.adapterType,
+  );
+  const scopedNetworkEgress = parseScopedNetworkEgressGrant({
+    networkEgress: params.leaseMetadata?.scopedNetworkEgress,
+  });
+  const resumed = await resumeSuspendableSandbox(input.clients, {
+    namespace: input.namespace,
+    name: params.providerLeaseId,
+    epoch,
+    secretName: input.secretName,
+    adapterEnv: buildSandboxAdapterEnv({ adapterType, config: input.config, scopedNetworkEgress }),
+    timeoutMs: COLD_RESUME_READY_TIMEOUT_MS,
+  });
+  if (resumed.outcome === "missing") {
+    return { providerLeaseId: null, metadata: { expired: true, reason: "Sandbox CR no longer exists" } };
+  }
+  if (resumed.outcome === "volume_replaced") {
+    // The controller re-creates a deleted workspace PVC empty. Resuming onto
+    // it would hand the agent an empty /workspace without saying so.
+    return {
+      providerLeaseId: null,
+      metadata: {
+        workspaceSentinel: {
+          result: "volume_replaced",
+          reason: "The kept workspace volume was replaced by an empty one.",
+        },
+      },
+    };
+  }
+
+  uploadInterceptorsByLease.delete(params.providerLeaseId);
+  readySandboxesByLease.add(params.providerLeaseId);
+  const leaseMetadata: KubernetesLeaseMetadata = {
+    remoteCwd: "/workspace",
+    namespace: input.namespace,
+    jobName: params.providerLeaseId,
+    podName: resumed.podName,
+    secretName: input.secretName,
+    phase: "Running",
+    backend: "sandbox-cr",
+    scopedNetworkPolicyName:
+      typeof params.leaseMetadata?.scopedNetworkPolicyName === "string"
+        ? params.leaseMetadata.scopedNetworkPolicyName
+        : null,
+    scopedNetworkEgress,
+    nativeFileSyncUnsupported: false,
+    adapterType,
+    workspaceSurvivesStop: true,
+  };
+  return {
+    providerLeaseId: params.providerLeaseId,
+    metadata: {
+      ...leaseMetadata,
+      coldResumed: resumed.coldStart,
+      resumedLease: true,
+    } as unknown as Record<string, unknown>,
+  };
 }
 
 const plugin = definePlugin({
@@ -381,6 +502,7 @@ const plugin = definePlugin({
           resources: config.defaultResources ?? {},
           runtimeClassName: config.runtimeClassName,
           imagePullSecrets: config.imagePullSecrets,
+          workspaceStorage: config.workspaceStorage,
         })
       : buildJobManifest({
           namespace,
@@ -421,11 +543,11 @@ const plugin = definePlugin({
 
     // defaultEnv (non-secret base, e.g. the inference base URL) is layered first;
     // the process-env secrets named by envKeys override it.
-    const adapterEnv = buildAdapterEnv(adapterDefaults);
-    adapterEnv.PAPERCLIP_NETWORK_EGRESS_POLICY = "kubernetes-default-deny";
-    adapterEnv.PAPERCLIP_NETWORK_EGRESS_GRANT_PATH = NETWORK_EGRESS_GRANT_PATH;
-    adapterEnv.PAPERCLIP_NETWORK_EGRESS_ALLOW_FQDNS = scopedNetworkEgress.allowFqdns.join(",");
-    adapterEnv.PAPERCLIP_NETWORK_EGRESS_ALLOW_CIDRS = scopedNetworkEgress.allowCidrs.join(",");
+    const adapterEnv = buildSandboxAdapterEnv({
+      adapterType: effectiveAdapterType,
+      config,
+      scopedNetworkEgress,
+    });
     const bootstrapToken = generateBootstrapToken();
 
     // Secret ownerRef: for job backend, the Job owns the Secret (cascade delete).
@@ -448,6 +570,9 @@ const plugin = definePlugin({
     const podName = await orchestrator.findPod(clients, namespace, jobName);
 
     const leaseMetadata: KubernetesLeaseMetadata = {
+      // Both the server execution target and native file sync read this lease
+      // field. Match the workspace volume provisioned by the pod builders.
+      remoteCwd: "/workspace",
       namespace,
       jobName,
       podName,
@@ -460,6 +585,8 @@ const plugin = definePlugin({
       // exposes one. Flag the job backend so the server keeps the base64 fallback
       // rather than routing its sync to a hook that would reject immediately.
       nativeFileSyncUnsupported: config.backend !== "sandbox-cr",
+      adapterType: effectiveAdapterType,
+      workspaceSurvivesStop: leaseWorkspaceSurvivesStop(config),
     };
 
     return {
@@ -493,6 +620,10 @@ const plugin = definePlugin({
     });
     const clients = makeKubeClients(kc);
 
+    if (readLeaseWorkspaceSurvivesStop(params.leaseMetadata)) {
+      return await resumeKeptWorkspaceLease({ params, config, clients, namespace, secretName });
+    }
+
     const check = await checkLeaseResumable(clients, {
       namespace,
       name: params.providerLeaseId,
@@ -523,6 +654,7 @@ const plugin = definePlugin({
     }
 
     const leaseMetadata: KubernetesLeaseMetadata = {
+      remoteCwd: "/workspace",
       namespace,
       jobName: params.providerLeaseId,
       podName: check.podName,
@@ -539,6 +671,13 @@ const plugin = definePlugin({
       // See acquireLease: only the sandbox-cr backend has a pod-exec channel for
       // native sync, so a resumed job lease must keep the base64 fallback.
       nativeFileSyncUnsupported: leaseBackend !== "sandbox-cr",
+      ...(typeof params.leaseMetadata?.adapterType === "string"
+        ? { adapterType: params.leaseMetadata.adapterType }
+        : {}),
+      // The server rebuilds the lease row from this metadata. Say explicitly
+      // that a stop cannot keep this lease's files, so it is never routed to
+      // a stop the plugin would refuse.
+      workspaceSurvivesStop: false,
     };
 
     return {
@@ -651,6 +790,53 @@ const plugin = definePlugin({
       podName,
       secretName,
     });
+    if (readLeaseWorkspaceSurvivesStop(params.leaseMetadata)) {
+      // The kept workspace PVC goes with the Sandbox. Report the destroy only
+      // once the Sandbox is gone, which proves the PVC is gone too.
+      await waitForSandboxGone(clients, {
+        namespace,
+        name: params.providerLeaseId,
+        timeoutMs: SANDBOX_GONE_TIMEOUT_MS,
+      });
+    }
+  },
+
+  async onEnvironmentStopLease(
+    params: PluginEnvironmentReleaseLeaseParams,
+  ): Promise<PluginEnvironmentTerminationReceipt> {
+    if (!params.providerLeaseId) {
+      throw new Error("Cannot stop a lease without a provider lease id.");
+    }
+    if (!readLeaseWorkspaceSurvivesStop(params.leaseMetadata)) {
+      throw new Error(
+        `Lease ${params.providerLeaseId} cannot retain its files across a stop: /workspace is not a kept volume.`,
+      );
+    }
+    const epoch = readLeaseSandboxEpoch(params.leaseMetadata);
+    if (epoch === null) {
+      throw new Error(`Lease ${params.providerLeaseId} carries no sandbox epoch; refusing an unfenced stop.`);
+    }
+    const config = kubernetesProviderConfigSchema.parse(params.config);
+    const namespace =
+      typeof params.leaseMetadata?.namespace === "string"
+        ? params.leaseMetadata.namespace
+        : deriveTenantNamespace(config, params.companyId);
+    const clients = makeKubeClients(createKubeConfig({
+      inCluster: config.inCluster,
+      kubeconfig: config.kubeconfig,
+    }));
+
+    const state = await stopSuspendableSandbox(clients, {
+      namespace,
+      name: params.providerLeaseId,
+      epoch,
+      timeoutMs: SUSPEND_CONFIRM_TIMEOUT_MS,
+    });
+    // Drop per-lease state only once this stop owns the outcome: a stop the
+    // fence refused must not wipe the state of the run that resumed the lease.
+    uploadInterceptorsByLease.delete(params.providerLeaseId);
+    readySandboxesByLease.delete(params.providerLeaseId);
+    return { providerLeaseId: params.providerLeaseId, state };
   },
 
   async onEnvironmentExecute(

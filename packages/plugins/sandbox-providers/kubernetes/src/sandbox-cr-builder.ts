@@ -30,6 +30,10 @@ export interface BuildSandboxCrManifestInput {
   };
   runtimeClassName?: string;
   imagePullSecrets?: string[];
+  workspaceStorage?: {
+    storageClassName: string;
+    size: string;
+  };
 }
 
 export function buildSandboxCrManifest(
@@ -50,6 +54,20 @@ export function buildSandboxCrManifest(
       // explicit delete.
     },
     spec: {
+      ...(input.workspaceStorage
+        ? {
+            volumeClaimTemplates: [
+              {
+                metadata: { name: "workspace", labels: { ...input.labels } },
+                spec: {
+                  accessModes: ["ReadWriteOnce"],
+                  storageClassName: input.workspaceStorage.storageClassName,
+                  resources: { requests: { storage: input.workspaceStorage.size } },
+                },
+              },
+            ],
+          }
+        : {}),
       podTemplate: {
         metadata: {
           labels: podLabels,

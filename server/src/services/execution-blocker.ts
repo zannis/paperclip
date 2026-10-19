@@ -11,6 +11,7 @@ import { EXECUTION_RECONCILIATION_CAUSES, type ExecutionBlocker } from "@papercl
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA, nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
 import { unreconciledNativeExportPredicate } from "./native-runtime/native-workspace-reconstruction.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
+import { RETAINED_LEASE_IDLE_FAILURE_REASON, stopBlocksIssueClaimSql } from "./kept-workspace-leases.js";
 import { readNativeWorkspaceSyncReference } from "./native-runtime/native-workspace-sync.js";
 import { hasVerifiedWorkspaceRepair, workspaceRecoveryDisplay } from "./workspace-recovery-receipt.js";
 
@@ -19,11 +20,16 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
     ${heartbeatRuns.runnerProfileJson}->>'nativeWorkspaceFinalizationOwner' IS NOT NULL
     OR EXISTS (SELECT 1 FROM ${environmentLeases}
       WHERE ${environmentLeases.companyId} = ${companyId} AND ${environmentLeases.heartbeatRunId} = ${runId}
+        -- An idle teardown comes after the run ended cleanly and its lease was
+        -- retained; retrying a failed destroy must not hold up the issue.
+        AND ${environmentLeases.failureReason} IS DISTINCT FROM ${RETAINED_LEASE_IDLE_FAILURE_REASON}
         AND (( ${environmentLeases.releasedAt} IS NULL AND NOT COALESCE(
             ${environmentLeases.status} = 'retained' AND ${environmentLeases.leasePolicy} = 'reuse_by_environment'
               AND ${environmentLeases.cleanupStatus} = 'success', false))
           OR ${environmentLeases.status} IN ('active', 'pending_cleanup') OR ${environmentLeases.cleanupStatus} = 'failed'
           OR COALESCE(${environmentLeases.metadata}->>'pendingCleanupInFlight', 'false') <> 'false'
+          -- An unconfirmed kept-workspace stop: its agent may still be running.
+          OR ${stopBlocksIssueClaimSql()}
           OR (${heartbeatRuns.runtimeMode} = 'native' AND NOT COALESCE(
             (${environmentLeases.status} IN ('released', 'expired', 'failed')
               AND ${environmentLeases.releasedAt} IS NOT NULL AND (${environmentLeases.cleanupStatus} = 'success'

@@ -1,5 +1,6 @@
 import type { WorkspaceWorkers } from "../plugin-workspaces.js";
 import { createHeartbeatAgentStatus } from "./agent-status.js";
+import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
 import { preserveCancelledNativeWorkspaces } from "../native-runtime/native-failed-workspace-recovery.js";
 import { nativeWorkspaceExportPendingForLease, pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
@@ -21,6 +22,7 @@ import { legacyExecutionNeedsReconciliationWithEvidence, terminalizeLegacyExecut
 import { reconcileRetainedWorkspaces } from "../workspace-recovery.js";
 import { randomUUID } from "node:crypto";
 import {
+  isNotNull,
   and,
   asc,
   eq,
@@ -35,6 +37,7 @@ import {
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  executionWorkspaces,
   environmentLeases,
   heartbeatRuns,
   issues,
@@ -87,6 +90,14 @@ import type { agentInstructionWorkingCopyService } from "../agent-instruction-wo
 import type { createHeartbeatRunState } from "./run-state.js";
 import type { HeartbeatRetryDependencies, createHeartbeatRetries } from "./retries.js";
 import type { CancelRunOptions } from "./run-control.js";
+import {
+  keepsWorkspaceSql,
+  leaseHasLiveRunSql,
+  leaseKeepsWorkspace,
+  RETAINED_LEASE_IDLE_FAILURE_REASON,
+  unconfirmedStopMetadataSql,
+} from "../kept-workspace-leases.js";
+import { readExecutionWorkspaceLifecycleGeneration, type executionWorkspaceService } from "../execution-workspaces.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type HeartbeatRetries = ReturnType<typeof createHeartbeatRetries>;
@@ -101,6 +112,7 @@ export interface HeartbeatRecoveryDependencies extends Pick<HeartbeatRetryDepend
   >;
   environmentRuntime: ReturnType<typeof environmentRuntimeService>;
   pluginWorkerManager?: WorkspaceWorkers;
+  executionWorkspacesSvc: ReturnType<typeof executionWorkspaceService>;
   environmentsSvc: Pick<ReturnType<typeof environmentService>, "getById" | "getLeaseById" | "releaseLease">;
   instructionCopies: Pick<ReturnType<typeof agentInstructionWorkingCopyService>, "recoverStopped" | "recoverCaptured">;
   runtimeEnv: Record<string, string | undefined>;
@@ -363,6 +375,7 @@ function readNonEmptyString(value: unknown): string | null {
 /** Restart recovery shares the service lifecycle callbacks and execution ownership. */
 export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryDependencies) {
   const {
+    executionWorkspacesSvc,
     enterShutdown,
     scheduleBoundedRetryForRun,
     appendRunEvent,
@@ -1514,6 +1527,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
               inArray(environmentLeases.status, [
                 "active",
                 "retained",
+                "stopped",
                 "pending_cleanup",
               ]),
             ),
@@ -1526,6 +1540,28 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
           await deferOrphanedActiveLease(lease.id);
           continue;
         }
+      }
+
+      // A reusable lease whose workspace survives a stop is not destroyed:
+      // the crashed run's issue may still be open and its files are the
+      // agent's work. Stop it instead; the kept-workspace sweep issues the
+      // stop and destroys it if the issue has closed. Without its environment
+      // no run can resume it and no kept-workspace path reaches it, so it is
+      // torn down from its recorded metadata like any other orphan.
+      if (lease.leasePolicy === "reuse_by_environment" && lease.environmentId && leaseKeepsWorkspace(lease)) {
+        const stopped = await db
+          .update(environmentLeases)
+          .set({
+            status: "stopped",
+            cleanupStatus: "pending",
+            failureReason: "orphaned_active_lease_recovered",
+            releasedAt: new Date(),
+            metadata: unconfirmedStopMetadataSql({ blocksIssueClaim: true }),
+          })
+          .where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.status, "active")))
+          .returning({ id: environmentLeases.id });
+        if (stopped.length > 0) recovered += 1;
+        continue;
       }
 
       // Keep the row's existing updatedAt value. The select above already
@@ -1648,6 +1684,13 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       // the environment is lifecycle context and only a legacy fallback.
       const isOrphanEphemeralLease = lease.leasePolicy === "ephemeral";
       const useRecordedTeardown = isOrphanEphemeralLease || !environment || hasStopOnlyCleanup(lease);
+      // An idle reclaim or an issue-close teardown keeps its reason through
+      // retries, so the row says why the sandbox went away and an idle one
+      // keeps its issue-claim exemption.
+      const retryFailureReason = lease.failureReason === RETAINED_LEASE_IDLE_FAILURE_REASON ||
+          lease.failureReason?.startsWith("issue_terminal_")
+        ? lease.failureReason
+        : "pending_cleanup_retry";
 
       // Do not consume a finite cleanup attempt while the provider plugin is
       // briefly unavailable. A plugin worker restart, a plugin reload, or a
@@ -1729,7 +1772,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
           const result = await environmentRuntime.destroyRunLease({
             environment,
             lease,
-            failureReason: "pending_cleanup_retry",
+            failureReason: retryFailureReason,
           });
           if (result && result.status !== "pending_cleanup") {
             destroyed += 1;
@@ -1745,7 +1788,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
           await environmentsSvc.releaseLease(lease.id, "pending_cleanup", {
             expectedPendingCleanupAttemptId: claimed,
             cleanupStatus: "failed",
-            failureReason: "pending_cleanup_retry",
+            failureReason: retryFailureReason,
           });
         }
         // Log a constant errorKind only. The exception can carry a credential in
@@ -1790,13 +1833,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       }).where(and(eq(environmentLeases.id, lease.id),
         sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${claimed}`));
       if (lease.heartbeatRunId) {
-        // Delivery failure must not revert successful provider cleanup. A new
-        // message can still use the persisted receipt on its next admission.
-        await (async () => {
-          await acknowledgeRemoteStop(lease.heartbeatRunId!, lease.companyId);
-          const run = await getRun(lease.heartbeatRunId!);
-          if (run) await resumeRemoteStopComments(run);
-        })().catch(() => logger.warn({ leaseId: lease.id }, "could not reconsider messages after cleanup retry"));
+        await settleRemoteStop(lease.heartbeatRunId, lease.companyId);
       }
     }
 
@@ -2545,6 +2582,119 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     return { reaped: reaped.length, runIds: reaped };
   }
 
+  // Reclaim retained warm sandboxes idle past their environment's
+  // `runnerIdleTimeoutMs`.
+  async function sweepIdleRetainedLeases() {
+    return environmentRuntime.reclaimIdleRetainedLeases();
+  }
+
+  // Destroy kept workspaces of closed issues, then issue the provider stop
+  // for every stopped lease whose stop is not confirmed yet.
+  async function sweepKeptWorkspaceLeases() {
+    // Each phase runs even when an earlier one fails, so a broken destroy can
+    // never hold back the stops that free quota and unblock issue claims.
+    const terminal = await environmentRuntime.reconcileTerminalKeptLeases().catch((err) => {
+      logger.error({ err }, "closed-issue kept-workspace sweep failed");
+      return { destroyed: 0 };
+    });
+    const closedWorkspaces = await destroyKeptLeasesOfClosedWorkspaces().catch((err) => {
+      logger.error({ err }, "closed-workspace kept-workspace sweep failed");
+      return 0;
+    });
+    // Settle stops confirmed since the last tick (a release's inline stop, or
+    // a settle due for retry) before the stop page, which can take minutes.
+    await settleConfirmedRemoteStops();
+    const stopped = await environmentRuntime.reconcileStoppedLeases().catch((err) => {
+      logger.error({ err }, "kept-workspace stop sweep failed");
+      return { confirmed: 0, destroyed: 0, failed: 0 };
+    });
+    await settleConfirmedRemoteStops();
+    return { ...stopped, terminalDestroyed: terminal.destroyed + closedWorkspaces };
+  }
+
+  // A confirmed stop ends its run's remote execution: acknowledge a pending
+  // Stop and start messages that waited for it, as the cleanup sweep does.
+  // Each lease's mark is claimed first, so overlapping sweeps never settle a
+  // run twice, and it is removed only once the settle succeeded; a failed
+  // settle, or a restart, leaves it for a later tick.
+  async function settleConfirmedRemoteStops() {
+    const claimed = await environmentRuntime.claimRemoteStopSettles().catch((err) => {
+      logger.error({ err }, "could not claim kept-workspace stops to settle");
+      return [];
+    });
+    for (const { leaseId, companyId, runId, token } of claimed) {
+      const settled = await settleRemoteStop(runId, companyId);
+      await environmentRuntime.finishRemoteStopSettle(leaseId, token, settled).catch((err) => {
+        logger.warn({ err, leaseId }, "could not record a kept-workspace stop settlement");
+      });
+    }
+  }
+
+  // A closed execution workspace destroys its reusable sandboxes in its close
+  // route, but skips any whose run was still live then. Destroy what is left
+  // under the same lifecycle fence, so a reopen that raced this sweep keeps
+  // its sandbox.
+  async function destroyKeptLeasesOfClosedWorkspaces(): Promise<number> {
+    const rows = await db
+      .selectDistinct({
+        companyId: environmentLeases.companyId,
+        executionWorkspaceId: executionWorkspaces.id,
+        metadata: executionWorkspaces.metadata,
+      })
+      .from(environmentLeases)
+      .innerJoin(executionWorkspaces, eq(executionWorkspaces.id, environmentLeases.executionWorkspaceId))
+      .where(and(
+        eq(environmentLeases.leasePolicy, "reuse_by_environment"),
+        inArray(environmentLeases.status, ["retained", "stopped"]),
+        keepsWorkspaceSql(),
+        inArray(executionWorkspaces.status, ["archived", "cleanup_failed"]),
+        // Rows the destroy would skip must not fill the page every tick.
+        isNotNull(environmentLeases.environmentId),
+        sql`not ${leaseHasLiveRunSql()}`,
+      ))
+      .limit(100);
+    let destroyed = 0;
+    for (const row of rows) {
+      try {
+        const fenced = await executionWorkspacesSvc.fenceClosedWorkspaceDestruction({
+          workspaceId: row.executionWorkspaceId,
+          capturedGeneration: readExecutionWorkspaceLifecycleGeneration(row.metadata as Record<string, unknown> | null),
+          destroy: () => environmentRuntime.destroyReusableSandboxLeases({
+            companyId: row.companyId,
+            executionWorkspaceId: row.executionWorkspaceId,
+            failureReason: "execution_workspace_closed",
+          }),
+        });
+        if (!fenced.skippedReopened) {
+          destroyed += fenced.result.filter((record) => record.lease.status === "expired").length;
+        }
+      } catch (err) {
+        logger.warn({ err, executionWorkspaceId: row.executionWorkspaceId },
+          "kept-workspace destroy for a closed execution workspace failed");
+      }
+    }
+    return destroyed;
+  }
+
+  // A provider receipt just ended this run's remote execution: acknowledge a
+  // pending Stop and start the messages that waited for it. Delivery failure
+  // must not revert the cleanup; a new message can still use the persisted
+  // receipt on its next admission. Resolves false when the settle failed, or
+  // could not run yet because the run is still finishing here.
+  async function settleRemoteStop(runId: string, companyId: string): Promise<boolean> {
+    try {
+      await acknowledgeRemoteStop(runId, companyId);
+      const run = await getRun(runId);
+      if (run && (!isHeartbeatRunTerminalStatus(run.status) || adapterExecutionControls.has(run.id))) return false;
+      if (run) await resumeRemoteStopComments(run);
+      return true;
+    } catch (err) {
+      logger.warn({ err, runId }, "could not reconsider messages after a remote stop");
+      return false;
+    }
+  }
+
+
   return {
     sweepPendingCleanupLeases,
     markNativeOwnershipUnverified,
@@ -2553,6 +2703,8 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     recoverNativeRunsAfterRestart,
     reapOrphanedRuns,
     sweepOrphanedActiveLeases,
+    sweepIdleRetainedLeases,
+    sweepKeptWorkspaceLeases,
     drainRunningRunsForShutdown,
   };
 }

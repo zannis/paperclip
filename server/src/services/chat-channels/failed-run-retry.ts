@@ -1,6 +1,7 @@
 import { continuingTeamsFilePublication, type ContinuingTeamsFileTransfer } from "./microsoft-teams/file-transfer-source.js";
 import { readTaskChatRetryIntent, taskChatRetryExecutionStopped } from "./task-retry-authority.js";
 import { notifyChatActionWork, notifyChatPublicationWork } from "../chat-work-notifications.js";
+import { hasRemoteTerminationReceipt } from "../remote-execution-termination.js";
 import { FAILED_RUN_RETRY_STALE_MS, dueChatAction } from "../chat-action-work.js";
 
 import {
@@ -535,9 +536,13 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
     if (
       leases.some(
         (lease) =>
-          !["released", "expired", "failed"].includes(lease.status) ||
-          lease.cleanupStatus !== "success" ||
-          !lease.releasedAt,
+          // A kept workspace whose stop the provider confirmed holds its
+          // volume, so it never reads as cleaned up, but its run has ended.
+          !hasRemoteTerminationReceipt(lease) && (
+            !["released", "expired", "failed"].includes(lease.status) ||
+            lease.cleanupStatus !== "success" ||
+            !lease.releasedAt
+          ),
       )
     )
       throw failedChatRetryDenied();
