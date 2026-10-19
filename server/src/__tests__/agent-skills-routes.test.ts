@@ -255,7 +255,7 @@ function makeAgent(adapterType: string) {
   };
 }
 
-describe.sequential("agent skill routes", () => {
+describe("agent skill routes", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.doUnmock("../routes/agents.js");
@@ -1192,7 +1192,7 @@ describe.sequential("agent skill routes", () => {
     expect(returnedAgent.adapterConfig).not.toHaveProperty("promptTemplate");
   });
 
-  it("materializes the bundled default instruction set for non-CEO agents with no prompt template", async () => {
+  it("materializes minimal default instructions for non-CEO agents with no prompt template", async () => {
     const res = await requestApp(await createApp(), (baseUrl) => request(baseUrl)
       .post("/api/companies/company-1/agents")
       .send({
@@ -1212,37 +1212,9 @@ describe.sequential("agent skill routes", () => {
           adapterType: "claude_local",
         }),
         expect.objectContaining({
-          "AGENTS.md": expect.stringMatching(/Start actionable work in the same heartbeat\.[\s\S]*Keep the work moving until it is done\./),
+          "AGENTS.md": "You are an agent in a Paperclip company.\n",
         }),
         { entryFile: "AGENTS.md", replaceExisting: false },
-      );
-      expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          "AGENTS.md": expect.stringContaining('kind: "request_confirmation"'),
-        }),
-        expect.any(Object),
-      );
-      expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          "AGENTS.md": expect.stringContaining("confirmation:{issueId}:plan:{revisionId}"),
-        }),
-        expect.any(Object),
-      );
-      expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          "AGENTS.md": expect.stringMatching(/PUT \/issues\/\{id\}\/documents\/plan[\s\S]*Re-`GET \/documents\/plan`, assert it returns `200`[\s\S]*latestRevisionId[\s\S]*target=\{ type: 'issue_document', key: 'plan', revisionId: latestRevisionId \}[\s\S]*Never present a plan only in a thread comment or through `ask_user_questions`/),
-        }),
-        expect.any(Object),
-      );
-      expect(mockAgentInstructionsService.materializeManagedBundle).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({
-          "AGENTS.md": expect.stringContaining("skills/paperclip/scripts/paperclip-upload-artifact.sh"),
-        }),
-        expect.any(Object),
       );
     });
   });

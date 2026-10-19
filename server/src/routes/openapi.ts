@@ -7,6 +7,7 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   createAiConnectionSchema,
+  aiConnectionPoolConfigSchema,
   aiConnectionLoginIntentSchema,
   localAiConnectionSchema,
   localAiLoginStartSchema,
@@ -266,6 +267,7 @@ import {
   revokeToolTrustRuleSchema,
   unbindToolProfileBindingSchema,
   importMcpJsonSchema,
+  mcpConsentSchema,
   toolPolicyTestRequestSchema,
   createToolMcpGatewaySchema,
   completeConnectionIntentSchema,
@@ -304,6 +306,8 @@ import {
   replaceChatEndpointResourcesSchema,
   updateChatEndpointSchema,
 } from "@paperclipai/shared";
+import { aggregatorAppsSyncSchema, aggregatorAppsRefreshSchema, arcadeDiscoverySetupSchema } from "@paperclipai/shared/aggregator-apps";
+import { composioAppsSyncSchema, composioAppsRefreshSchema, composioAppSetupSchema, composioAppAccountSchema } from "@paperclipai/shared/composio-app-setup";
 import {
   COMPANY_IMPORT_TRANSFERS_API_PATH,
   companyImportTransferDeclarationSchema,
@@ -1352,6 +1356,10 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/companies/{companyId}/ai-connections/{connectionId}/active-runs",
   "GET /api/companies/{companyId}/ai-connections/{connectionId}/usage",
   "GET /api/companies/{companyId}/ai-connections/login/{sessionId}",
+  "GET /api/companies/{companyId}/ai-connection-pools",
+  "POST /api/companies/{companyId}/ai-connection-pools",
+  "DELETE /api/companies/{companyId}/ai-connection-pools/{poolId}",
+  "GET /api/companies/{companyId}/ai-connection-pools/{poolId}/inspection",
 
   "GET /api/companies/{companyId}/project-repositories",
   "PUT /api/projects/{id}/repositories",
@@ -1523,6 +1531,15 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/tool-connections/{connectionId}/railway/ssh",
   "POST /api/tool-connections/{connectionId}/catalog/refresh",
   "GET /api/tool-connections/{connectionId}/catalog",
+  "GET /api/tool-connections/{connectionId}/aggregator/apps",
+  "POST /api/tool-connections/{connectionId}/aggregator/apps/sync",
+  "POST /api/tool-connections/{connectionId}/aggregator/apps/refresh",
+  "PUT /api/tool-connections/{connectionId}/aggregator/discovery",
+  "GET /api/tool-connections/{connectionId}/composio/apps",
+  "POST /api/tool-connections/{connectionId}/composio/apps/sync",
+  "POST /api/tool-connections/{connectionId}/composio/apps/refresh",
+  "POST /api/tool-connections/{connectionId}/composio/apps/{toolkit}/setup",
+  "POST /api/tool-connections/{connectionId}/composio/apps/{toolkit}/accounts",
   "GET /api/tool-connections/{connectionId}/activity",
   "GET /api/tool-connections/{connectionId}/test-agents",
   "GET /api/tool-connections/{connectionId}/test-agents/{agentId}/access",
@@ -1812,6 +1829,8 @@ function resolveOperationAuthLevel(
   path: string,
 ): OpenApiAuthLevel {
   const key = operationKey(method, path);
+  if (key === "GET /api/mcp/requests/{id}" || key === "GET /api/mcp/device") return "public";
+  if (path === "/api/mcp/setup" || path === "/api/mcp/device/consent" || path.startsWith("/api/mcp/requests/") || path.startsWith("/api/mcp/connections")) return "board";
   if (PUBLIC_OPERATIONS.has(key)) return "public";
   if (key === "POST /api/mcp/project-tools" || key === "POST /api/companies/{companyId}/slack/tasks/{issueId}/tools") return "agent_run";
   if (RUNTIME_TOOLS_OPERATIONS.has(key)) return "runtime_tools";
@@ -7913,12 +7932,12 @@ registry.registerPath({
   method: "patch",
   path: "/api/companies/{companyId}/skills/{skillId}/files",
   tags: ["skills"],
-  summary: "Update a skill file",
+  summary: "Update a skill file (optional expectedVersionId and idempotencyKey guard agent retries)",
   request: {
     params: z.object({ companyId: z.string(), skillId: z.string() }),
     body: jsonBody(companySkillFileUpdateSchema),
   },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 409: r.conflict },
 });
 
 registry.registerPath({
@@ -10609,6 +10628,40 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "get",
+  path: "/api/companies/{companyId}/ai-connection-pools",
+  tags: ["ai-connections"],
+  summary: "List company AI connection pools for connection managers",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/ai-connection-pools",
+  tags: ["ai-connections"],
+  summary: "Create or revise an experimental plugin-owned connection pool",
+  body: z.object({ pluginKey: z.string().min(1), id: z.string().uuid().optional(), expectedRevision: z.number().int().positive().optional(), config: aiConnectionPoolConfigSchema }).strict(),
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registerCurrentRoute({
+  method: "delete",
+  path: "/api/companies/{companyId}/ai-connection-pools/{poolId}",
+  tags: ["ai-connections"],
+  summary: "Delete a connection pool while retaining task and run records",
+  body: z.object({ expectedRevision: z.number().int().positive() }).strict(),
+  responses: { 200: r.ok(z.object({ ok: z.literal(true) })), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/ai-connection-pools/{poolId}/inspection",
+  tags: ["ai-connections"],
+  summary: "Inspect authorized pool members and fresh cached usage without probing",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
   path: "/api/companies/{companyId}/ai-connections/{connectionId}/usage",
   tags: ["ai-connections"],
   summary: "Probe the selected AI account’s provider usage limits on demand",
@@ -11006,6 +11059,38 @@ registerCurrentRoute({
   path: "/api/tool-connections/{connectionId}/activity",
   tags: ["tool-access"],
   summary: "List tool connection activity",
+});
+
+for (const provider of ["aggregator", "composio"] as const) {
+  registerCurrentRoute({
+    method: "get", path: `/api/tool-connections/{connectionId}/${provider}/apps`, tags: ["tool-access"],
+    summary: "List upstream account observations for the current connection manager",
+  });
+  registerCurrentRoute({
+    method: "post", path: `/api/tool-connections/{connectionId}/${provider}/apps/sync`, tags: ["tool-access"],
+    summary: "Start upstream account discovery without changing tool access",
+    body: provider === "aggregator" ? aggregatorAppsSyncSchema : composioAppsSyncSchema,
+  });
+  registerCurrentRoute({
+    method: "post", path: `/api/tool-connections/{connectionId}/${provider}/apps/refresh`, tags: ["tool-access"],
+    summary: "Refresh upstream account observations",
+    body: provider === "aggregator" ? aggregatorAppsRefreshSchema : composioAppsRefreshSchema,
+  });
+}
+registerCurrentRoute({
+  method: "put", path: "/api/tool-connections/{connectionId}/aggregator/discovery", tags: ["tool-access"],
+  summary: "Save manager-owned optional Arcade account discovery credentials",
+  body: arcadeDiscoverySetupSchema,
+});
+registerCurrentRoute({
+  method: "post", path: "/api/tool-connections/{connectionId}/composio/apps/{toolkit}/setup", tags: ["tool-access"],
+  summary: "Start or verify Composio app authorization through a saved gateway",
+  body: composioAppSetupSchema,
+});
+registerCurrentRoute({
+  method: "post", path: "/api/tool-connections/{connectionId}/composio/apps/{toolkit}/accounts", tags: ["tool-access"],
+  summary: "Manage a Composio account through a saved gateway",
+  body: composioAppAccountSchema,
 });
 
 registerCurrentRoute({
@@ -11563,6 +11648,49 @@ registerCurrentRoute({
     403: r.forbidden,
     404: r.notFound,
   },
+});
+
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/setup", tags: ["tool-gateway"],
+  summary: "Read assistant connection setup using a human browser session",
+  // Available while disabled; returns metadata only and never grants access.
+  responses: {
+    200: r.ok(z.object({ enabled: z.boolean(), serverUrl: z.string().url(), invitationUrl: z.string().url(), invitation: z.string() })),
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+  },
+});
+
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/requests/{id}", tags: ["tool-gateway"],
+  summary: "Describe an assistant connection request and available sign-in options",
+  responses: { 200: r.ok(), 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/mcp/requests/{id}/consent", tags: ["tool-gateway"],
+  summary: "Approve or deny assistant access using a same-origin browser session",
+  body: mcpConsentSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/device", tags: ["tool-gateway"],
+  summary: "Describe a device approval request without revealing unauthenticated organization data",
+  responses: { 200: r.ok(), 400: r.badRequest, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/mcp/device/consent", tags: ["tool-gateway"],
+  summary: "Approve or deny a device request using a same-origin human browser session",
+  body: mcpConsentSchema.extend({ userCode: z.string().min(8).max(12) }),
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/mcp/connections", tags: ["tool-gateway"],
+  summary: "List the signed-in person's assistant connections",
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+registerCurrentRoute({
+  method: "delete", path: "/api/mcp/connections/{id}", tags: ["tool-gateway"],
+  summary: "Revoke an assistant connection using a same-origin browser session",
+  responses: { 204: { description: "Connection revoked" }, 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registerCurrentRoute({

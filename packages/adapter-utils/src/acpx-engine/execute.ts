@@ -7,6 +7,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
+import { parseFrontmatterMarkdown } from "@paperclipai/shared";
 import { fileURLToPath } from "node:url";
 import type {
   AdapterBillingType,
@@ -49,6 +50,7 @@ import {
 } from "./terminal-session-failure.js";
 export type { AcpxTerminalSessionFailure } from "./terminal-session-failure.js";
 import type { WorkspaceRestoreFailureCode, WorkspaceRestoreOutcome } from "../workspace-restore-merge.js";
+import type { WorkspaceRestoreDiagnostic } from "../workspace-restore-diagnostics.js";
 import {
   classifyWorkspaceRestoreFailure,
   describeWorkspaceRestoreFailure,
@@ -85,6 +87,7 @@ import {
   type PaperclipSkillEntry,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { createEphemeralSessionEnvironmentStore } from "./ephemeral-session-environment.js";
 import {
   createAcpRuntime,
   createAgentRegistry,
@@ -100,7 +103,6 @@ import {
   type AcpRuntimeTurnResult,
   type AcpRuntimeUsageBreakdown,
   type AcpRuntimeUsageCost,
-  type AcpSessionStore,
 } from "acpx/runtime";
 import {
   ACPX_DUPLEX_LOSS_CANCEL_DEADLINE_MS,
@@ -1183,11 +1185,24 @@ async function prepareClaudeSkillRuntime(input: {
   }
 
   const selectedNames = materializedNames.sort();
+  const skillDescriptions = await Promise.all(selectedNames.map(async (name) => {
+    const file = path.join(skillsHome, name, "SKILL.md");
+    let description = "";
+    try {
+      const parsed = parseFrontmatterMarkdown(await fs.readFile(file, "utf8"));
+      description = asString(parsed.frontmatter.description, "").replace(/\s+/g, " ").trim().slice(0, 512);
+    } catch {
+      // A readable skill without valid routing metadata remains available.
+      // Do not substitute its body for a missing description.
+    }
+    return `- ${name}${description ? `: ${description}` : ""} (file: ${file})`;
+  }));
   const promptInstructions = selectedNames.length > 0
     ? [
         "Paperclip has materialized selected runtime skills for this ACPX Claude session.",
         `Skill root: ${skillsHome}`,
         `Selected skills: ${selectedNames.join(", ")}`,
+        ...skillDescriptions,
         "When a task calls for one of these skills, read its SKILL.md from that root and follow it.",
       ].join("\n")
     : "";
@@ -4079,7 +4094,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       // status stay exactly what the turn produced — this is a signal, not an
       // outcome change.
       let workspaceRestoreFailureField:
-        | { workspaceRestoreFailure: WorkspaceRestoreFailureCode }
+        | { workspaceRestoreFailure: WorkspaceRestoreFailureCode; workspaceRestoreDiagnostic?: WorkspaceRestoreDiagnostic }
         | Record<string, never> = {};
       // The one settlement step name whose error can be the same workspace-
       // restore failure the adapter teardown closure already classifies (a
@@ -4265,26 +4280,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         flushChildStderr(childStderrState);
         childStderrState.logPath = prepared.childStderrLogPath;
         const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
-        const runtimeStore: AcpSessionStore = {
-          async load(id) {
-            const record = await persistedRuntimeStore.load(id);
-            if (!record) return undefined;
-            // ACPX resumes from the stored session options rather than the
-            // options passed to ensureSession. Keep conversation state, but
-            // launch the provider with this run's credentials and scratch paths.
-            return {
-              ...record,
-              acpx: {
-                ...record.acpx,
-                session_options: {
-                  ...record.acpx?.session_options,
-                  env: { ...prepared.env },
-                },
-              },
-            };
-          },
-          save: (record) => persistedRuntimeStore.save(record),
-        };
+        // Resume with this run's launch environment; keep it out of the saved
+        // conversation record without mutating the live runtime's options.
+        const runtimeStore = createEphemeralSessionEnvironmentStore(persistedRuntimeStore, prepared.env);
         const runtimeOptions: PaperclipAcpRuntimeOptions = {
           cwd: prepared.cwd,
           // Host-only spawn cwd for the relay proxy on the remote process-session
@@ -5429,7 +5427,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             await withAdapterExecutionPhase(ctx, "workspace_restore", () => runRuntimeSpan("sandbox.syncBack", async () => {
               const restoreOutcome = await syncBackManagedHome(prepared);
               if (!restoreOutcome.ok) {
-                workspaceRestoreFailureField = { workspaceRestoreFailure: restoreOutcome.code };
+                workspaceRestoreFailureField = {
+                  workspaceRestoreFailure: restoreOutcome.code,
+                  ...(restoreOutcome.diagnostic ? { workspaceRestoreDiagnostic: restoreOutcome.diagnostic } : {}),
+                };
               }
             }));
           }

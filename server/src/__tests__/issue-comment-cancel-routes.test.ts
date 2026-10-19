@@ -191,7 +191,7 @@ function makeComment(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe.sequential("issue comment cancel routes", () => {
+describe("issue comment cancel routes", () => {
   const routeModules = hoistModuleGraph(registerModuleMocks, async () => {
     // Sequential on purpose: concurrent vi.importActual() calls can drop a
     // factory mock, because Vitest keeps one shared mock-resolution callstack.

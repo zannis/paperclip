@@ -153,7 +153,7 @@ impl AcpxProviderDescriptor {
                 "@agentclientprotocol/claude-agent-acp",
                 "0.81.2",
                 Some("@anthropic-ai/claude-agent-sdk"),
-                Some("0.3.283"),
+                Some("0.3.286"),
                 "sha256:ecfa6ff948a4241090934979179a5ba035bb0a7c3ef543752f4a304d44a267fb",
             ),
             "codex" => (
@@ -161,7 +161,7 @@ impl AcpxProviderDescriptor {
                 "@agentclientprotocol/codex-acp",
                 "1.6.2",
                 Some("@openai/codex"),
-                Some("0.156.0"),
+                Some("0.160.0"),
                 "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
             ),
             "pi" => (
@@ -2257,7 +2257,7 @@ mod tests {
                     "@agentclientprotocol/claude-agent-acp",
                     "0.81.2",
                     json!("@anthropic-ai/claude-agent-sdk"),
-                    json!("0.3.283"),
+                    json!("0.3.286"),
                     "sha256:ecfa6ff948a4241090934979179a5ba035bb0a7c3ef543752f4a304d44a267fb",
                 )
             } else {
@@ -2266,7 +2266,7 @@ mod tests {
                     "@agentclientprotocol/codex-acp",
                     "1.6.2",
                     json!("@openai/codex"),
-                    json!("0.156.0"),
+                    json!("0.160.0"),
                     "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
                 )
             };

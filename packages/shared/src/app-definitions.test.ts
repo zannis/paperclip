@@ -26,7 +26,8 @@ import {
   SELF_SERVE_MCP_CANDIDATES,
   SELF_SERVE_MCP_RESEARCH,
 } from "./self-serve-mcp-research.js";
-import { appDefinitionsSchema } from "./validators/app-definition.js";
+import { aiConnectionRouterAppDefinition } from "./ai-connection-router.js";
+import { appDefinitionSchema, appDefinitionsSchema } from "./validators/app-definition.js";
 
 const googleScope = (scope: string) =>
   `https://www.googleapis.com/auth/${scope}`;
@@ -1027,6 +1028,7 @@ describe("AppDefinition catalog", () => {
     ).sort();
     expect(required).toEqual([
       "clickhouse:mcp-oauth:serviceId",
+      "honcho:mcp-api-key:workspaceId",
       "shopify:storefront-mcp:storeDomain",
       "shopify:ucp-commerce:storeDomain",
       "supabase:mcp-api-key:projectRef",
@@ -1139,6 +1141,15 @@ describe("tool method permission review", () => {
     expect(APP_DEFINITIONS.find((app) => app.slug === "hugging-face")!.methods[0]!.defaults!.scopesHint)
       .toEqual(["read-mcp", "read-repos", "contribute-repos", "jobs"]);
   });
+});
+
+it("validates native pool catalog entries without inventing an authentication method", () => {
+  const entry = aiConnectionRouterAppDefinition("example.pool", { name: "AI connection pool", description: "Use saved connections" });
+  expect(appDefinitionSchema.parse(entry)).toEqual(entry);
+  expect(entry.methods).toEqual([]);
+  expect(appDefinitionSchema.safeParse({ ...entry, aiConnectionRouter: undefined }).success).toBe(false);
+  expect(appDefinitionSchema.safeParse({ ...entry, methods: APP_STORE_DEFINITIONS[0]!.methods }).success).toBe(false);
+  expect(appDefinitionSchema.safeParse({ ...entry, categories: ["developer"] }).success).toBe(false);
 });
 
 describe("typesafe", () => {

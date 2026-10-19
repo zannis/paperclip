@@ -26,9 +26,9 @@ test("the workspace's provider runtime pins reach the published package", () => 
   const overrides = npmOverridesFrom(root.pnpm.overrides);
   assert.equal(
     overrides["@agentclientprotocol/claude-agent-acp@0.81.2"]?.["@anthropic-ai/claude-agent-sdk"],
-    "0.3.283",
+    "0.3.286",
   );
-  assert.equal(overrides["@agentclientprotocol/codex-acp@1.6.2"]?.["@openai/codex"], "0.156.0");
+  assert.equal(overrides["@agentclientprotocol/codex-acp@1.6.2"]?.["@openai/codex"], "0.160.0");
 });
 
 test("an override on a direct dependency needs that dependency pinned to its exact version", () => {

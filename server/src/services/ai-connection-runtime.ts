@@ -195,7 +195,13 @@ export function managedAiSessionFingerprintConfig(
   for (const [key, value] of Object.entries(managedAiHomeEnvironment(managedHome))) {
     if (env[key] === value) env[key] = stable[key];
   }
-  return { ...config, env };
+  const managed = config.managedAiConnection as Record<string, unknown> | undefined;
+  if (managed?.sessionIdentity) {
+    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY", "GROK_API_KEY", "OPENCODE_AUTH_JSON", "OPENCODE_CONFIG_CONTENT"]) {
+      if (env[key]) env[key] = "<managed-ai-credential>";
+    }
+  }
+  return { ...config, env, ...(managed?.sessionIdentity ? { managedAiConnection: { ...managed, identity: managed.sessionIdentity } } : {}) };
 }
 
 export async function prepareManagedAiRuntime(
@@ -255,7 +261,14 @@ export async function prepareManagedAiRuntime(
       throw unprocessable(
         "The selected default changed. Retry this execution.",
       );
+    const credentialRef = selection.grant.credentialSecretRefs.find((ref) => ref.configPath === "ai.credential");
+    if (!credentialRef) throw unprocessable("The selected AI credential is unavailable");
+    const readFreshness = async () => (await db.select({ epoch: companySecrets.aiSessionEpoch, version: companySecrets.latestVersion })
+      .from(companySecrets).where(and(eq(companySecrets.companyId, input.companyId), eq(companySecrets.id, credentialRef.secretId))).limit(1))[0];
+    const freshness = await readFreshness();
     const value = await service.credential(selection);
+    const afterRead = await readFreshness();
+    if (!freshness || freshness.version !== afterRead?.version || freshness.epoch !== afterRead.epoch) throw unprocessable("The AI credential changed during preparation; retry this execution");
     // Anthropic joins the file topology only when the stored credential is a
     // Claude credential document the CLI can refresh. Connections saved before
     // this change hold a bare token, and a `claude setup-token` credential has
@@ -326,11 +339,13 @@ export async function prepareManagedAiRuntime(
       .digest("hex")
       .slice(0, 16);
     const identity = `${selection.grant.id}:${input.responsibleUserId ?? "shared"}:${generation}`;
+    const sessionIdentity = `${selection.grant.id}:${input.responsibleUserId ?? "shared"}:${credentialRef.secretId}:${freshness.epoch}`;
     return {
+      sessionIdentity,
       config: {
         ...input.config,
         env,
-        managedAiConnection: { ...selection.attribution, identity },
+        managedAiConnection: { ...selection.attribution, identity, sessionIdentity },
       },
       attribution: selection.attribution,
       accountName: selection.connection.name,
@@ -408,7 +423,7 @@ export async function prepareManagedAiRuntime(
                 if (decision !== 10) return;
                 await secretService(tx).rotate(
                   ref.secretId,
-                  { value: refreshed },
+                  { value: refreshed, preserveAiSessionEpoch: true },
                   { userId: grant.subjectUserId },
                 );
                 await tx

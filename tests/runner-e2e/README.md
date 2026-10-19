@@ -1,5 +1,9 @@
 # Paid runner full-stack E2E
 
+The [public MCP suite](PUBLIC-MCP.md) adds explicit paid assistant/plugin journeys
+with authenticated browser consent, real MCP tool use and independently graded
+team execution. Select `--suite public-mcp`; it is excluded from `--all`.
+
 For family selection, ownership, provenance, history, and failure taxonomy,
 see the [Paperclip evaluation guide](../../doc/evals.md). This README is the
 authoritative runbook for Product E2E runner cells; the separate Runner Evals
@@ -11,6 +15,31 @@ profiles. It is deliberately separate from `tests/e2e`: every independently
 scheduled execution gets
 a fresh Paperclip home, embedded Postgres database, instance configuration,
 port, workspace, company, encrypted secrets, environment, and agent.
+
+## Native procedure guidance comparison (explicit only)
+
+Select `--suite everyday-workflows --environment local --case hire-reuse --case delegate-feedback
+--profile runner-codex --profile runner-acpx-claude --profile runner-opencode` for the six comparison
+cells on native Codex, ACPX Claude, and OpenCode.
+Both variants use the same Studio Lead persona, original user requests,
+artifact oracle, lifecycle checks, models and permissions. Each cell permits
+one attempt, a 12-minute deadline, at most 12 story run records, and a
+1,000-cent company hard stop; the lead also has a 1,000-cent hard stop. Worker
+runs count toward the company budget. The suite is excluded from `--all`.
+
+Compare frozen branches on the same master with identical fixture sources.
+Retain each original grade, source SHA, harness digest, actual run inventory,
+downloaded artifacts and partial cost evidence. Check hiring identity/reuse,
+worker ownership, delivered revisions, dependency release and parent completion
+ordering independently of aggregate grades. These bounded stories do not
+qualify every existing-blocker combination or arbitrary provider resume.
+
+The provider-free `native-procedure-measurement.test.ts` uses the server's real
+tool authority and captures scripted start/resume/continuation delivery plus
+the OpenCode MCP catalog. It includes descriptions and argument schemas. Its
+byte counts are not model token counts or proof of an upstream harness's lazy
+loading/truncation. The older completion measurement used a partial catalog;
+do not use it as a full production tool-payload baseline.
 
 The vocabulary is: a **campaign** is one workflow invocation against one SHA; a
 **suite** is a durable testing purpose; a **matrix** is that suite's profiles ×
@@ -422,6 +451,12 @@ pnpm test:e2e:runner -- --list --suite agent-chat-hardening
 pnpm test:e2e:runner -- --id agent-chat-hardening.runner-codex.local.stop-startup-new-resume
 ```
 
+The independent, explicit-only `native-completion` suite qualifies native finish/block descriptions on unchanged master defaults. It preserves the original assigned-skill document journey and pairs it with whole-task blocking across three native profiles, with enforced single attempts. See [NATIVE-COMPLETION.md](NATIVE-COMPLETION.md) for admission, provenance and limits.
+
+The separate, explicit-only `native-instruction-consolidation` suite reuses those original tasks and strict graders to compare completion constraints on the production defaults at `2a8a99e4a5f69aa803b3f10b982f583e75a87042`. It declares six local cells: document completion and whole-task blocking on native Codex, ACPX Claude, and OpenCode. Each cell allows one attempt and applies a 1,000-cent company and agent budget hard stop. Its source gate rejects dirty, mixed, unknown, or unrelated source changes before credentials load. A provider-free fixture captures the complete Paperclip instruction/tool/message projection at the scripted runnerd RPC boundary on start, full-task resume and compact user-follow-up continuation for native input v4 and v5. That capture measures bytes; it does not measure vendor-owned prompts, tokens, billing, or model behavior. See the [comparison plan](../../doc/plans/2026-10-03-native-completion-consolidation.md) for exact scope and live qualification limits. Existing `native-completion` results do not qualify this new reduction.
+
+The corrected source variants add explicit blocker explanations and canonical document citations. Accepted feedback repeats links only for this run's current saved revisions, and Markdown navigation preserves document anchors after issue details load. Observation v3 independently requires the persisted provider final to explain missing release/deployment access and, for completion, link this task's one revisioned document on the same origin. A correct structured blocker, an unblock action alone, or an unbound/foreign document URL cannot pass. These stricter checks and browser navigation apply only to the manual instruction comparison; the existing `native-completion` suite keeps v2 checks. Task prompts and the durable-output oracle remain unchanged. Admission now requires eighteen shared runnerd RPC captures and six direct OpenCode HTTP captures using a local fake server, all provider-free. Replay of retained v2 evidence is a separate diagnostic, never a replacement for its original verdict. See the [answer correction](../../doc/plans/2026-10-04-native-completion-answer-fix.md).
+
 `context-integrity` is an explicit-only local suite with two bounded cases across
 ten listed legacy/native profiles (20 cells). Six cells are pending-prerequisite
 profiles and are listed for discovery but rejected before provider credentials are
@@ -441,6 +476,14 @@ billing or a budget incident is not admitted as a pass.
 pnpm test:e2e:runner -- --list --suite context-integrity
 pnpm test:e2e:runner -- --id context-integrity.runner-codex.local.ordered-comment-continuation
 ```
+
+`stock-harness` reuses ordered continuation, assigned-skill invocation, and chat
+restart journeys with production-default hires instead of the custom QA manual.
+Its 24 explicit local cells cover eight legacy/native profiles and are excluded
+from `--all`. Run `pnpm test:e2e:runner:stock-harness` for the credential-free
+instruction-layering, hire, and shared-prompt prerequisites. The
+[suite contract](STOCK-HARNESS.md) maps each change to its graders, budgets,
+evidence, and remaining qualification limits.
 
 Each hardening oracle has positive and plausible-negative calibration tests.
 The review grader parses the worker's saved JSON and compares both source values
@@ -757,6 +800,12 @@ The temporary Paperclip home, embedded database, raw workspace, master key,
 and unredacted logs are removed after each attempt. Daytona teardown destroys
 the environment and any reusable leases through the public API; provider-side
 auto-stop/archive/delete values remain as cancellation backstops.
+
+## Planning guidance utility
+
+The explicit-only [planning comparison](PLAN-TASK-GUIDANCE.md) tests current, short,
+and disabled planning skills across four saved business outcomes on native Codex.
+It adds twelve single-attempt cells and does not expand `--all`.
 
 ## GitHub Actions
 
@@ -1506,15 +1555,26 @@ explicit fixture user request. It is not an additional production requirement.
 A follow-up delegates a second fixture to the same coder with underscore
 separators while preserving the original. A final read-only chat turn requests
 recorded task status. Three CEO turns and two actual worker executions make
-**five expected turns per cell**, with a **15-minute deadline** and 1,000-cent
+**five required work turns per cell**, plus at most **two strictly attributed
+automatic task-completion turns** (seven total maximum), with a **15-minute
+deadline** and 1,000-cent
 company/CEO budget hard stops. Normal managed-account fixture cleanup and
 company-wide cancellation apply. Both cells opt into the existing native API
 tools. No model-authored code is executed by the grading host.
 
 The independent oracle checks every JSON input and computed value, authorship,
-two distinct completed tasks, project/reporting identity, exact five-run count,
+two distinct completed tasks, project/reporting identity, exactly three user-requested
+CEO turns and one coder execution per task,
 managed execution-account attribution, original document preservation, and
-worker reuse. It separately checks the production CEO bundle, assigned hiring
+worker reuse. Bounded completion turns must have the same company, managed
+account, responsible user, chat generation and known completed tasks; unique
+server delivery/update receipts; valid completion timing; and a run-attributed
+chat reply. One completion turn may batch both tasks. Unknown, duplicate,
+failed, retried or extra work runs, and notification-created tasks fail. Every
+actual run remains in usage/cost accounting. The hiring scorer and final chat
+count guard use the same rule. All other chat count guards stay unchanged.
+
+The versioned `paperclip.hiring-templates.v3` oracle separately checks the production CEO bundle, assigned hiring
 skill, source hashes, completed pre-hire read receipts, the saved source-derived
 coder example, and durable instruction/skill selections.
 
@@ -1522,7 +1582,8 @@ coder example, and durable instruction/skill selections.
 bytes on each evaluated revision. A historical four-file CEO bundle and long
 coder example are admissible; the candidate is not imposed on the baseline.
 Instruction bytes and word counts are measurements, without a size pass/fail
-threshold. The definition digest fingerprints the cases, flow and grader;
+threshold. The definition digest fingerprints the cases, flow, grader, shared
+turn-accounting helper and final chat guard;
 source evidence also fingerprints the loader, generic execution contract,
 selected CEO files and production hiring references. Use the same fixture
 revision, scenario nonce, profile/model, managed account method and local
@@ -1564,3 +1625,9 @@ The existing `first-task` suite uses the actual onboarding wizard and captures
 the changed chief-of-staff persona and skill selections; it needs no fixture
 change for that default selection. Hiring from that wizard-created chief of
 staff remains a separate follow-up qualification.
+
+### Hiring completion accounting evidence
+
+The v3 hiring grader uses turn-accounting v2 in both executable guards. It requires complete per-run public event streams, exact native tool-use/result pairing and canonical execution IDs for completion actions. Only successful known GET issue/document/comment operations, verified reads/discovery, and attributed native chat finish are admitted. Writes, failed mutation attempts, incomplete streams and unknown actions cannot pass. Separate ACPX host request IDs and provider execution IDs are not joined by name/order/count; missing mapping is uncomparable action coverage, not a measured task failure. The original source-read and exact template checks remain unchanged.
+
+The live fixture retries entire bracketed observations, waits for both known task callbacks and attributed replies (including batching), checks untruncated pending-wake diagnostics, and requires two equal settled observations. Silence before outbox enqueue is not delivery. Five-turn generic accounting remains calibrated for no owed notifications; this delegated fixture owes two completions. All actual runs remain counted for usage and cost. Retained original, limited sidecar-v1, initial executable, and stricter v3 assessments remain separately versioned; no models are rerun by the repair.

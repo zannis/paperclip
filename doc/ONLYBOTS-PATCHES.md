@@ -51,9 +51,9 @@ Local recovery references:
 | Lane task primitives | Conditional issue PATCH (`expected` preconditions on revision, status, assignee and description hash; atomic status and comment; no self-wake on a conditional park) and a durable idempotency key registry (retain, void, delete tombstones) with board lookup and void routes. Migrations 0295–0296 (renumbered from 0284–0285). For flow's lane-task reuse. Fork-only, not proposed upstream |
 | Grouped lane children | Create-only, board-only `groupedChild` issue flag (migration 0297, renumbered from 0286). A grouped child's completion never wakes its parent (`issue_children_completed`, including native completions), it never relays a stop comment, it is not counted as the parent's open child (including by recovery), and parent subtree holds (cancel, pause, restore) skip it and its descendants. For flow's lane tasks. Fork-only, not proposed upstream |
 | Fork image publishing | `docker.yml` also triggers on pushes to `patches/onlybots`; only `zannis/paperclip` builds that ref, publishing the multi-arch (amd64, arm64) production image as `ghcr.io/zannis/paperclip:sha-<short>` with upstream's OCI and schema labels. The full-SHA tag and standard-image attestation stay upstream-master-only; upstream has retired the cloud image build. Fork-only, not proposed upstream |
-| Anthropic SDK refresh | The claude-agent-acp `@anthropic-ai/claude-agent-sdk` override 0.3.280 → 0.3.283 (Claude Code 2.1.283), with the runner integrity pins, executable digests and Daytona image check moved together. The `@anthropic-ai/sdk` half retired once upstream moved claude-local to 0.129.0. Retire the rest when upstream bumps past 0.3.283 |
+| Anthropic SDK refresh | Retired October 16, 2026: upstream `v2026.1012.0` overrides `claude-agent-sdk` to 0.3.286, past the patch's 0.3.283 |
 | Lockfile in queue PRs | `pr-trusted.yml`'s "Block manual lockfile edits" skips PRs into `patches/onlybots`: upstream's lockfile refresh runs on `master` only, so a queue PR that changes dependencies carries its own `pnpm-lock.yaml` instead of a direct sync commit after merge. `pr.yml` calls the fork's own `pr-trusted.yml`, not upstream's `master` copy, so this and every other queue change to the checks takes effect. |
-| Claude ACP pin and npm overrides | `@agentclientprotocol/claude-agent-acp` 0.73.0 → 0.81.2 (its patch ported), keeping the `claude-agent-sdk` override at 0.3.283, with the runner's qualified command digest and dependency bindings. The published CLI package now carries every nested pnpm override as an npm `overrides` entry: the managed install is an npm install, so without them it resolved claude-agent-acp's own SDK declaration (0.3.257 under 0.73.0) and codex-acp's own Codex range. npm refuses an override keyed on a direct dependency unless it is pinned to the override's exact version, so codex-local pins codex-acp `1.6.2` and the generator refuses a mismatch. The git installer writes those overrides into the staged payload's own `package.json` before `npm install`, since npm honours overrides only from the root project. |
+| Claude ACP pin and npm overrides | `@agentclientprotocol/claude-agent-acp` 0.73.0 → 0.81.2 (its patch ported), keeping upstream's `claude-agent-sdk` override (0.3.286 since October 16, 2026), with the runner's qualified command digest and dependency bindings. The published CLI package now carries every nested pnpm override as an npm `overrides` entry: the managed install is an npm install, so without them it resolved claude-agent-acp's own SDK declaration (0.3.257 under 0.73.0) and codex-acp's own Codex range. npm refuses an override keyed on a direct dependency unless it is pinned to the override's exact version, so codex-local pins codex-acp `1.6.2` and the generator refuses a mismatch. The git installer writes those overrides into the staged payload's own `package.json` before `npm install`, since npm honours overrides only from the root project. |
 | Commit trailers left to repository conventions | The bundled `paperclip` skill no longer tells agents they MUST add `Co-Authored-By: Paperclip`; it defers to the repository's and operator's commit conventions. Deployments that forbid generated-by trailers refused every agent commit that obeyed it. The bullet is rewritten in place, not removed, so the capability inventory's line-numbered heading ids stay valid. The frozen `skills-releases/paperclip/*` snapshots are left as they are: they are seeded per company and checked against that snapshot at startup. Fork-only |
 
 ## Completed fixes and exclusions
@@ -205,6 +205,41 @@ local to the build machine: its global git config signs commits without a
 reachable gpg, and its global ignore file ignores `.worktrees/`. With both
 neutralised, those files pass except two that compare `/private/var` with
 `/var` (macOS). The serialized server suite was not run.
+
+## Upstream update (October 16, 2026)
+
+The queue moved from upstream `ffe5e9e2a` to the release tag `v2026.1012.0`
+(`bba6a45f0`, 56 upstream commits; two of them, the release notes and a CI
+lane change, are on the release branch only). The old queue tip `526f46680` is
+anchored at `refs/onlybots-backups/sync/onlybots-20261016`. 74 of 75 patches
+remain; one was dropped. These resolutions need review:
+
+- **Migration renumbering.** Upstream added 0295–0305. The lane task primitives
+  and grouped children migrations moved from 0295–0297 to 0306–0308 with
+  byte-identical SQL, so a database that ran the old numbers treats them as
+  applied by content hash. Each snapshot is upstream's latest snapshot plus the
+  original patch's snapshot delta; journal `when` values continue upstream's.
+  Upstream's new migrations touch none of these columns or tables.
+- **Anthropic SDK refresh** is retired: upstream overrides `claude-agent-sdk` to
+  0.3.286. Its code changes resolve to upstream's; its lockfile sync commit is
+  dropped.
+- **Claude ACP pin.** claude-agent-acp stays 0.81.2 with its command digest
+  and 0.3.280 declaration; the SDK override takes upstream's 0.3.286 and the
+  Codex override upstream's 0.160.0. The lockfile was regenerated for both ACP
+  pins.
+- **Claude subscription refresh.** Upstream's credential freshness check runs
+  before the queue's refreshable-document check.
+- **Additive conflicts** (UI client 204 test, TypeSafe catalog test, CLI
+  command imports) keep both sides.
+
+On the rebased tip, with Node 26.5.0 and pnpm 9.15.4: `git diff --check`, the
+frozen install, `pnpm build` (including the Rust runner), `pnpm -r typecheck`
+and `check:migrations` pass, as do the targeted suites for every resolved
+conflict (UI client, app definitions, acpx drivers, native backend, issue
+revision, idempotency registry, grouped children, watchdogs, process recovery,
+tool access, AI connections, the npm override and acpx packaging scripts, and
+the runner's provider backend tests). The full `pnpm test:run` and the
+serialized server suite were not run.
 
 ## Queue CI repair (October 5, 2026)
 

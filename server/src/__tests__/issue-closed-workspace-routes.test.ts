@@ -204,7 +204,7 @@ async function assertNoBackgroundClearWithinRetryWindow() {
   expect(mockExecutionWorkspaceService.clearReopenPendingConsumptionForUnconsumedReopen).not.toHaveBeenCalled();
 }
 
-describe.sequential("closed isolated workspace issue routes", () => {
+describe("closed isolated workspace issue routes", () => {
   const routeModules = hoistModuleGraph(registerServiceMocks, async () => {
     // Sequential on purpose: concurrent vi.importActual() calls can drop a
     // factory mock, because Vitest keeps one shared mock-resolution callstack.

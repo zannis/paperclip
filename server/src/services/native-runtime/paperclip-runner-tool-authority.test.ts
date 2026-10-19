@@ -102,7 +102,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       issueId,
       runId,
     });
-    expect(authority.definitions()).toHaveLength(35);
+    expect(authority.definitions()).toHaveLength(36);
     const questions = authority.definitions().find(tool => tool.name === "request_human_input")!;
     expect(questions.description).toContain("ask only the next unanswered question");
     expect(questions.description).toContain("Never fabricate answers");
@@ -131,6 +131,7 @@ describe("PaperclipRunnerToolAuthority", () => {
         "list_document_revisions",
         "write_document",
         "create_skill",
+        "update_skill",
         "list_agents",
         "get_agent",
         "list_approvals",
@@ -829,6 +830,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       disposition: "applied",
       created: true,
       document: { key: "plan", body },
+      documentHref: "/RNT/issues/RNT-1#document-plan",
     });
     expect(
       await db

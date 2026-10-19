@@ -1,5 +1,13 @@
 # Runner E2E fixture authoring
 
+The [public MCP journeys](PUBLIC-MCP.md) reuse the fixture registry with a real
+authenticated browser session. `RunnerApi.setBrowserSession` binds that session
+to API calls, including encrypted secret provisioning via Node fetch. OAuth
+setup stays outside model context. The external assistant receives the catalog
+from `tools/list` and the shipped workflow skills; its calls execute against the
+real SDK transport. Client-side loss of a successful response is the sole fault
+injection in the uncertain-retry case. Task/run/document REST reads own grading.
+
 The fixture catalog is executable production-contract data. Keep it small,
 typed, deterministic, and free of raw credentials.
 
@@ -16,6 +24,17 @@ The suite definition fingerprint is historical comparison metadata. Any
 profile, model qualification, environment, task, or ranking-snapshot change
 must change that fingerprint automatically so the dashboard can annotate the
 boundary instead of silently joining unlike totals.
+
+The explicit [stock-harness suite](STOCK-HARNESS.md) wraps existing profiles with
+`productionDefaultHireProfile`: omit only `instructionsBundle` so the public
+hire route loads the shipped default, while preserving runtime, permissions,
+auth, skills, and managed secret references. Do not replace this with a fixture
+copy of the default manual. Public receipts check the exact independently
+specified bundle before provider execution and again during cleanup, along with
+both budget hard stops and actual legacy invocation prompts. Missing evidence
+fails closed. The definition fingerprint includes the helper, graders, journey
+sources, live fixture, and execution integration; editing those sources changes
+the suite revision automatically.
 
 ## Agent profiles
 
