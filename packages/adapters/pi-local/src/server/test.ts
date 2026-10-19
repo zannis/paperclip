@@ -126,6 +126,9 @@ export async function testEnvironment(
     if (typeof value === "string") env[key] = value;
   }
   const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
+  // Sandbox probes get the run's own env, never the server's process.env.
+  // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+  const targetSetupEnv = target?.kind === "remote" && target.transport === "sandbox" ? env : runtimeEnv;
 
   const cwdInvalid = checks.some((check) => check.code === "pi_cwd_invalid");
   if (cwdInvalid) {
@@ -146,7 +149,7 @@ export async function testEnvironment(
     });
     if (installCheck) checks.push(installCheck);
     try {
-      await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
+      await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, targetSetupEnv);
       checks.push({
         code: "pi_command_resolvable",
         level: "info",
@@ -267,7 +270,7 @@ export async function testEnvironment(
         args,
         {
           cwd,
-          env: runtimeEnv,
+          env: targetSetupEnv,
           timeoutSec: 60,
           graceSec: 5,
           onLog: async () => {},

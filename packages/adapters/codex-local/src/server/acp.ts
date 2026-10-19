@@ -435,7 +435,8 @@ async function commandIsResolvable(
         trimmed,
         target,
         resolveAdapterExecutionTargetCwd(target, asString(input?.config.cwd, ""), process.cwd()),
-        process.env,
+        // The sandbox probe needs no server env; SSH needs PATH to find `ssh`.
+        target.transport === "sandbox" ? {} : process.env,
       );
       return true;
     } catch {

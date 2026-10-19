@@ -80,7 +80,7 @@ import {
   type RunProcessResult,
   type TerminalResultCleanupOptions,
 } from "./server-utils.js";
-import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
+import { sanitizeRemoteExecutionEnv, sanitizeSandboxSetupEnv } from "./remote-execution-env.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import {
   runWithRuntimeParent,
@@ -711,7 +711,7 @@ export async function ensureAdapterExecutionTargetCommandResolvable(
     await ensureSandboxCommandResolvable(
       command,
       target,
-      sanitizeRemoteExecutionEnv(Object.fromEntries(
+      sanitizeSandboxSetupEnv(Object.fromEntries(
         Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
       )),
       options.installCommand?.trim() || null,
@@ -1009,7 +1009,7 @@ export async function runAdapterExecutionTargetShellCommand(
       command: shellCommand,
       args: shellCommandArgs(command),
       cwd: target.remoteCwd,
-      env,
+      env: sanitizeSandboxSetupEnv(options.env),
       timeoutMs: (options.timeoutSec ?? 15) * 1000,
       onLog,
     });
