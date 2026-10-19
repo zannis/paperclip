@@ -1254,9 +1254,23 @@ async function startServerWithDatabaseTeardown(
     heartbeat: environmentLeaseCleanupHeartbeat,
     resolveNativeQuestion: (interaction) => deliverNativeQuestionResponse(db as any, interaction),
   });
+  // Reclaim idle retained warm sandboxes first. One whose workspace survives a
+  // stop is stopped by the kept-workspace sweep on its next pass, so its idle
+  // bound is `runnerIdleTimeoutMs` plus about one tick. Any other is queued for the
+  // pending_cleanup sweep below, which tears it down once its last write is
+  // older than its backoff, so its bound is the larger of the two.
   const runEnvironmentLeaseCleanupSweep = (backoffMs: number) =>
     environmentLeaseCleanupHeartbeat
-      .sweepPendingCleanupLeases({ backoffMs })
+      .sweepIdleRetainedLeases()
+      .then((result) => {
+        if (result.claimed > 0) {
+          logger.info(result, "environment lease cleanup sweep queued idle retained sandboxes for teardown");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "idle retained environment lease sweep failed");
+      })
+      .then(() => environmentLeaseCleanupHeartbeat.sweepPendingCleanupLeases({ backoffMs }))
       .then((result) => {
         if (result.destroyed > 0 || result.capped > 0) {
           logger.info(result, "environment lease cleanup sweep retried orphan sandbox teardowns");
@@ -1265,9 +1279,40 @@ async function startServerWithDatabaseTeardown(
       .catch((err) => {
         logger.error({ err }, "environment lease cleanup sweep failed");
       });
+  // Stop idle kept-workspace sandboxes, and destroy those whose issue closed.
+  // Its provider stops and destroys can take minutes, so it runs on its own
+  // chain: it never holds up orphan teardown or startup. Its destroys claim
+  // their rows with a fresh write, so the pending_cleanup sweep's backoff
+  // keeps that sweep off them.
+  const runKeptWorkspaceLeaseSweep = () =>
+    environmentLeaseCleanupHeartbeat
+      .sweepKeptWorkspaceLeases()
+      .then((result) => {
+        if (result.confirmed > 0 || result.destroyed > 0 || result.failed > 0 || result.terminalDestroyed > 0) {
+          logger.info(result, "environment lease cleanup sweep reconciled kept-workspace sandboxes");
+        }
+      })
+      .catch((err) => {
+        logger.error({ err }, "kept-workspace environment lease sweep failed");
+      });
+  // A sweep that outlasts the interval is not started again until it ends.
+  let environmentLeaseCleanupSweepRunning = false;
+  let keptWorkspaceLeaseSweepRunning = false;
   const scheduleEnvironmentLeaseCleanupSweep = () => {
     if (heartbeatSchedulerStopped) return;
-    trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS));
+    if (!environmentLeaseCleanupSweepRunning) {
+      environmentLeaseCleanupSweepRunning = true;
+      trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS)
+        .finally(() => {
+          environmentLeaseCleanupSweepRunning = false;
+        }));
+    }
+    if (!keptWorkspaceLeaseSweepRunning) {
+      keptWorkspaceLeaseSweepRunning = true;
+      trackHeartbeatSchedulerWork(runKeptWorkspaceLeaseSweep().finally(() => {
+        keptWorkspaceLeaseSweepRunning = false;
+      }));
+    }
   };
   const githubConnectionEvents = githubConnectionEventService(db as any, {
     wakeup: environmentLeaseCleanupHeartbeat.wakeup,

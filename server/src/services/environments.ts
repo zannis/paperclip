@@ -32,6 +32,7 @@ import {
 } from "@paperclipai/shared";
 import { conflict, forbidden } from "../errors.js";
 import { logActivity } from "./activity-log.js";
+import { sandboxEpochSql } from "./kept-workspace-leases.js";
 import { isCloudManagedInstance } from "./cloud-instance.js";
 import {
   resourceStatus,
@@ -1188,7 +1189,7 @@ export function environmentService(db: Db) {
               select 1 from ${environmentLeases}
               where ${environmentLeases.environmentId} = ${environments.id}
                 and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
-                and ${environmentLeases.status} in ('active', 'released', 'retained')
+                and ${environmentLeases.status} in ('active', 'released', 'retained', 'stopped')
             )`,
           ),
         )
@@ -1303,7 +1304,7 @@ export function environmentService(db: Db) {
             and(
               eq(environmentLeases.environmentId, id),
               eq(environmentLeases.leasePolicy, "reuse_by_environment"),
-              inArray(environmentLeases.status, ["active", "released", "retained"]),
+              inArray(environmentLeases.status, ["active", "released", "retained", "stopped"]),
             ),
           ),
         db
@@ -1401,6 +1402,12 @@ export function environmentService(db: Db) {
        * reusable owners for one sandbox.
        */
       replacesReusableLeaseId?: string | null;
+      /**
+       * The sandbox epoch this acquisition's resume claim moved the replaced
+       * or reacquired row to. A concurrent claim moves it further, and the
+       * provider then fences on that newer epoch, so the handoff must lose.
+       */
+      expectedReusableLeaseSandboxEpoch?: number;
       /**
        * Reactivate the exact lease row already owned by this heartbeat run.
        * Native same-run recovery re-enters environment startup after the
@@ -1509,6 +1516,13 @@ export function environmentService(db: Db) {
                 }
               }
               if (input.replacesReusableLeaseId) {
+                // The new lease takes over the same provider sandbox, so the
+                // old row ends without a teardown. A `retained` row kept the
+                // sandbox running, and a `stopped` row kept its volume, so
+                // neither may read as cleaned up. A `released` row keeps the
+                // cleanup status of its confirmed stop. A `stopped` row is
+                // marked as retired by a resume, which keeps its stop receipt
+                // valid as proof that its own run's execution ended.
                 const retired = await tx
                   .update(environmentLeases)
                   .set({
@@ -1516,7 +1530,10 @@ export function environmentService(db: Db) {
                     releasedAt: now,
                     lastUsedAt: now,
                     updatedAt: now,
-                    cleanupStatus: "success",
+                    cleanupStatus: sql`case when ${environmentLeases.status} in ('retained', 'stopped') then null else ${environmentLeases.cleanupStatus} end`,
+                    metadata: sql`case when ${environmentLeases.status} = 'stopped'
+                      then coalesce(${environmentLeases.metadata}, '{}'::jsonb) || '{"retiredByResume":true}'::jsonb
+                      else ${environmentLeases.metadata} end`,
                   })
                   .where(
                     and(
@@ -1538,7 +1555,11 @@ export function environmentService(db: Db) {
                       inArray(environmentLeases.status, [
                         "released",
                         "retained",
+                        "stopped",
                       ]),
+                      input.expectedReusableLeaseSandboxEpoch !== undefined
+                        ? sql`${sandboxEpochSql()} = ${input.expectedReusableLeaseSandboxEpoch}`
+                        : undefined,
                     ),
                   )
                   .returning({ id: environmentLeases.id });
@@ -1586,7 +1607,11 @@ export function environmentService(db: Db) {
                         "active",
                         "released",
                         "retained",
+                        "stopped",
                       ]),
+                      input.expectedReusableLeaseSandboxEpoch !== undefined
+                        ? sql`${sandboxEpochSql()} = ${input.expectedReusableLeaseSandboxEpoch}`
+                        : undefined,
                     ),
                   )
                   .returning()
@@ -1620,6 +1645,8 @@ export function environmentService(db: Db) {
       status: Extract<EnvironmentLeaseStatus, "released" | "expired" | "failed" | "retained" | "pending_cleanup"> = "released",
       options?: {
         expectedPendingCleanupAttemptId?: string;
+        /** Write only while the lease still has this status. */
+        expectedStatus?: EnvironmentLeaseStatus;
         failureReason?: string;
         cleanupStatus?: EnvironmentLeaseCleanupStatus;
         remoteExecutionTermination?: Record<string, unknown>;
@@ -1641,7 +1668,9 @@ export function environmentService(db: Db) {
             ? sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || ${JSON.stringify({ remoteExecutionTermination: options.remoteExecutionTermination })}::jsonb`
             : sql`${environmentLeases.metadata} - 'remoteExecutionTermination'`,
         })
-        .where(and(eq(environmentLeases.id, id), options?.expectedPendingCleanupAttemptId
+        .where(and(eq(environmentLeases.id, id),
+          options?.expectedStatus ? eq(environmentLeases.status, options.expectedStatus) : undefined,
+          options?.expectedPendingCleanupAttemptId
           ? and(eq(environmentLeases.status, "pending_cleanup"),
               sql`${environmentLeases.metadata}->>'pendingCleanupAttemptId' = ${options.expectedPendingCleanupAttemptId}`)
           : undefined))
