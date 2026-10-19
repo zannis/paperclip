@@ -1,0 +1,25 @@
+scripts/restore-smoke.sh
+  s_1476e88ed97ffc::t_4c49f1100eb89a 318-320
+  s_1476e88ed97ffc::t_10e0b847428a76 329
+docs/deploy/backup-restore.md
+  s_1476e88ed97ffc::t_e64fbacbff5ef1 253-268
+  s_1476e88ed97ffc::t_664fd248efc9cc 451
+  s_1476e88ed97ffc::t_6ff37c80fb12d0 14
+  s_1476e88ed97ffc::t_2c7e5df511e819 269-270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d1e509508e14f91b3191cace14a069af2ac66130",
+  "prompts": {},
+  "sessions": {
+    "s_1476e88ed97ffc": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6ead40f8-368b-4c85-a79d-bcd2fcb5d095",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
