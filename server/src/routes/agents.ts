@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
+import { hostOnlyHookCommandPaths, managedAiGateNotPortableMessage } from "../services/managed-ai-gate-settings.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE, AI_CONNECTION_CAPABILITIES, aiConnectionBindingSchema, type AiConnectionBinding, aiRuntimeConnectionBindingSchema, type AiRuntimeConnectionBinding } from "@paperclipai/shared";
 import { toolConnections } from "@paperclipai/db";
 import { aiConnectionService } from "../services/ai-connections.js";
@@ -3396,6 +3397,26 @@ export function agentRoutes(
   }
 
   async function testManagedEnvironment(adapterType: string, context: Parameters<ReturnType<typeof requireServerAdapter>["testEnvironment"]>[0], binding: AiConnectionBinding, managed: Awaited<ReturnType<typeof prepareManagedAiRuntime>>, agentId?: string) {
+    // A host runner gate hook named by server path cannot cross into a remote
+    // sandbox, so a probe there would run ungated. Report it as this test's own
+    // failing check instead of probing and passing: the run path refuses the
+    // same configuration, and the operator sees why before adopting it.
+    const hostOnlyHooks = context.executionTarget?.kind === "remote" && managed.gate
+      ? hostOnlyHookCommandPaths(managed.gate.hookCommands)
+      : [];
+    if (hostOnlyHooks.length > 0) {
+      const notPortable: Awaited<ReturnType<ReturnType<typeof requireServerAdapter>["testEnvironment"]>> = {
+        adapterType,
+        testedAt: new Date().toISOString(),
+        status: "fail",
+        checks: [{
+          code: "ai_connection_gate_not_portable",
+          level: "error",
+          message: managedAiGateNotPortableMessage(hostOnlyHooks, context.environmentName),
+        }],
+      };
+      return notPortable;
+    }
     const startedAt = new Date();
     const result = await probeManagedEnvironment(adapterType, context, binding);
     // A provider rejection invalidates the tested credential generation. A
