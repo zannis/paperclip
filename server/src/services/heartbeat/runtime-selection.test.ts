@@ -294,6 +294,7 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     const attribution = { connectionId: randomUUID(), grantId: randomUUID(), provider, method, mode: "responsible_user" as const, responsibleUserId: "task-owner" };
     input.config.managedAiRuntime = {
       sessionIdentity: "fixture-grant:task-owner:epoch-1",
+      gate: null,
       config: { env: {}, managedAiConnection: { ...attribution, identity: "fixture-grant:task-owner:generation-1", sessionIdentity: "fixture-grant:task-owner:epoch-1" } },
       attribution,
       accountName: "Saved account",
