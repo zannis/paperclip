@@ -122,6 +122,9 @@ export async function testEnvironment(
     env.GEMINI_CLI_TRUST_WORKSPACE = "true";
   }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
+  // Sandbox probes get the run's own env, never the server's process.env.
+  // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+  const targetSetupEnv = target?.kind === "remote" && target.transport === "sandbox" ? env : runtimeEnv;
   const installCheck = await maybeRunSandboxInstallCommand({
     runId,
     target,
@@ -132,7 +135,7 @@ export async function testEnvironment(
   });
   if (installCheck) checks.push(installCheck);
   try {
-    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, runtimeEnv);
+    await ensureAdapterExecutionTargetCommandResolvable(command, target, cwd, targetSetupEnv);
     checks.push({
       code: "gemini_command_resolvable",
       level: "info",

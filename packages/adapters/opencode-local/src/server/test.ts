@@ -190,6 +190,9 @@ export async function testEnvironment(
       });
     }
     const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
+    // Sandbox probes get the run's own env, never the server's process.env.
+    // SSH keeps runtimeEnv: its probe resolves the local `ssh` binary from PATH.
+    const targetSetupEnv = targetIsSandbox ? preparedRuntimeConfig.env : runtimeEnv;
 
     const cwdInvalid = checks.some((check) => check.code === "opencode_cwd_invalid");
     if (cwdInvalid) {
@@ -210,7 +213,7 @@ export async function testEnvironment(
       });
       if (installCheck) checks.push(installCheck);
       try {
-        await ensureAdapterExecutionTargetCommandResolvable(command, runtimeTarget, runtimeCwd, runtimeEnv);
+        await ensureAdapterExecutionTargetCommandResolvable(command, runtimeTarget, runtimeCwd, targetSetupEnv);
         checks.push({
           code: "opencode_command_resolvable",
           level: "info",
@@ -386,7 +389,7 @@ export async function testEnvironment(
           args,
           {
             cwd: runtimeCwd,
-            env: runtimeEnv,
+            env: targetSetupEnv,
             timeoutSec: helloProbeTimeoutSec,
             graceSec: 5,
             stdin: "Respond with hello.",
