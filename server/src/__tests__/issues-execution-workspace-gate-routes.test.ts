@@ -603,26 +603,40 @@ describeEmbeddedPostgres("issue execution-workspace fields under the isolated-wo
   });
 
   /**
-   * Selecting an issue environment travels inside the settings blob and is a
-   * different feature behind a different flag. The parse drops `environmentId`
-   * (the service does not pass `includeEnvironmentId`) and returns `{}` rather
-   * than `null`, so an earlier revision compared `{}` against a stored `null`,
-   * decided they differed, and refused environment selection as an
-   * isolated-workspaces violation.
-   *
-   * The id here is not seeded, so the request still fails on "Environment not
-   * found" — which is the point: the refusal must come from environment
-   * validation downstream, never from this guard.
+   * Issue-level environment selection was retired when environments became
+   * instance-scoped: the run follows its assignee's environment, and `update()`
+   * strips `environmentId` from the settings it stores. The request schema still
+   * accepts the key for old clients, and the route still validated the id — so a
+   * PATCH naming a real environment answered 200 and the re-read came back
+   * without it, gate on or off. It is refused instead, and the row is untouched.
    */
-  it("does not refuse an environment-only settings payload as a gate violation", async () => {
-    const seeded = await seed({ isolatedWorkspaces: false });
+  for (const isolatedWorkspaces of [false, true]) {
+    it(`refuses a non-null issue environmentId with the gate ${isolatedWorkspaces ? "on" : "off"}`, async () => {
+      const seeded = await seed({ isolatedWorkspaces, seedEnvironment: true });
+
+      const res = await patch(seeded, {
+        title: "Renamed",
+        executionWorkspaceSettings: { environmentId: seeded.environmentId },
+      });
+
+      expect(res.status).toBe(422);
+      expect(JSON.stringify(res.body)).toContain("issue_environment_selection_unsupported");
+      expect(await storedWorkspaceFields(seeded)).toMatchObject({ executionWorkspaceSettings: null });
+    });
+  }
+
+  /** `environmentId: null` is what the UI sends; it asks for nothing, so it is not refused. */
+  it("accepts a null issue environmentId alongside the settings it carries", async () => {
+    const seeded = await seed({ isolatedWorkspaces: true });
 
     const res = await patch(seeded, {
-      title: "Renamed",
-      executionWorkspaceSettings: { environmentId: randomUUID() },
+      executionWorkspaceSettings: { mode: "shared_workspace", environmentId: null },
     });
 
-    expect(JSON.stringify(res.body)).not.toContain("isolated_workspaces_disabled");
+    expect(res.status).toBe(200);
+    expect((await storedWorkspaceFields(seeded)).executionWorkspaceSettings).toEqual({
+      mode: "shared_workspace",
+    });
   });
 
   it("leaves a PATCH that names none of the gated fields alone", async () => {

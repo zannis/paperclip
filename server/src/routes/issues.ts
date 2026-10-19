@@ -13598,6 +13598,20 @@ export function issueRoutes(
         { allowVisibleIssueWrite: true, watchdogIntent: issueUpdateWatchdogIntent(req.body) },
       );
       if (!issueMutationAccess) return;
+      // Issue-level environment selection was retired with instance-scoped
+      // environments: `update()` strips `environmentId` from the settings it
+      // stores and the run follows its assignee's environment. The schema still
+      // accepts the key for old clients, so refuse a non-null value rather than
+      // answer 200 over a selection that never lands. `null` asks for nothing.
+      if (readObject(readObject(req.body).executionWorkspaceSettings).environmentId != null) {
+        throw unprocessable(
+          "Issue-level environment selection is no longer supported; the run uses its assignee's environment",
+          {
+            code: "issue_environment_selection_unsupported",
+            fields: ["executionWorkspaceSettings.environmentId"],
+          },
+        );
+      }
       // Refuse execution-workspace values the gate will strip, rather than
       // answering 200 with an empty change receipt. Checked after the 404/403
       // gates, and only when the body actually names one of the fields, so an
