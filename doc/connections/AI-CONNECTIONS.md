@@ -338,6 +338,19 @@ Refreshes are merged only into the originating active grant, with a
 revocation check. Temporary homes are removed on normal completion or
 failure.
 
+Claude compares `claudeAiOauth.expiresAt`, and its write-back does not wait
+for cleanup. Anthropic invalidates a refresh token once it is used, so a copy
+held until the run ended left every run staged in the meantime with a spent
+refresh token. Those runs failed until the long run finished, and this
+happened each time the access token expired. Each Claude run's
+`.credentials.json` is therefore checked every 2 seconds. A changed document
+is merged right away, and a stored refresh is copied into the files of the
+grant's other active runs. When the stored access token is within 10 minutes
+of expiry, the first run staged takes the refresh turn. Runs staged after it
+wait for that run's write-back, for at most 90 seconds, and then stage the
+refreshed document. This coordination is in-process: it covers the runs of
+one server instance.
+
 A fresh task execution cannot enter subscription contention. The freshest-write
 rule above resolves the conflict instead. A run that already entered this wait
 keeps a durable scheduled retry, checked every 60–120 seconds. The task shows

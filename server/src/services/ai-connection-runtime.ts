@@ -25,6 +25,13 @@ import {
   decideClaudeAuthMerge,
   isRefreshableClaudeDocument,
 } from "./claude-credential-document.js";
+import {
+  awaitClaudeRefresh,
+  claimClaudeRefresh,
+  releaseClaudeRefresh,
+  trackClaudeRun,
+  type TrackedClaudeRun,
+} from "./claude-credential-coordinator.js";
 import { logger } from "../middleware/logger.js";
 
 export function isAiConnectionBusy(error: unknown): error is HttpError {
@@ -253,6 +260,7 @@ export async function prepareManagedAiRuntime(
   });
   const subscriptionSelected = selection.attribution.method === "subscription";
   let home: string | undefined;
+  let refreshHolder: string | null = null;
   try {
     const selectedGrantId = selection.grant.id;
     selection = await service.select({
@@ -270,10 +278,27 @@ export async function prepareManagedAiRuntime(
     if (!credentialRef) throw unprocessable("The selected AI credential is unavailable");
     const readFreshness = async () => (await db.select({ epoch: companySecrets.aiSessionEpoch, version: companySecrets.latestVersion })
       .from(companySecrets).where(and(eq(companySecrets.companyId, input.companyId), eq(companySecrets.id, credentialRef.secretId))).limit(1))[0];
-    const freshness = await readFreshness();
-    const value = await service.credential(selection);
-    const afterRead = await readFreshness();
-    if (!freshness || freshness.version !== afterRead?.version || freshness.epoch !== afterRead.epoch) throw unprocessable("The AI credential changed during preparation; retry this execution");
+    const readCredential = async () => {
+      const freshness = await readFreshness();
+      const value = await service.credential(selection);
+      const afterRead = await readFreshness();
+      if (!freshness || freshness.version !== afterRead?.version || freshness.epoch !== afterRead.epoch) throw unprocessable("The AI credential changed during preparation; retry this execution");
+      return { freshness, value };
+    };
+    let { freshness, value } = await readCredential();
+    // Anthropic invalidates a refresh token once it is used. When the stored
+    // access token is about to expire, one run refreshes it and the runs
+    // staged after it wait for that write-back instead of all spending the
+    // same refresh token. A second wait is not taken: the run proceeds.
+    if (input.binding.provider === "anthropic" && subscriptionSelected && isRefreshableClaudeDocument(value)) {
+      let claim = claimClaudeRefresh(selection.grant.id, value);
+      if (claim.kind === "wait") {
+        await awaitClaudeRefresh(selection.grant.id, claim.settled);
+        ({ freshness, value } = await readCredential());
+        claim = claimClaudeRefresh(selection.grant.id, value);
+      }
+      refreshHolder = claim.kind === "proceed" ? claim.holder : null;
+    }
     // Anthropic joins the file topology only when the stored credential is a
     // Claude credential document the CLI can refresh. Connections saved before
     // this change hold a bare token, and a `claude setup-token` credential has
@@ -350,6 +375,91 @@ export async function prepareManagedAiRuntime(
       });
       env.OPENCODE_DISABLE_PROJECT_CONFIG = "true";
     }
+    // Persists a document the run's CLI rewrote, unless the stored one is
+    // newer. Returns the merge decision, or null when the grant no longer
+    // accepts write-backs.
+    const writeBack = (refreshed: string, phase: "mid_run" | "run_end") =>
+      db.transaction(async (tx): Promise<number | null> => {
+        const [grant] = await tx
+          .select()
+          .from(connectionGrants)
+          .where(
+            and(
+              eq(connectionGrants.id, selection.grant.id),
+              eq(connectionGrants.companyId, input.companyId),
+            ),
+          )
+          .for("update");
+        // A missing or revoked grant blocks the write-back. Among
+        // active copies, the merge decision below keeps the
+        // credential with the newest provider freshness field.
+        if (!grant || grant.status !== "active") return null;
+        const ref = grant.credentialSecretRefs.find(
+          (r) => r.configPath === "ai.credential",
+        );
+        if (!ref) return null;
+        // Lock the referenced secret row for the rest of this
+        // transaction. The grant-row lock above does not cover it,
+        // so an authorized rotation of this secret could otherwise
+        // land between the read and the write below and be
+        // overwritten by this stale write-back.
+        await tx
+          .select({ id: companySecrets.id })
+          .from(companySecrets)
+          .where(
+            and(
+              eq(companySecrets.id, ref.secretId),
+              eq(companySecrets.companyId, input.companyId),
+            ),
+          )
+          .for("update");
+        const current = await aiConnectionService(
+          tx as unknown as Db,
+        ).credential({ ...selection, grant });
+        const destination = path.join(
+          providerHome,
+          "current-auth.json",
+        );
+        await writeFile(destination, current, { mode: 0o600 });
+        const decision =
+          input.binding.provider === "anthropic"
+            ? decideClaudeAuthMerge(refreshed, current)
+            : input.binding.provider === "openai"
+              ? await decideCodexAuthMerge(authFile, destination, {
+                  errorLabel: "AI account refresh",
+                })
+              : await decideGrokAuthMerge(authFile, destination, {
+                  errorLabel: "AI account refresh",
+                });
+        if (anthropicFile)
+          logger.info({
+            event: "claude_credential_writeback",
+            grantId: grant.id,
+            outcome: decision === 10 ? "stored" : "kept_stored",
+            decision,
+          phase,
+            runRefreshTokenFingerprint: claudeRefreshTokenFingerprint(refreshed),
+            storedRefreshTokenFingerprint: claudeRefreshTokenFingerprint(current),
+          }, "Claude credential write-back decision");
+        if (decision !== 10) return decision;
+        await secretService(tx).rotate(
+          ref.secretId,
+          { value: refreshed, preserveAiSessionEpoch: true },
+          { userId: grant.subjectUserId },
+        );
+        await tx
+          .update(connectionGrants)
+          .set({ updatedAt: new Date() })
+          .where(eq(connectionGrants.id, grant.id));
+        return decision;
+      });
+    // A Claude run's refreshed document is written back while the run is
+    // still going, not when it ends, so runs staged meanwhile get the live
+    // refresh token instead of the one this run already spent.
+    const tracked: TrackedClaudeRun | null = anthropicFile
+      ? trackClaudeRun({ grantId: selection.grant.id, authFile, staged: value, holder: refreshHolder, writeBack })
+      : null;
+    refreshHolder = null;
     const generation = createHash("sha256")
       .update(value)
       .digest("hex")
@@ -377,83 +487,12 @@ export async function prepareManagedAiRuntime(
       gate,
       cleanup: async () => {
         try {
-          if (subscriptionFile) {
-            const refreshed = await readFile(authFile, "utf8");
-            if (anthropicFile && refreshed === value)
+          if (tracked) {
+            if (await tracked.finish())
               logger.info({ event: "claude_credential_writeback", grantId: selection.grant.id, outcome: "unchanged" }, "Claude credential unchanged by run");
-            if (refreshed !== value)
-              await db.transaction(async (tx) => {
-                const [grant] = await tx
-                  .select()
-                  .from(connectionGrants)
-                  .where(
-                    and(
-                      eq(connectionGrants.id, selection.grant.id),
-                      eq(connectionGrants.companyId, input.companyId),
-                    ),
-                  )
-                  .for("update");
-                // A missing or revoked grant blocks the write-back. Among
-                // active copies, the merge decision below keeps the
-                // credential with the newest provider freshness field.
-                if (!grant || grant.status !== "active") return;
-                const ref = grant.credentialSecretRefs.find(
-                  (r) => r.configPath === "ai.credential",
-                );
-                if (!ref) return;
-                // Lock the referenced secret row for the rest of this
-                // transaction. The grant-row lock above does not cover it,
-                // so an authorized rotation of this secret could otherwise
-                // land between the read and the write below and be
-                // overwritten by this stale write-back.
-                await tx
-                  .select({ id: companySecrets.id })
-                  .from(companySecrets)
-                  .where(
-                    and(
-                      eq(companySecrets.id, ref.secretId),
-                      eq(companySecrets.companyId, input.companyId),
-                    ),
-                  )
-                  .for("update");
-                const current = await aiConnectionService(
-                  tx as unknown as Db,
-                ).credential({ ...selection, grant });
-                const destination = path.join(
-                  providerHome,
-                  "current-auth.json",
-                );
-                await writeFile(destination, current, { mode: 0o600 });
-                const decision =
-                  input.binding.provider === "anthropic"
-                    ? decideClaudeAuthMerge(refreshed, current)
-                    : input.binding.provider === "openai"
-                      ? await decideCodexAuthMerge(authFile, destination, {
-                          errorLabel: "AI account refresh",
-                        })
-                      : await decideGrokAuthMerge(authFile, destination, {
-                          errorLabel: "AI account refresh",
-                        });
-                if (anthropicFile)
-                  logger.info({
-                    event: "claude_credential_writeback",
-                    grantId: grant.id,
-                    outcome: decision === 10 ? "stored" : "kept_stored",
-                    decision,
-                    runRefreshTokenFingerprint: claudeRefreshTokenFingerprint(refreshed),
-                    storedRefreshTokenFingerprint: claudeRefreshTokenFingerprint(current),
-                  }, "Claude credential write-back decision");
-                if (decision !== 10) return;
-                await secretService(tx).rotate(
-                  ref.secretId,
-                  { value: refreshed, preserveAiSessionEpoch: true },
-                  { userId: grant.subjectUserId },
-                );
-                await tx
-                  .update(connectionGrants)
-                  .set({ updatedAt: new Date() })
-                  .where(eq(connectionGrants.id, grant.id));
-              });
+          } else if (subscriptionFile) {
+            const refreshed = await readFile(authFile, "utf8");
+            if (refreshed !== value) await writeBack(refreshed, "run_end");
           }
         } finally {
           if (home) await rm(home, { recursive: true, force: true });
@@ -461,6 +500,7 @@ export async function prepareManagedAiRuntime(
       },
     };
   } catch (error) {
+    releaseClaudeRefresh(selection.grant.id, refreshHolder);
     if (home) await rm(home, { recursive: true, force: true });
     throw error;
   }
