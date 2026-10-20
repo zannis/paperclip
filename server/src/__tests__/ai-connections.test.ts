@@ -272,6 +272,44 @@ describe("managed AI connections", () => {
       expect(await stored(runInput)).toBe(refreshed);
     });
 
+    it("persists a refresh while the run is still going", async () => {
+      // A run staged after another run refreshed must get the new refresh
+      // token. Anthropic has already invalidated the one stored at staging.
+      const runInput = await claudeRun("claude-mid-run-user", claude("start", 1));
+      const run = await prepareManagedAiRuntime(db, runInput);
+      try {
+        const refreshed = claude("refreshed", 8);
+        await writeFile(credentialFile(run), refreshed);
+        await vi.waitFor(async () => expect(await stored(runInput)).toBe(refreshed), { timeout: 8_000, interval: 200 });
+      } finally { await run.cleanup(); }
+    });
+
+    it("copies a stored refresh into a concurrent run's credential file", async () => {
+      const runInput = await claudeRun("claude-propagate-user", claude("start", 1));
+      const refresher = await prepareManagedAiRuntime(db, runInput);
+      const sibling = await prepareManagedAiRuntime(db, runInput);
+      try {
+        const refreshed = claude("refreshed", 8);
+        await writeFile(credentialFile(refresher), refreshed);
+        await vi.waitFor(async () => expect(await readFile(credentialFile(sibling), "utf8")).toBe(refreshed), { timeout: 8_000, interval: 200 });
+      } finally { await Promise.all([refresher.cleanup(), sibling.cleanup()]); }
+    });
+
+    it("stages a run behind a concurrent refresh when the stored access token is about to expire", async () => {
+      const expiring = claude("expiring", 0.01);
+      const runInput = await claudeRun("claude-single-flight-user", expiring);
+      const refresher = await prepareManagedAiRuntime(db, runInput);
+      let follower: Awaited<ReturnType<typeof prepareManagedAiRuntime>> | undefined;
+      try {
+        expect(await readFile(credentialFile(refresher), "utf8")).toBe(expiring);
+        const pending = prepareManagedAiRuntime(db, runInput).then((run) => (follower = run));
+        const refreshed = claude("refreshed", 8);
+        await writeFile(credentialFile(refresher), refreshed);
+        await pending;
+        expect(await readFile(credentialFile(follower!), "utf8")).toBe(refreshed);
+      } finally { await Promise.all([refresher.cleanup(), follower?.cleanup()]); }
+    });
+
     it("resolves two concurrent write-backs by expiry, not by order", async () => {
       const runInput = await claudeRun("claude-concurrent-user", claude("start", 1));
       const older = await prepareManagedAiRuntime(db, runInput);

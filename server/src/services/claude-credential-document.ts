@@ -73,6 +73,17 @@ export function isRefreshableClaudeDocument(value: string): boolean {
 }
 
 /**
+ * The access token's expiry in epoch milliseconds, or null when the value is
+ * not a document or its expiry is absent or unreadable.
+ */
+export function claudeAccessTokenExpiresAtMs(value: string): number | null {
+  const document = parseDocument(value);
+  if (!document) return null;
+  const expiry = readExpiry(document.oauth.expiresAt);
+  return expiry.present ? expiry.ms : null;
+}
+
+/**
  * A short, non-reversible fingerprint of the document's refresh token, for logs.
  * Sign-in, run staging and the write-back log it so an operator can tell which
  * refresh token a failing run carried and whether the stored one ever changed.
