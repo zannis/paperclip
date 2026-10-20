@@ -369,7 +369,9 @@ describe("execution environment route guards", () => {
     expect(mockIssueService.create).toHaveBeenCalled();
   });
 
-  it("accepts sandbox environments on issue update", async () => {
+  // Issue-level environment selection is retired: `update()` strips the id, so
+  // the route refuses it outright instead of answering 200 over a dropped value.
+  it("refuses an issue-level environment selection on issue update", async () => {
     mockIssueService.getById.mockResolvedValue({
       id: "issue-1",
       companyId: "company-1",
@@ -401,7 +403,8 @@ describe("execution environment route guards", () => {
         },
       });
 
-    expect(res.status).not.toBe(422);
-    expect(mockIssueService.update).toHaveBeenCalled();
+    expect(res.status).toBe(422);
+    expect(JSON.stringify(res.body)).toContain("issue_environment_selection_unsupported");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 });
