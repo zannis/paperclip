@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  incompleteMcpResult,
   initializeMcpHttpSession,
   MCP_HTTP_ACCEPT,
   MCP_PROTOCOL_VERSION,
   mcpHttpRequestHeaders,
+  MCP_STATELESS_PROTOCOL_VERSION,
   parseMcpHttpResponseBody,
+  statelessMcpHeaders,
+  statelessMcpRequest,
+  usesStatelessMcpProtocol,
 } from "../services/mcp-http.js";
 
 describe("mcpHttpRequestHeaders", () => {
@@ -94,5 +99,110 @@ describe("parseMcpHttpResponseBody", () => {
 
   it("throws when an SSE stream carries no data events", () => {
     expect(() => parseMcpHttpResponseBody("event: ping\n\n", "text/event-stream")).toThrow();
+  });
+});
+
+describe("statelessMcpRequest", () => {
+  it("sends the 2026-07-28 envelope: version header, method header and per-request metadata", () => {
+    const { headers, body } = statelessMcpRequest({
+      id: "list-1",
+      method: "tools/list",
+      params: { cursor: "next" },
+      headers: { Authorization: "Bearer token" },
+    });
+    expect(MCP_STATELESS_PROTOCOL_VERSION).toBe("2026-07-28");
+    expect(headers).toMatchObject({
+      Authorization: "Bearer token",
+      accept: MCP_HTTP_ACCEPT,
+      "content-type": "application/json",
+      "MCP-Protocol-Version": "2026-07-28",
+      "Mcp-Method": "tools/list",
+    });
+    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toContain("mcp-name");
+    expect(JSON.parse(body)).toEqual({
+      jsonrpc: "2.0",
+      id: "list-1",
+      method: "tools/list",
+      params: {
+        cursor: "next",
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+          "io.modelcontextprotocol/clientInfo": { name: "paperclip", version: "1" },
+        },
+      },
+    });
+  });
+
+  it("names the tool on tools/call, base64-wrapping names that are not visible ASCII", () => {
+    const plain = statelessMcpRequest({ id: 1, method: "tools/call", params: { name: "find_Account", arguments: {} } });
+    expect(plain.headers["Mcp-Name"]).toBe("find_Account");
+    const wide = statelessMcpRequest({ id: 2, method: "tools/call", params: { name: "créer contact", arguments: {} } });
+    expect(wide.headers["Mcp-Name"]).toBe(`=?base64?${Buffer.from("créer contact", "utf8").toString("base64")}?=`);
+  });
+
+  it("drops caller-supplied session and protocol headers but keeps credentials", () => {
+    const { headers } = statelessMcpRequest({
+      id: 3,
+      method: "tools/list",
+      headers: {
+        "X-Api-Key": "secret",
+        "mcp-session-id": "stale",
+        "mcp-protocol-version": "2025-06-18",
+        "MCP-METHOD": "initialize",
+        "mcp-name": "other",
+      },
+    });
+    expect(headers["X-Api-Key"]).toBe("secret");
+    const lower = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
+    expect(lower["mcp-session-id"]).toBeUndefined();
+    expect(lower["mcp-name"]).toBeUndefined();
+    expect(lower["mcp-protocol-version"]).toBe("2026-07-28");
+    expect(lower["mcp-method"]).toBe("tools/list");
+    expect(Object.keys(headers).filter((name) => name.toLowerCase() === "mcp-protocol-version")).toHaveLength(1);
+  });
+
+  it("gives a JSON-RPC response only the version header", () => {
+    const headers = statelessMcpHeaders({ "X-Api-Key": "secret", "Mcp-Session-Id": "stale" });
+    expect(headers).toMatchObject({ "X-Api-Key": "secret", "MCP-Protocol-Version": "2026-07-28", accept: MCP_HTTP_ACCEPT });
+    expect(Object.keys(headers).map((name) => name.toLowerCase())).not.toEqual(expect.arrayContaining(["mcp-method", "mcp-session-id"]));
+  });
+});
+
+describe("usesStatelessMcpProtocol", () => {
+  it("is true only for a connection that learned 2026-07-28", () => {
+    expect(usesStatelessMcpProtocol({ mcpProtocolVersion: "2026-07-28" })).toBe(true);
+    expect(usesStatelessMcpProtocol({ mcpProtocolVersion: "2025-06-18" })).toBe(false);
+    expect(usesStatelessMcpProtocol({ mcpSessionRequired: true })).toBe(false);
+    expect(usesStatelessMcpProtocol(null)).toBe(false);
+  });
+});
+
+describe("incompleteMcpResult", () => {
+  it("passes complete results and results from servers that send no resultType", () => {
+    expect(incompleteMcpResult({ content: [] })).toBeNull();
+    expect(incompleteMcpResult({ resultType: "complete", content: [] })).toBeNull();
+    expect(incompleteMcpResult(null)).toBeNull();
+    // Only input_required means "not done"; anything else is a result to read.
+    expect(incompleteMcpResult({ resultType: "task", content: [] })).toBeNull();
+    expect(incompleteMcpResult({ resultType: null, content: [] })).toBeNull();
+  });
+
+  it("explains an input_required result, including the server's question and links", () => {
+    const outcome = incompleteMcpResult({
+      resultType: "input_required",
+      content: [{ type: "resource_link", uri: "https://crm.example/#Account/view/abc", name: "Acme" }],
+      inputRequests: {
+        confirmDuplicate: { method: "elicitation/create", params: { message: "The record might be a duplicate. Proceed anyway?" } },
+      },
+    });
+    expect(outcome?.message).toContain("The record might be a duplicate. Proceed anyway?");
+    expect(outcome?.message).toContain("nothing was changed");
+    expect(outcome?.message).toContain("https://crm.example/#Account/view/abc");
+  });
+
+  it("falls back to a generic question when the server gives none", () => {
+    expect(incompleteMcpResult({ resultType: "input_required", content: [] })?.message)
+      .toContain("needs more input");
   });
 });

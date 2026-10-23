@@ -997,6 +997,58 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     }
   });
 
+  it("leaves servers that speak only MCP 2026-07-28 out of the resources and prompts fan-out", async () => {
+    const company = await createCompany(db);
+    // Like EspoCRM's ext-mcp: every request without the version header is refused.
+    const remote = await startFakeRemoteMcpServer(async ({ body }) => ({
+      status: 400,
+      body: { jsonrpc: "2.0", id: body?.id ?? null, error: { code: -32020, message: "No MCP-Protocol-Version header." } },
+    }));
+    try {
+      const assigned = await createRemoteMcpTool(db, company.id, {
+        url: remote.url,
+        applicationKey: "stateless-crm",
+        connectionName: "CRM",
+        toolName: "find_Account",
+        riskLevel: "read",
+      });
+      await db.update(toolConnections).set({
+        config: { ...assigned.connection.config, mcpProtocolVersion: "2026-07-28" },
+      }).where(eq(toolConnections.id, assigned.connection.id));
+      const [profile] = await db.insert(toolProfiles).values({
+        companyId: company.id,
+        profileKey: `stateless-${randomUUID()}`,
+        name: `Stateless ${randomUUID()}`,
+        defaultAction: "deny",
+      }).returning();
+      await db.insert(toolProfileEntries).values({
+        companyId: company.id,
+        profileId: profile.id,
+        selectorType: "connection",
+        effect: "include",
+        connectionId: assigned.connection.id,
+      });
+      const gateway = createTestToolGatewayService(db);
+      const created = await gateway.createNamedGateway({ companyId: company.id, body: { name: "CRM gateway", profileId: profile.id } });
+      const token = await gateway.createNamedGatewayToken({ companyId: company.id, gatewayId: created.id, body: { name: "Native runner" } });
+      const app = createGatewayRouteApp(db, gateway);
+
+      for (const method of ["resources/list", "prompts/list"]) {
+        const listed = await request(app)
+          .post(`/api/tool-gateway/gateways/${created.id}/mcp`)
+          .set("authorization", `Bearer ${token.token}`)
+          .send({ jsonrpc: "2.0", id: method, method })
+          .expect(200);
+        expect(listed.body.result[method === "resources/list" ? "resources" : "prompts"]).toEqual([]);
+      }
+      expect(remote.requests).toHaveLength(0);
+      const [stored] = await db.select().from(toolConnections).where(eq(toolConnections.id, assigned.connection.id));
+      expect(stored?.healthStatus).not.toBe("error");
+    } finally {
+      await remote.close();
+    }
+  });
+
   it("omits archived gateways from listNamedGateways", async () => {
     const company = await createCompany(db);
     const [profile] = await db.insert(toolProfiles).values({
