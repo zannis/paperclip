@@ -7171,12 +7171,13 @@ export function toolAccessService(
     // mode. Before the credential refreshes below, so does a 401 or 403: the
     // server read the version and now judges the credential, and the
     // refreshes and scope check run in this mode. Any other answer, or no
-    // answer at all, keeps the original 400, as before. Each credential is
-    // probed at most once.
-    let probedHeaders: Record<string, string> | null = null;
+    // answer at all, keeps the original 400, as before. A refresh probes at
+    // most once: the first call runs after a 400 and the credential
+    // refreshes only after a 401, so only one of the two calls can fire.
+    let probed = false;
     const probeStateless = async (keepOnAuthFailure: boolean) => {
-      if (stateless || response.status !== 400 || probedHeaders === headers) return;
-      probedHeaders = headers;
+      if (stateless || probed || response.status !== 400) return;
+      probed = true;
       stateless = true;
       const probe = await sendToolsList(headers).catch(() => null);
       if (!probe) {

@@ -5854,7 +5854,7 @@ export function createToolGatewayService(
           headers: callRequest(headers).headers,
         });
       }
-      const sessionExpired = response.status === 404 && new Headers(requestHeaders).has("mcp-session-id");
+      const sessionExpired = !stateless && response.status === 404 && new Headers(requestHeaders).has("mcp-session-id");
       if (sessionExpired) {
         // The next explicit call initializes again. Never replay a tools/call
         // automatically: the failed call may have changed app data.
