@@ -36,6 +36,93 @@ export function mcpHttpRequestHeaders(extra?: Record<string, string>): Record<st
   };
 }
 
+// Protocol 2026-07-28 drops the initialize handshake and sessions. Every
+// request names its version, method and (for tools/call) tool in headers, and
+// repeats the version in params._meta. A connection learns this mode once,
+// during catalog refresh, and keeps it in config.mcpProtocolVersion.
+export const MCP_STATELESS_PROTOCOL_VERSION = "2026-07-28";
+const STATELESS_CLIENT_INFO = { name: "paperclip", version: "1" };
+const PROTOCOL_HEADER_NAMES = new Set(["mcp-protocol-version", "mcp-session-id", "mcp-method", "mcp-name"]);
+
+export function usesStatelessMcpProtocol(config: unknown): boolean {
+  return !!config && typeof config === "object"
+    && (config as Record<string, unknown>).mcpProtocolVersion === MCP_STATELESS_PROTOCOL_VERSION;
+}
+
+function withoutProtocolHeaders(headers?: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !PROTOCOL_HEADER_NAMES.has(name.toLowerCase())));
+}
+
+function encodeMcpNameHeader(name: string): string {
+  return /^[\x21-\x7e]+$/.test(name) ? name : `=?base64?${Buffer.from(name, "utf8").toString("base64")}?=`;
+}
+
+/** Headers for a JSON-RPC response sent back to a stateless server. */
+export function statelessMcpHeaders(headers?: Record<string, string>): Record<string, string> {
+  return mcpHttpRequestHeaders({ ...withoutProtocolHeaders(headers), "MCP-Protocol-Version": MCP_STATELESS_PROTOCOL_VERSION });
+}
+
+export function statelessMcpRequest(input: {
+  id: string | number;
+  method: string;
+  params?: Record<string, unknown>;
+  headers?: Record<string, string>;
+}): { headers: Record<string, string>; body: string } {
+  const params = input.params ?? {};
+  const meta = params._meta && typeof params._meta === "object" ? params._meta as Record<string, unknown> : {};
+  const toolName = input.method === "tools/call" && typeof params.name === "string" ? params.name : null;
+  return {
+    headers: mcpHttpRequestHeaders({
+      ...withoutProtocolHeaders(input.headers),
+      "MCP-Protocol-Version": MCP_STATELESS_PROTOCOL_VERSION,
+      "Mcp-Method": input.method,
+      ...(toolName !== null ? { "Mcp-Name": encodeMcpNameHeader(toolName) } : {}),
+    }),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: input.id,
+      method: input.method,
+      params: {
+        ...params,
+        _meta: {
+          ...meta,
+          "io.modelcontextprotocol/protocolVersion": MCP_STATELESS_PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": {},
+          "io.modelcontextprotocol/clientInfo": STATELESS_CLIENT_INFO,
+        },
+      },
+    }),
+  };
+}
+
+/**
+ * A 2026-07-28 result can end without completing, e.g. `input_required` when
+ * the server wants confirmation. Nothing was done, so it must not read as a
+ * success. Servers on older protocols never send `resultType`.
+ */
+export function incompleteMcpResult(result: unknown): { message: string } | null {
+  if (!result || typeof result !== "object") return null;
+  const record = result as Record<string, unknown>;
+  if (record.resultType === undefined || record.resultType === "complete") return null;
+  const requests = record.inputRequests && typeof record.inputRequests === "object"
+    ? Object.values(record.inputRequests as Record<string, unknown>) : [];
+  const question = requests
+    .map((request) => (request as { params?: { message?: unknown } } | null)?.params?.message)
+    .find((message): message is string => typeof message === "string" && message.length > 0);
+  const links = (Array.isArray(record.content) ? record.content : [])
+    .filter((item): item is { type: string; uri: string } =>
+      !!item && typeof item === "object" && (item as { type?: unknown }).type === "resource_link"
+      && typeof (item as { uri?: unknown }).uri === "string")
+    .map((item) => item.uri);
+  return {
+    message: [
+      question ?? "The server needs more input before it can finish this call.",
+      "The server did not complete this call; nothing was changed.",
+      ...(links.length ? [`Related records: ${links.join(", ")}`] : []),
+    ].join(" "),
+  };
+}
+
 export class McpHttpInitializationError extends Error {
   constructor(
     message: string,

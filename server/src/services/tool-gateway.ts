@@ -113,6 +113,10 @@ import {
   McpHttpResponseError,
   mcpHttpRequestHeaders,
   parseMcpHttpResponseBody,
+  incompleteMcpResult,
+  statelessMcpHeaders,
+  statelessMcpRequest,
+  usesStatelessMcpProtocol,
 } from "./mcp-http.js";
 import {
   buildRemoteHeaders,
@@ -4947,7 +4951,10 @@ export function createToolGatewayService(
           inArray(toolConnections.transport, ["mcp_remote", "local_stdio"]),
         ),
       )
-      .then((rows) => rows.map((row) => row.connection));
+      // Resources and prompts are asked of every assigned server without a
+      // protocol version. A 2026-07-28 server refuses that and would be marked
+      // unhealthy, hiding its tools; such servers are left out of this fan-out.
+      .then((rows) => rows.map((row) => row.connection).filter((connection) => !usesStatelessMcpProtocol(connection.config)));
   }
 
   async function callRemoteConnectionProtocol(input: {
@@ -5586,7 +5593,10 @@ export function createToolGatewayService(
   ) {
     const record = asRecord(result);
     if (!record) throw malformedRemoteMcpResponse();
-    const providerContent = normalizeMcpContent(record.content);
+    // Some servers (EspoCRM's ext-mcp among them) put the whole result, error
+    // messages included, in structuredContent and send no text content.
+    const providerContent = normalizeMcpContent(record.content)
+      || (record.structuredContent != null ? JSON.stringify(record.structuredContent) : "");
     const googleWorkspacePermissionDenied =
       record.isError === true &&
       (sourceTemplateKey === "gmail" ||
@@ -5702,8 +5712,18 @@ export function createToolGatewayService(
           execution,
         };
       }
+      const stateless = usesStatelessMcpProtocol(connection.config);
+      const callParams = { name: entry.toolName, arguments: parameters };
+      const callRequest = (requestHeaders: Record<string, string>) => stateless
+        ? statelessMcpRequest({ id: requestId, method: "tools/call", params: callParams, headers: requestHeaders })
+        : {
+            // MCP Streamable HTTP requires the Accept header advertising both a JSON
+            // body and an SSE stream; spec-compliant servers 406 without it.
+            headers: mcpHttpRequestHeaders(requestHeaders),
+            body: JSON.stringify({ jsonrpc: "2.0", id: requestId, method: "tools/call", params: callParams }),
+          };
       let requestHeaders = headers;
-      if (connection.config.mcpSessionRequired === true) {
+      if (!stateless && connection.config.mcpSessionRequired === true) {
         requestHeaders = await getMcpHttpSession({
           scope: `${connection.id}:grant:${grant.id}:actor:${session.agentId}:${endpoint}`,
           send: (init) =>
@@ -5720,22 +5740,13 @@ export function createToolGatewayService(
       // address it approved, so an operator-supplied hostname cannot be rebound
       // onto a loopback or metadata address between validation and dispatch
       // (PAP-17098).
+      const callInit = callRequest(requestHeaders);
       const requestInit: RequestInit = {
         method: "POST",
         redirect: "manual",
-        // MCP Streamable HTTP requires the Accept header advertising both a JSON
-        // body and an SSE stream; spec-compliant servers 406 without it.
-        headers: mcpHttpRequestHeaders(requestHeaders),
+        headers: callInit.headers,
         signal: controller.signal,
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: requestId,
-          method: "tools/call",
-          params: {
-            name: entry.toolName,
-            arguments: parameters,
-          },
-        }),
+        body: callInit.body,
       };
       let response = await dispatchRemote(endpoint, requestInit);
       if (isInsufficientConnectionScope(response)) {
@@ -5764,7 +5775,7 @@ export function createToolGatewayService(
         headerSummary = builtHeaders.summary;
         response = await dispatchRemote(endpoint, {
           ...requestInit,
-          headers: mcpHttpRequestHeaders(headers),
+          headers: callRequest(headers).headers,
         });
         if (response.status === 401) {
           await db
@@ -5802,7 +5813,7 @@ export function createToolGatewayService(
         headerSummary = builtHeaders.summary;
         response = await dispatchRemote(endpoint, {
           ...requestInit,
-          headers: mcpHttpRequestHeaders(headers),
+          headers: callRequest(headers).headers,
         });
       }
       if (
@@ -5840,7 +5851,7 @@ export function createToolGatewayService(
         headerSummary = builtHeaders.summary;
         response = await dispatchRemote(endpoint, {
           ...requestInit,
-          headers: mcpHttpRequestHeaders(headers),
+          headers: callRequest(headers).headers,
         });
       }
       const sessionExpired = response.status === 404 && new Headers(requestHeaders).has("mcp-session-id");
@@ -5859,7 +5870,7 @@ export function createToolGatewayService(
                 // Defer this interaction to the user. Do not claim that consent
                 // was granted or repeat a potentially state-changing tool call.
                 await dispatchRemote(endpoint, {
-                  method: "POST", headers: mcpHttpRequestHeaders(requestHeaders),
+                  method: "POST", headers: stateless ? statelessMcpHeaders(requestHeaders) : mcpHttpRequestHeaders(requestHeaders),
                   body: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "cancel" } }),
                 });
                 throw new ToolGatewayHttpError(409, "This tool needs authorization in the provider.", "provider_interaction_required", { upstreamPending: pending, invocationId });
@@ -5939,6 +5950,19 @@ export function createToolGatewayService(
           request: topLevelElicitation,
         });
       }
+      const statelessCallError = stateless ? asRecord(payloadRecord.error) : null;
+      if (statelessCallError && (statelessCallError.code === -32602 || statelessCallError.code === -32603)) {
+        // A 2026-07-28 server reports bad arguments, unknown or inactive tools
+        // this way. It is about this call, not the connection, so the agent
+        // gets the server's message and the connection's tools stay listed.
+        const detail = [
+          typeof statelessCallError.message === "string" ? statelessCallError.message : "The server rejected this call.",
+          ...(statelessCallError.data !== undefined ? [JSON.stringify(statelessCallError.data)] : []),
+        ].join(" ");
+        const result = normalizeMcpToolResult({ content: [{ type: "text", text: detail }], isError: true });
+        await markRemoteConnectionHealth(connection, "ok", "Remote MCP server responded to tools/call.");
+        return { result, headerSummary, execution };
+      }
       if (payloadRecord.error !== undefined) {
         const errorRecord = asRecord(payloadRecord.error);
         await markRemoteConnectionHealth(
@@ -5977,8 +6001,13 @@ export function createToolGatewayService(
         typeof connection.config.sourceTemplateKey === "string"
           ? connection.config.sourceTemplateKey
           : null;
+      // A call that ended without completing (e.g. the server asked for
+      // confirmation) changed nothing; report it as an error, not a success.
+      const incomplete = incompleteMcpResult(payloadRecord.result);
       const result = normalizeMcpToolResult(
-        payloadRecord.result,
+        incomplete
+          ? { content: [{ type: "text", text: incomplete.message }], isError: true }
+          : payloadRecord.result,
         "mcp_http",
         false,
         sourceTemplateKey,

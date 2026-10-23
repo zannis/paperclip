@@ -216,6 +216,9 @@ import {
   readMcpHttpResponse,
   mcpHttpRequestHeaders,
   parseMcpHttpResponseBody,
+  MCP_STATELESS_PROTOCOL_VERSION,
+  statelessMcpRequest,
+  usesStatelessMcpProtocol,
 } from "./mcp-http.js";
 import { buildRemoteHeaders } from "./tool-connection-headers.js";
 import {
@@ -7098,14 +7101,25 @@ export function toolAccessService(
     let listRequestId = "paperclip-catalog-refresh";
     let sessionHeaders = headers;
     const sendRemote = (init: RequestInit) => requestRemoteHttpEndpoint(new URL(endpoint), init);
+    // Servers on MCP 2026-07-28 have no initialize and need every request to
+    // carry the version. A connection that learned this skips the session flow.
+    let stateless = usesStatelessMcpProtocol(connection.config);
+    let learnedStateless = false;
     const sendToolsList = (requestHeaders: Record<string, string>, cursor?: string) => {
       sessionHeaders = requestHeaders;
+      const params = cursor ? { cursor } : {};
+      if (stateless) {
+        const request = statelessMcpRequest({ id: listRequestId, method: "tools/list", params, headers: requestHeaders });
+        return sendRemote({ method: "POST", headers: request.headers, body: request.body });
+      }
       return sendRemote({ method: "POST", headers: mcpHttpRequestHeaders(requestHeaders),
-        body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params: cursor ? { cursor } : {} }) });
+        body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params }) });
     };
-    let usedInitializedSession = connection.config.mcpSessionRequired === true;
+    let usedInitializedSession = !stateless && connection.config.mcpSessionRequired === true;
     let response: Response;
-    if (usedInitializedSession) {
+    if (stateless) {
+      response = await sendToolsList(headers);
+    } else if (usedInitializedSession) {
       try {
         sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
           scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
@@ -7146,7 +7160,24 @@ export function toolAccessService(
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);
     }
+    if (!stateless && response.status === 400) {
+      // Neither a plain request nor the initialize handshake was accepted. A
+      // 2026-07-28 server refuses both for lacking a version header, so try
+      // tools/list once in that form; it is read-only. If that fails too, the
+      // original 400 is reported as before.
+      stateless = true;
+      const probe = await sendToolsList(headers);
+      if (probe.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        response = probe;
+        learnedStateless = true;
+      } else {
+        await probe.body?.cancel().catch(() => undefined);
+        stateless = false;
+      }
+    }
     if (
+      !learnedStateless &&
       usedInitializedSession &&
       connection.config.mcpSessionRequired !== true
     ) {
@@ -7294,6 +7325,9 @@ export function toolAccessService(
       const record = asRecord(payload);
       if (record.error) throw new HttpError(502, "Remote MCP tool discovery failed", { code: "mcp_catalog_error" });
       const result = asRecord(record.result);
+      if (stateless && result.resultType !== undefined && result.resultType !== "complete") {
+        throw new HttpError(502, "Remote MCP did not complete tool discovery", { code: "mcp_catalog_incomplete" });
+      }
       if (!Array.isArray(result.tools)) throw new HttpError(502, "Remote MCP returned an invalid tool catalog", { code: "mcp_catalog_invalid" });
       descriptors.push(...result.tools.map((tool) => normalizeToolDescriptor(tool)).filter((tool): tool is McpToolDescriptor => Boolean(tool)));
       const cursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
@@ -7303,6 +7337,18 @@ export function toolAccessService(
       listRequestId = `paperclip-catalog-refresh-${page + 1}`;
       response = await sendToolsList(sessionHeaders, cursor);
       if (!response.ok) throw new HttpError(502, "Remote MCP catalog page could not be read", { status: response.status });
+    }
+    if (learnedStateless) {
+      // Stored only once a full, valid catalog came back in this form.
+      const current = await getConnectionRow(connection.id);
+      await db
+        .update(toolConnections)
+        .set({
+          config: { ...current.config, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION },
+          transportConfig: { ...current.transportConfig, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION },
+          updatedAt: now(),
+        })
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)));
     }
     if (!isRailwayConnection(connection)) return descriptors;
     if (descriptors.some((tool) => normalizeRailwayToolName(tool.name).startsWith(RAILWAY_TOOL_PREFIX))) {
@@ -7897,16 +7943,25 @@ export function toolAccessService(
       }
     }
 
+    // Discovery may have learned the protocol and stored it on the row after
+    // `connection` was read; keep it rather than writing the stale copy back.
+    const learnedProtocol = usesStatelessMcpProtocol(connection.config)
+      ? {}
+      : usesStatelessMcpProtocol((await getConnectionRow(connection.id)).config)
+      ? { mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION }
+      : {};
+    const baseConfig = { ...connection.config, ...learnedProtocol };
+    const baseTransportConfig = { ...connection.transportConfig, ...learnedProtocol };
     const normalizedConfig = isRailwayEndpoint(connection.config.url)
-      ? { ...connection.config, quarantineNewEntries: true }
+      ? { ...baseConfig, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
-      ? { ...connection.config, quarantineNewEntries: false }
-      : connection.config;
+      ? { ...baseConfig, quarantineNewEntries: false }
+      : baseConfig;
     const normalizedTransportConfig = isRailwayEndpoint(connection.config.url)
-      ? { ...connection.transportConfig, quarantineNewEntries: true }
+      ? { ...baseTransportConfig, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
-      ? { ...connection.transportConfig, quarantineNewEntries: false }
-      : connection.transportConfig;
+      ? { ...baseTransportConfig, quarantineNewEntries: false }
+      : baseTransportConfig;
     const [updatedConnection] = await db
       .update(toolConnections)
       .set({
@@ -18884,6 +18939,13 @@ export function toolAccessService(
         await assertRemoteConnectionEndpointsAllowed(config);
       if (existing.transport === "local_stdio")
         await stdioTemplateId(existing.companyId, config);
+      // A protocol learned from one server says nothing about another; the
+      // next catalog refresh learns it again if it still applies.
+      const forgetLearnedProtocol = (next: Record<string, unknown>) => {
+        if (next.url === existing.config.url || !("mcpProtocolVersion" in next)) return next;
+        const { mcpProtocolVersion: _forgotten, ...rest } = next;
+        return rest;
+      };
       assertLocalStdioCanBeEnabled(
         existing.transport,
         input.enabled ?? existing.enabled,
@@ -18903,10 +18965,10 @@ export function toolAccessService(
           status: input.status ?? existing.status,
           enabled: input.enabled ?? existing.enabled,
           ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
-          config,
-          transportConfig: isGoogleSheetsConnectionConfig(config)
+          config: forgetLearnedProtocol(config),
+          transportConfig: forgetLearnedProtocol(isGoogleSheetsConnectionConfig(config)
             ? config
-            : (input.transportConfig ?? config),
+            : (input.transportConfig ?? config)),
           credentialRefs: input.credentialRefs ?? existing.credentialRefs,
           credentialSecretRefs:
             input.credentialSecretRefs ?? existing.credentialSecretRefs,
