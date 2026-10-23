@@ -359,8 +359,13 @@ export function projectedConnectionToolInputSchema(
   );
 }
 
+/** The endpoint as configured, before parsing; see remoteEndpoint(). */
+export function configuredEndpoint(config: Record<string, unknown>): unknown {
+  return config.url ?? config.endpoint ?? config.remoteUrl;
+}
+
 export function remoteEndpoint(config: Record<string, unknown>): string {
-  const value = config.url ?? config.endpoint ?? config.remoteUrl;
+  const value = configuredEndpoint(config);
   const parsed = parseRemoteHttpEndpoint(value, (message, code) =>
     badRequest(message, { code }),
   );

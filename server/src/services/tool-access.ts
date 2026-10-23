@@ -59,7 +59,7 @@ import { createOAuthClientProtocol } from "./tool-access/oauth/client.js";
 
 import type { OAuthClientRegistrationSource } from "./tool-access/oauth/types.js";
 export { OAUTH_CLIENT_ID_METADATA_DOCUMENT_PATH, resolveOAuthClientIdMetadataDocumentUrl, oauthClientIdMetadataDocument } from "./tool-access/oauth/client-metadata.js";
-import { connectionMethodFor, connectionMethodForConnection, credentialFieldsFor, normalizeConnectionMethodConfig, projectedConnectionToolInputSchema } from "./tool-access/connection-methods.js";
+import { configuredEndpoint, connectionMethodFor, connectionMethodForConnection, credentialFieldsFor, normalizeConnectionMethodConfig, projectedConnectionToolInputSchema } from "./tool-access/connection-methods.js";
 export {
   normalizeConnectionMethodConfig,
   projectedConnectionHeaders,
@@ -4644,6 +4644,15 @@ export function toolAccessService(
         await assertRemoteConnectionEndpointsAllowed(config);
       if (existing.transport === "local_stdio")
         await stdioTemplateId(existing.companyId, config);
+      // A protocol learned from one server says nothing about another; the
+      // next catalog refresh learns it again if it still applies. The endpoint
+      // is resolved as remoteEndpoint() does, and decides for both configs.
+      const endpointChanged = configuredEndpoint(config) !== configuredEndpoint(existing.config);
+      const forgetLearnedProtocol = (next: Record<string, unknown>) => {
+        if (!endpointChanged || !("mcpProtocolVersion" in next)) return next;
+        const { mcpProtocolVersion: _forgotten, ...rest } = next;
+        return rest;
+      };
       assertLocalStdioCanBeEnabled(
         existing.transport,
         input.enabled ?? existing.enabled,
@@ -4663,10 +4672,10 @@ export function toolAccessService(
           status: input.status ?? existing.status,
           enabled: input.enabled ?? existing.enabled,
           ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
-          config,
-          transportConfig: isGoogleSheetsConnectionConfig(config)
+          config: forgetLearnedProtocol(config),
+          transportConfig: forgetLearnedProtocol(isGoogleSheetsConnectionConfig(config)
             ? config
-            : (input.transportConfig ?? config),
+            : (input.transportConfig ?? config)),
           credentialRefs: input.credentialRefs ?? existing.credentialRefs,
           credentialSecretRefs:
             input.credentialSecretRefs ?? existing.credentialSecretRefs,
