@@ -82,6 +82,21 @@ describe("probeRuntimeApiUrl", () => {
     });
   });
 
+  it("accepts the in-recovery health response served before startup reaches ready", async () => {
+    // `/api/health` answers `status: "starting"` until startup recovery is
+    // complete. The probe now runs inside that window — it has to, so the
+    // correction lands before the first run is dispatched — and routing is
+    // just as settled there as it is at "ok".
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ status: "starting", deploymentMode: "authenticated", commit: null }));
+
+    await expect(probeRuntimeApiUrl("http://127.0.0.1:3100", { fetchImpl: fetchImpl as any })).resolves.toEqual({
+      ok: true,
+      status: 200,
+    });
+  });
+
   it("rejects an unrelated service's health route that answers a generic JSON object", async () => {
     // Spawned runs send their bearer run token to whatever origin wins the
     // probe, so a bare `{"status":"ok"}` from some other service must not pass.

@@ -12,7 +12,8 @@
  * So probe the resolved URL once, at boot, as soon as the listener is up, and
  * fall back to an origin that does answer. The probe is a routing check, not a
  * health check: a Paperclip-shaped health response means the board API is on
- * the other end, including a `503 unhealthy` one.
+ * the other end, including a `503 unhealthy` one or the `starting` one the
+ * route serves while startup recovery is still running.
  *
  * A spawned run attaches its bearer run token to whatever origin wins, so the
  * two candidates are not interchangeable and the check is deliberately narrow:
@@ -45,7 +46,18 @@ const DEFAULT_PROBE_TIMEOUT_MS = 2_000;
 // `application/json`, plus structured suffixes such as `application/problem+json`.
 const JSON_CONTENT_TYPE_RE = /^application\/(?:[\w.+-]+\+)?json\b/i;
 
-const HEALTH_STATUS_VALUES = new Set(["ok", "unhealthy"]);
+/**
+ * Every `status` Paperclip's `/api/health` can report.
+ *
+ * `starting` is on this list because the probe runs inside the startup-recovery
+ * window — it has to, so the correction is in `process.env` before the boot's
+ * first run is spawned — and the route reports `starting` until recovery
+ * finishes. Routing is what this check decides, and routing is as settled at
+ * `starting` as it is at `ok`: the same express app is answering on the same
+ * socket either way. Leaving `starting` off the list made the probe reject both
+ * candidates on every boot and keep an unverified base.
+ */
+const HEALTH_STATUS_VALUES = new Set(["ok", "starting", "unhealthy"]);
 /**
  * Fields that only Paperclip's own `/api/health` serves. Every response variant
  * of that route carries at least one: `deploymentMode` on the redacted
