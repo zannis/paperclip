@@ -5893,6 +5893,39 @@ describeEmbeddedPostgres("tool access service", () => {
       expect(moved.transportConfig).not.toHaveProperty("mcpProtocolVersion");
     });
 
+    it("reports the auth failure the probe got instead of the legacy 400", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      // Checks the version before the credential, as a 2026-07-28 server may.
+      statelessServer({ probeReply: () => new Response(null, { status: 403 }) });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" }))
+        .rejects.toThrow("Remote app returned HTTP 403");
+      expect((await service.getConnection(connection.id)).config).not.toHaveProperty("mcpProtocolVersion");
+    });
+
+    it("decides from the resolved endpoint, the same way for config and transportConfig", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      const byUrl = await createStatelessConnection(service, company.id, { mcpProtocolVersion: "2026-07-28" });
+      const kept = await service.updateConnection(byUrl.id, {
+        config: { ...byUrl.config, name: "renamed" },
+        transportConfig: { mcpProtocolVersion: "2026-07-28", quarantineNewEntries: true },
+      });
+      expect(kept.config).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+      expect(kept.transportConfig).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+
+      const byEndpoint = await service.createConnection(company.id, {
+        name: "CRM by endpoint", transport: "mcp_remote", enabled: true, status: "active",
+        config: { endpoint: "https://crm.example/api/v1/Mcp/agents", mcpProtocolVersion: "2026-07-28" },
+      });
+      const moved = await service.updateConnection(byEndpoint.id, {
+        config: { ...byEndpoint.config, endpoint: "https://crm2.example/api/v1/Mcp/agents" },
+      });
+      expect(moved.config).not.toHaveProperty("mcpProtocolVersion");
+      expect(moved.transportConfig).not.toHaveProperty("mcpProtocolVersion");
+    });
+
     it("learns the protocol after a credential refresh, using the fresh credential", async () => {
       const company = await createCompany(db);
       const vercelConnectClient: VercelConnectClient = {

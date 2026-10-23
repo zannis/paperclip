@@ -7237,14 +7237,18 @@ export function toolAccessService(
       // Neither a plain request nor the initialize handshake was accepted. A
       // 2026-07-28 server refuses both for lacking a version header, so try
       // tools/list once in that form; it is read-only. It runs after the
-      // credential refreshes above so it carries the current credential. If
-      // it fails too, the original 400 is reported as before.
+      // credential refreshes above so it carries the current credential. A
+      // 401 or 403 is the server's real answer once it reads the version, so
+      // it is reported in place of the 400; any other failure keeps the 400.
       stateless = true;
       const probe = await sendToolsList(headers);
       if (probe.ok) {
         await response.body?.cancel().catch(() => undefined);
         response = probe;
         learnedStateless = true;
+      } else if (probe.status === 401 || probe.status === 403) {
+        await response.body?.cancel().catch(() => undefined);
+        response = probe;
       } else {
         await probe.body?.cancel().catch(() => undefined);
         stateless = false;
@@ -18940,9 +18944,12 @@ export function toolAccessService(
       if (existing.transport === "local_stdio")
         await stdioTemplateId(existing.companyId, config);
       // A protocol learned from one server says nothing about another; the
-      // next catalog refresh learns it again if it still applies.
+      // next catalog refresh learns it again if it still applies. The endpoint
+      // is resolved as remoteEndpoint() does, and decides for both configs.
+      const endpointOf = (value: Record<string, unknown>) => value.url ?? value.endpoint ?? value.remoteUrl;
+      const endpointChanged = endpointOf(config) !== endpointOf(existing.config);
       const forgetLearnedProtocol = (next: Record<string, unknown>) => {
-        if (next.url === existing.config.url || !("mcpProtocolVersion" in next)) return next;
+        if (!endpointChanged || !("mcpProtocolVersion" in next)) return next;
         const { mcpProtocolVersion: _forgotten, ...rest } = next;
         return rest;
       };
