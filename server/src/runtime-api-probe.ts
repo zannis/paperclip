@@ -54,8 +54,9 @@ const JSON_CONTENT_TYPE_RE = /^application\/(?:[\w.+-]+\+)?json\b/i;
  * first run is spawned — and the route reports `starting` until recovery
  * finishes. Routing is what this check decides, and routing is as settled at
  * `starting` as it is at `ok`: the same express app is answering on the same
- * socket either way. Leaving `starting` off the list made the probe reject both
- * candidates on every boot and keep an unverified base.
+ * socket either way. Leaving `starting` off the list was invisible only while
+ * the probe ran after the phase reached `ready`; from inside the window it
+ * rejects both candidates on every boot and keeps an unverified base.
  */
 const HEALTH_STATUS_VALUES = new Set(["ok", "starting", "unhealthy"]);
 /**
