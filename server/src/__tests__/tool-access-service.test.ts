@@ -5776,6 +5776,281 @@ describeEmbeddedPostgres("tool access service", () => {
     ).toBe(requests.filter(({ method }) => method === "initialize").length);
   });
 
+  describe("servers that speak only MCP 2026-07-28", () => {
+    type SeenRequest = { method: string; version: string | null; mcpMethod: string | null; metaVersion: unknown };
+    // Mirrors EspoCRM ext-mcp: no initialize, the version header is required,
+    // plain JSON replies with resultType. `strict` adds the checks Paperclip's
+    // own 2026-07-28 server makes on Mcp-Method and params._meta.
+    function statelessServer(opts: { strict?: boolean; probeReply?: () => Response } = {}) {
+      const requests: SeenRequest[] = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        const payload = JSON.parse(String(init?.body ?? "{}")) as {
+          method?: string; id?: string; params?: { _meta?: Record<string, unknown> };
+        };
+        const headers = new Headers(init?.headers);
+        const version = headers.get("mcp-protocol-version");
+        const metaVersion = payload.params?._meta?.["io.modelcontextprotocol/protocolVersion"];
+        requests.push({ method: payload.method ?? "", version, mcpMethod: headers.get("mcp-method"), metaVersion });
+        const refuse = (code: number, message: string) => new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: payload.id ?? null, error: { code, message } }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+        if (!version) return refuse(-32020, "No MCP-Protocol-Version header.");
+        if (version !== "2026-07-28") return refuse(-32022, "Unsupported protocol version.");
+        if (opts.strict && (headers.get("mcp-method") !== payload.method || metaVersion !== version)) {
+          return refuse(-32020, "MCP headers must match the request body.");
+        }
+        if (opts.probeReply) return opts.probeReply();
+        if (payload.method !== "tools/list") return refuse(-32601, "Method not found.");
+        return mcpHttpResponse({
+          jsonrpc: "2.0",
+          id: payload.id,
+          result: {
+            resultType: "complete",
+            ttlMs: 60000,
+            tools: [
+              { name: "find_Account", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+              { name: "create_Account", inputSchema: { type: "object", properties: { name: { type: "string" } } }, annotations: { readOnlyHint: false } },
+            ],
+          },
+        });
+      });
+      return requests;
+    }
+
+    async function createStatelessConnection(service: ReturnType<typeof createTestToolAccessService>, companyId: string, config: Record<string, unknown> = {}) {
+      return service.createConnection(companyId, {
+        name: "CRM",
+        transport: "mcp_remote",
+        config: { url: "https://crm.example/api/v1/Mcp/agents", ...config },
+        enabled: true,
+        status: "active",
+      });
+    }
+
+    it("learns the protocol on the first refresh and goes straight to it afterwards", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      const requests = statelessServer();
+      const connection = await createStatelessConnection(service, company.id);
+
+      const first = await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect(first.catalog.map((entry) => entry.toolName).sort()).toEqual(["create_Account", "find_Account"]);
+      const stored = await service.getConnection(connection.id);
+      expect(stored.config).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+      expect(stored.config).not.toHaveProperty("mcpSessionRequired");
+      // Today's flow runs first and unchanged: tools/list, then initialize.
+      expect(requests[0]).toMatchObject({ method: "tools/list", version: null });
+      expect(requests.at(-1)).toMatchObject({ method: "tools/list", version: "2026-07-28", mcpMethod: "tools/list", metaVersion: "2026-07-28" });
+
+      requests.length = 0;
+      await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect(requests).toEqual([{ method: "tools/list", version: "2026-07-28", mcpMethod: "tools/list", metaVersion: "2026-07-28" }]);
+    });
+
+    it("satisfies a server that also checks the method header and per-request metadata", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      statelessServer({ strict: true });
+      const connection = await createStatelessConnection(service, company.id);
+      const refresh = await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect(refresh.catalog).toHaveLength(2);
+    });
+
+    it("does not learn the protocol from a probe that answers with a JSON-RPC error", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      statelessServer({
+        probeReply: () => mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", error: { code: -32603, message: "broken" } }),
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" })).rejects.toThrow();
+      expect((await service.getConnection(connection.id)).config).not.toHaveProperty("mcpProtocolVersion");
+    });
+
+    it.each([401, 403, 404, 500])("never probes when the legacy flow fails with HTTP %i", async (status) => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      const versions: Array<string | null> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        versions.push(new Headers(init?.headers).get("mcp-protocol-version"));
+        return new Response("{}", { status, headers: { "content-type": "application/json" } });
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" })).rejects.toThrow();
+      expect(versions).not.toContain("2026-07-28");
+    });
+
+    it("probes a legacy server that answers 400 once, and keeps its 400", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      const versions: Array<string | null> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        versions.push(new Headers(init?.headers).get("mcp-protocol-version"));
+        return new Response("{}", { status: 400, headers: { "content-type": "application/json" } });
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" })).rejects.toThrow("Remote app returned HTTP 400");
+      expect(versions.filter((version) => version === "2026-07-28")).toHaveLength(1);
+    });
+
+    it("keeps the legacy 400 when the probe cannot reach the server", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        if (new Headers(init?.headers).get("mcp-protocol-version") === "2026-07-28") throw new TypeError("fetch failed");
+        return new Response("{}", { status: 400, headers: { "content-type": "application/json" } });
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" })).rejects.toThrow("Remote app returned HTTP 400");
+    });
+
+    it("forgets the learned protocol when the server URL changes", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      statelessServer();
+      const connection = await createStatelessConnection(service, company.id, { mcpProtocolVersion: "2026-07-28" });
+      const sameUrl = await service.updateConnection(connection.id, { config: { ...connection.config, name: "renamed" } });
+      expect(sameUrl.config).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+      const moved = await service.updateConnection(connection.id, { config: { ...sameUrl.config, url: "https://crm2.example/api/v1/Mcp/agents" } });
+      expect(moved.config).not.toHaveProperty("mcpProtocolVersion");
+      expect(moved.transportConfig).not.toHaveProperty("mcpProtocolVersion");
+    });
+
+    it("reports the auth failure the probe got instead of the legacy 400", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      // Checks the version before the credential, as a 2026-07-28 server may.
+      statelessServer({ probeReply: () => new Response(null, { status: 403 }) });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" }))
+        .rejects.toThrow("Remote app returned HTTP 403");
+      expect((await service.getConnection(connection.id)).config).not.toHaveProperty("mcpProtocolVersion");
+    });
+
+    it("decides from the resolved endpoint, the same way for config and transportConfig", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      const byUrl = await createStatelessConnection(service, company.id, { mcpProtocolVersion: "2026-07-28" });
+      const kept = await service.updateConnection(byUrl.id, {
+        config: { ...byUrl.config, name: "renamed" },
+        transportConfig: { mcpProtocolVersion: "2026-07-28", quarantineNewEntries: true },
+      });
+      expect(kept.config).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+      expect(kept.transportConfig).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+
+      const byEndpoint = await service.createConnection(company.id, {
+        name: "CRM by endpoint", transport: "mcp_remote", enabled: true, status: "active",
+        config: { endpoint: "https://crm.example/api/v1/Mcp/agents", mcpProtocolVersion: "2026-07-28" },
+      });
+      const moved = await service.updateConnection(byEndpoint.id, {
+        config: { ...byEndpoint.config, endpoint: "https://crm2.example/api/v1/Mcp/agents" },
+      });
+      expect(moved.config).not.toHaveProperty("mcpProtocolVersion");
+      expect(moved.transportConfig).not.toHaveProperty("mcpProtocolVersion");
+    });
+
+    // A connection whose credential comes from Vercel Connect: the first
+    // token is "stale" and a forced refresh yields "fresh".
+    async function refreshingStatelessConnection(companyId: string) {
+      const vercelConnectClient: VercelConnectClient = {
+        getConnectorMetadata: vi.fn(),
+        getToken: vi.fn<VercelConnectClient["getToken"]>(async (_request, options) => ({
+          token: options?.forceRefresh ? "fresh" : "stale", tokenId: "stk", expiresAt: Date.now() + 60_000,
+          connector: { id: "scl_crm", uid: "crm", type: "api-key" },
+        })),
+        startAuthorization: vi.fn(),
+        revoke: vi.fn(),
+        evict: vi.fn(),
+      };
+      const service = createTestToolAccessService(db, { vercelConnectClient });
+      const connection = await createStatelessConnection(service, companyId);
+      await db.update(toolConnections).set({
+        credentialSource: "vercel_connect",
+        externalCredential: {
+          provider: "vercel_connect", connectorId: "scl_crm", connectorUid: "crm", service: "crm", connectorType: "api-key",
+          principalMode: "app", headerName: "Authorization", headerPrefix: "Bearer ", scopes: ["*"],
+        },
+        credentialRefs: [],
+        credentialSecretRefs: [],
+      }).where(eq(toolConnections.id, connection.id));
+      await db.update(connectionGrants).set({ externalCredential: { provider: "vercel_connect", subjectType: "app" }, credentialSecretRefs: [] })
+        .where(eq(connectionGrants.connectionId, connection.id));
+      return { service, connection };
+    }
+
+    it.each([
+      ["the credential before the version", false],
+      ["the version before the credential", true],
+    ])("learns the protocol after a credential refresh from a server that checks %s", async (_label, versionFirst) => {
+      const company = await createCompany(db);
+      const { service, connection } = await refreshingStatelessConnection(company.id);
+      const seen: Array<[string | null, string | null]> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        const headers = new Headers(init?.headers);
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { id?: string };
+        seen.push([headers.get("authorization"), headers.get("mcp-protocol-version")]);
+        const badVersion = headers.get("mcp-protocol-version") !== "2026-07-28";
+        const badCredential = headers.get("authorization") !== "Bearer fresh";
+        const refuseVersion = () => new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: payload.id ?? null, error: { code: -32020, message: "No MCP-Protocol-Version header." } }),
+          { status: 400, headers: { "content-type": "application/json" } });
+        if (versionFirst ? badVersion : badCredential) return versionFirst ? refuseVersion() : new Response(null, { status: 401 });
+        if (badVersion) return refuseVersion();
+        if (badCredential) return new Response(null, { status: 401 });
+        return mcpHttpResponse({ jsonrpc: "2.0", id: payload.id, result: { resultType: "complete", tools: [{ name: "find_Account", inputSchema: { type: "object" } }] } });
+      });
+
+      const refresh = await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect(refresh.catalog.map((entry) => entry.toolName)).toEqual(["find_Account"]);
+      expect(seen.at(-1)).toEqual(["Bearer fresh", "2026-07-28"]);
+      expect((await service.getConnection(connection.id)).config).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+    });
+
+    it("recognises an insufficient-scope answer to the probe", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      statelessServer({
+        probeReply: () => new Response(null, { status: 403, headers: { "www-authenticate": 'Bearer error="insufficient_scope", scope="crm"' } }),
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" }))
+        .rejects.toMatchObject({ details: { code: "oauth_insufficient_scope" } });
+    });
+
+    it("lists the tools when the catalog carries a result type other than input_required", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      statelessServer({
+        probeReply: () => mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { resultType: "cached", tools: [{ name: "find_Account", inputSchema: { type: "object" } }] } }),
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      const refresh = await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect(refresh.catalog.map((entry) => entry.toolName)).toEqual(["find_Account"]);
+    });
+
+    it("does not store the protocol on a connection whose endpoint moved during the refresh", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      let connectionId = "";
+      statelessServer({
+        probeReply: () => mcpHttpResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { resultType: "complete", tools: [{ name: "find_Account", inputSchema: { type: "object" } }] } }),
+      });
+      const fetchMock = vi.mocked(globalThis.fetch);
+      const answer = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (url, init) => {
+        if (new Headers(init?.headers).get("mcp-protocol-version") === "2026-07-28") {
+          await service.updateConnection(connectionId, { config: { url: "https://crm2.example/api/v1/Mcp/agents" } });
+        }
+        return answer(url, init);
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      connectionId = connection.id;
+      await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect((await service.getConnection(connection.id)).config).not.toHaveProperty("mcpProtocolVersion");
+    });
+  });
+
   it("serves persisted MCP actions until the cache expires and then refreshes them", async () => {
     const company = await createCompany(db);
     let currentTime = new Date("2026-08-20T12:00:00.000Z");

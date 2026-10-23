@@ -1341,6 +1341,206 @@ describeEmbeddedPostgres("tool gateway service", () => {
     ]);
   });
 
+  describe("servers that speak only MCP 2026-07-28", () => {
+    type Seen = { method: string; version: string | null; mcpMethod: string | null; mcpName: string | null; session: string | null; meta: unknown };
+    async function statelessFixture(reply: (payload: { id?: string }) => Response) {
+      const { company, agent, run } = await createRunFixture(db);
+      const { connection } = await createRemoteMcpToolFixture(db, company.id);
+      await db.update(toolConnections).set({
+        config: { url: "https://example.invalid/api/v1/Mcp/agents", mcpProtocolVersion: "2026-07-28", mcpSessionRequired: true },
+      }).where(eq(toolConnections.id, connection.id));
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Allow read tools", policyType: "allow", selectors: { riskLevel: "read" } });
+      const seen: Seen[] = [];
+      const gateway = createTestToolGatewayService(db, {
+        remoteHttpRequest: async (_url, init) => {
+          const payload = JSON.parse(String(init.body)) as { method?: string; id?: string; params?: { _meta?: unknown } };
+          const headers = new Headers(init.headers);
+          seen.push({
+            method: payload.method ?? "",
+            version: headers.get("mcp-protocol-version"),
+            mcpMethod: headers.get("mcp-method"),
+            mcpName: headers.get("mcp-name"),
+            session: headers.get("mcp-session-id"),
+            meta: payload.params?._meta,
+          });
+          if (headers.get("mcp-protocol-version") !== "2026-07-28") {
+            return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id ?? null, error: { code: -32020, message: "No MCP-Protocol-Version header." } }),
+              { status: 400, headers: { "content-type": "application/json" } });
+          }
+          return reply(payload);
+        },
+      });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const tool = (await gateway.listToolsForSession(session.token)).find((candidate) => candidate.providerType === "mcp_remote_http");
+      const execute = () => gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} });
+      const health = async () => (await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id)))[0]?.healthStatus;
+      // Marks the last health check so a test can tell whether a call wrote a new one.
+      const markEarlierCheck = () => db.update(toolConnections).set({ healthMessage: "earlier check" })
+        .where(eq(toolConnections.id, connection.id));
+      const healthMessage = async () => (await db.select().from(toolConnections).where(eq(toolConnections.id, connection.id)))[0]?.healthMessage;
+      return { seen, execute, health, markEarlierCheck, healthMessage };
+    }
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+    it("calls the tool in one stateless request and gives the agent its structured result", async () => {
+      const { seen, execute } = await statelessFixture((payload) => json({
+        jsonrpc: "2.0", id: payload.id,
+        result: { resultType: "complete", content: [], structuredContent: { total: 1, list: [{ id: "acc-1", name: "Acme" }] } },
+      }));
+      const result = await execute();
+      expect(result.status).toBe("completed");
+      expect(seen).toEqual([{
+        method: "tools/call", version: "2026-07-28", mcpMethod: "tools/call", mcpName: "needs_input", session: null,
+        meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientCapabilities": {},
+          "io.modelcontextprotocol/clientInfo": { name: "paperclip", version: "1" },
+        },
+      }]);
+      expect(JSON.stringify(result)).toContain("Acme");
+      expect((result as { result?: { content?: unknown } }).result?.content).toContain("acc-1");
+    });
+
+    it("gives the agent the server's message for an error result with no text content", async () => {
+      const { execute } = await statelessFixture((payload) => json({
+        jsonrpc: "2.0", id: payload.id,
+        result: { resultType: "complete", content: [], isError: true, structuredContent: { error: { code: 400, message: "Validation error. Problem field: `name`." } } },
+      }));
+      await expect(execute()).rejects.toMatchObject({ reasonCode: "tool_error", message: expect.stringContaining("Problem field: `name`") });
+    });
+
+    it("redacts secrets in a structured result the same way as text content", async () => {
+      const { execute } = await statelessFixture((payload) => json({
+        jsonrpc: "2.0", id: payload.id,
+        result: { resultType: "complete", content: [], structuredContent: { name: "Acme", password: "hunter2-very-secret" } },
+      }));
+      const result = await execute();
+      expect(JSON.stringify(result)).not.toContain("hunter2-very-secret");
+    });
+
+    it("reports a call the server did not complete as an error, keeping the connection healthy", async () => {
+      const { execute, health } = await statelessFixture((payload) => json({
+        jsonrpc: "2.0", id: payload.id,
+        result: {
+          resultType: "input_required",
+          content: [{ type: "resource_link", uri: "https://crm.example/#Account/view/acc-1", name: "Acme" }],
+          inputRequests: { confirmDuplicate: { method: "elicitation/create", params: { message: "The record might be a duplicate. Proceed anyway?" } } },
+        },
+      }));
+      await expect(execute()).rejects.toMatchObject({
+        reasonCode: "tool_error",
+        message: expect.stringContaining("The record might be a duplicate. Proceed anyway?"),
+      });
+      expect(await health()).toBe("ok");
+    });
+
+    it("passes JSON-RPC error -32602 to the agent and keeps the connection healthy", async () => {
+      const { execute, health, markEarlierCheck, healthMessage } = await statelessFixture((payload) => json({
+        jsonrpc: "2.0", id: payload.id, error: { code: -32602, message: "Tool `needs_input` is inactivated.", data: { field: "name" } },
+      }));
+      await markEarlierCheck();
+      await expect(execute()).rejects.toMatchObject({ reasonCode: "tool_error", message: expect.stringContaining("is inactivated") });
+      expect(await health()).toBe("ok");
+      expect(await healthMessage()).toBe("Remote MCP server responded to tools/call.");
+    });
+
+    it("passes JSON-RPC error -32603 to the agent without claiming the connection is healthy", async () => {
+      // ext-mcp uses -32603 for some bad arguments too ("No `id' provided"),
+      // so the agent gets the message, but an internal error is no proof the
+      // server is well: its health is left as it was.
+      const { execute, health, markEarlierCheck, healthMessage } = await statelessFixture((payload) => json({
+        jsonrpc: "2.0", id: payload.id, error: { code: -32603, message: "No `id' provided." },
+      }));
+      await markEarlierCheck();
+      await expect(execute()).rejects.toMatchObject({ reasonCode: "tool_error", message: expect.stringContaining("No `id' provided.") });
+      expect(await health()).toBe("ok");
+      expect(await healthMessage()).toBe("earlier check");
+    });
+
+    it("treats resultType from a server on an older protocol as an ordinary field", async () => {
+      const { company, agent, run } = await createRunFixture(db);
+      await createRemoteMcpToolFixture(db, company.id);
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Allow reads", policyType: "allow", selectors: { riskLevel: "read" } });
+      const gateway = createTestToolGatewayService(db, {
+        remoteHttpRequest: async (_url, init) => {
+          const body = JSON.parse(String(init.body)) as { id: string };
+          return json({ jsonrpc: "2.0", id: body.id, result: { resultType: "partial", content: [{ type: "text", text: "page one of two" }] } });
+        },
+      });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const tool = (await gateway.listToolsForSession(session.token)).find((candidate) => candidate.providerType === "mcp_remote_http");
+      const result = await gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} });
+      expect(result.status).toBe("completed");
+      expect(JSON.stringify(result)).toContain("page one of two");
+    });
+
+    // A stateless connection whose credential comes from Vercel Connect: the
+    // first token is "stale" and a forced refresh yields "fresh".
+    async function refreshingStatelessFixture(remoteHttpRequest: (init: RequestInit) => Promise<Response>) {
+      const { company, agent, run } = await createRunFixture(db);
+      const { connection } = await createRemoteMcpToolFixture(db, company.id);
+      await db.update(toolConnections).set({
+        config: { ...connection.config, mcpProtocolVersion: "2026-07-28" },
+        credentialSource: "vercel_connect",
+        externalCredential: {
+          provider: "vercel_connect", connectorId: "scl_crm", connectorUid: "crm", service: "crm", connectorType: "api-key",
+          principalMode: "app", headerName: "Authorization", headerPrefix: "Bearer ", scopes: ["*"],
+        },
+        credentialRefs: [],
+        credentialSecretRefs: [],
+      }).where(eq(toolConnections.id, connection.id));
+      await db.update(connectionGrants).set({ externalCredential: { provider: "vercel_connect", subjectType: "app" }, credentialSecretRefs: [] })
+        .where(eq(connectionGrants.connectionId, connection.id));
+      await db.insert(toolPolicies).values({ companyId: company.id, name: "Allow reads", policyType: "allow", selectors: { riskLevel: "read" } });
+      const vercelConnectClient: VercelConnectClient = {
+        getConnectorMetadata: vi.fn(),
+        getToken: vi.fn<VercelConnectClient["getToken"]>(async (_request, options) => ({
+          token: options?.forceRefresh ? "fresh" : "stale", tokenId: "stk", expiresAt: Date.now() + 60_000,
+          connector: { id: "scl_crm", uid: "crm", type: "api-key" },
+        })),
+        startAuthorization: vi.fn(),
+        revoke: vi.fn(),
+        evict: vi.fn(),
+      };
+      const gateway = createTestToolGatewayService(db, { vercelConnectClient, remoteHttpRequest: async (_url, init) => remoteHttpRequest(init) });
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const tool = (await gateway.listToolsForSession(session.token)).find((candidate) => candidate.providerType === "mcp_remote_http");
+      return () => gateway.executeTool({ sessionToken: session.token, tool: tool!.name, parameters: {} });
+    }
+
+    it("keeps the protocol headers when it retries after a 401", async () => {
+      const versions: Array<[string | null, string | null]> = [];
+      const execute = await refreshingStatelessFixture(async (init) => {
+        const headers = new Headers(init.headers);
+        versions.push([headers.get("mcp-protocol-version"), headers.get("mcp-method")]);
+        if (versions.length === 1) return new Response(null, { status: 401 });
+        const body = JSON.parse(String(init.body)) as { id: string };
+        return json({ jsonrpc: "2.0", id: body.id, result: { resultType: "complete", content: [{ type: "text", text: "ok" }] } });
+      });
+      const result = await execute();
+      expect(result.status).toBe("completed");
+      expect(versions).toEqual([["2026-07-28", "tools/call"], ["2026-07-28", "tools/call"]]);
+    });
+
+    it("cancels a provider interaction with the refreshed credential", async () => {
+      const seen: Array<{ authorization: string | null; body: { id?: unknown; result?: unknown } }> = [];
+      const execute = await refreshingStatelessFixture(async (init) => {
+        const body = JSON.parse(String(init.body)) as { id?: unknown; result?: unknown };
+        seen.push({ authorization: new Headers(init.headers).get("authorization"), body });
+        if (seen.length === 1) return new Response(null, { status: 401 });
+        if (seen.length > 2) return new Response(null, { status: 202 });
+        const elicitation = {
+          jsonrpc: "2.0", id: "server-request-1", method: "elicitation/create",
+          params: { mode: "url", elicitationId: "elicit-1", url: "https://auth.example.com/approve", message: "Approve access." },
+        };
+        return new Response(`event: message\ndata: ${JSON.stringify(elicitation)}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+      });
+      await expect(execute()).rejects.toMatchObject({ reasonCode: "provider_interaction_required" });
+      const cancel = seen.find((request) => request.body.id === "server-request-1");
+      expect(cancel).toMatchObject({ authorization: "Bearer fresh", body: { result: { action: "cancel" } } });
+    });
+  });
+
   it("hides cached Chat unread filters and blocks agent and board requests before provider dispatch", async () => {
     const { company, agent, run } = await createRunFixture(db);
     const { connection, catalogEntry } = await createRemoteMcpToolFixture(db, company.id);

@@ -216,6 +216,9 @@ import {
   readMcpHttpResponse,
   mcpHttpRequestHeaders,
   parseMcpHttpResponseBody,
+  MCP_STATELESS_PROTOCOL_VERSION,
+  statelessMcpRequest,
+  usesStatelessMcpProtocol,
 } from "./mcp-http.js";
 import { buildRemoteHeaders } from "./tool-connection-headers.js";
 import {
@@ -3013,8 +3016,13 @@ function sanitizeHttpFailure(error: unknown): {
   };
 }
 
+/** The endpoint as configured, before parsing; see remoteEndpoint(). */
+function configuredEndpoint(config: Record<string, unknown>): unknown {
+  return config.url ?? config.endpoint ?? config.remoteUrl;
+}
+
 function remoteEndpoint(config: Record<string, unknown>): string {
-  const value = config.url ?? config.endpoint ?? config.remoteUrl;
+  const value = configuredEndpoint(config);
   const parsed = parseRemoteHttpEndpoint(value, (message, code) =>
     badRequest(message, { code }),
   );
@@ -7098,14 +7106,25 @@ export function toolAccessService(
     let listRequestId = "paperclip-catalog-refresh";
     let sessionHeaders = headers;
     const sendRemote = (init: RequestInit) => requestRemoteHttpEndpoint(new URL(endpoint), init);
+    // Servers on MCP 2026-07-28 have no initialize and need every request to
+    // carry the version. A connection that learned this skips the session flow.
+    const startedStateless = usesStatelessMcpProtocol(connection.config);
+    let stateless = startedStateless;
     const sendToolsList = (requestHeaders: Record<string, string>, cursor?: string) => {
       sessionHeaders = requestHeaders;
+      const params = cursor ? { cursor } : {};
+      if (stateless) {
+        const request = statelessMcpRequest({ id: listRequestId, method: "tools/list", params, headers: requestHeaders });
+        return sendRemote({ method: "POST", headers: request.headers, body: request.body });
+      }
       return sendRemote({ method: "POST", headers: mcpHttpRequestHeaders(requestHeaders),
-        body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params: cursor ? { cursor } : {} }) });
+        body: JSON.stringify({ jsonrpc: "2.0", id: listRequestId, method: "tools/list", params }) });
     };
-    let usedInitializedSession = connection.config.mcpSessionRequired === true;
+    let usedInitializedSession = !stateless && connection.config.mcpSessionRequired === true;
     let response: Response;
-    if (usedInitializedSession) {
+    if (stateless) {
+      response = await sendToolsList(headers);
+    } else if (usedInitializedSession) {
       try {
         sessionHeaders = await getMcpHttpSession({ send: sendRemote, headers,
           scope: `${connection.id}:catalog:${actor?.actorType}:${actor?.actorId}:${endpoint}`,
@@ -7146,7 +7165,36 @@ export function toolAccessService(
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);
     }
+    // Neither a plain request nor the initialize handshake was accepted. A
+    // 2026-07-28 server refuses both with 400 for lacking a version header, so
+    // try tools/list once in that form; it is read-only. Success keeps the
+    // mode. Before the credential refreshes below, so does a 401 or 403: the
+    // server read the version and now judges the credential, and the
+    // refreshes and scope check run in this mode. Any other answer, or no
+    // answer at all, keeps the original 400, as before. A refresh probes at
+    // most once: the first call runs after a 400 and the credential
+    // refreshes only after a 401, so only one of the two calls can fire.
+    let probed = false;
+    const probeStateless = async (keepOnAuthFailure: boolean) => {
+      if (stateless || probed || response.status !== 400) return;
+      probed = true;
+      stateless = true;
+      const probe = await sendToolsList(headers).catch(() => null);
+      if (!probe) {
+        stateless = false;
+        return;
+      }
+      if (probe.ok || (keepOnAuthFailure && (probe.status === 401 || probe.status === 403))) {
+        await response.body?.cancel().catch(() => undefined);
+        response = probe;
+        return;
+      }
+      await probe.body?.cancel().catch(() => undefined);
+      stateless = false;
+    };
+    await probeStateless(true);
     if (
+      !stateless &&
       usedInitializedSession &&
       connection.config.mcpSessionRequired !== true
     ) {
@@ -7219,6 +7267,9 @@ export function toolAccessService(
         }
       }
     }
+    // A server that judges the credential first only shows the version
+    // problem once a refreshed credential is accepted.
+    await probeStateless(false);
     if (!response.ok) {
       if ((response.status === 401 || response.status === 403)
         && connection.authKind === "api_key" && isMemoryConnectorId(connection.config.sourceTemplateKey)) {
@@ -7294,6 +7345,9 @@ export function toolAccessService(
       const record = asRecord(payload);
       if (record.error) throw new HttpError(502, "Remote MCP tool discovery failed", { code: "mcp_catalog_error" });
       const result = asRecord(record.result);
+      if (stateless && result.resultType === "input_required") {
+        throw new HttpError(502, "Remote MCP did not complete tool discovery", { code: "mcp_catalog_incomplete" });
+      }
       if (!Array.isArray(result.tools)) throw new HttpError(502, "Remote MCP returned an invalid tool catalog", { code: "mcp_catalog_invalid" });
       descriptors.push(...result.tools.map((tool) => normalizeToolDescriptor(tool)).filter((tool): tool is McpToolDescriptor => Boolean(tool)));
       const cursor = typeof result.nextCursor === "string" ? result.nextCursor : null;
@@ -7303,6 +7357,23 @@ export function toolAccessService(
       listRequestId = `paperclip-catalog-refresh-${page + 1}`;
       response = await sendToolsList(sessionHeaders, cursor);
       if (!response.ok) throw new HttpError(502, "Remote MCP catalog page could not be read", { status: response.status });
+    }
+    const current = stateless && !startedStateless ? await getConnectionRow(connection.id) : null;
+    // Stored only once a full, valid catalog came back in this form, and only
+    // while the row still points at the server that gave it.
+    if (current && configuredEndpoint(current.config) === configuredEndpoint(connection.config)) {
+      await db
+        .update(toolConnections)
+        .set({
+          config: { ...current.config, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION },
+          transportConfig: { ...current.transportConfig, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION },
+          updatedAt: now(),
+        })
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)));
+      // Later writes from this connection object (Railway's below, the caller's
+      // catalog refresh) start from it, so they keep what was learned.
+      connection.config = { ...connection.config, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION };
+      connection.transportConfig = { ...connection.transportConfig, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION };
     }
     if (!isRailwayConnection(connection)) return descriptors;
     if (descriptors.some((tool) => normalizeRailwayToolName(tool.name).startsWith(RAILWAY_TOOL_PREFIX))) {
@@ -18884,6 +18955,15 @@ export function toolAccessService(
         await assertRemoteConnectionEndpointsAllowed(config);
       if (existing.transport === "local_stdio")
         await stdioTemplateId(existing.companyId, config);
+      // A protocol learned from one server says nothing about another; the
+      // next catalog refresh learns it again if it still applies. The endpoint
+      // is resolved as remoteEndpoint() does, and decides for both configs.
+      const endpointChanged = configuredEndpoint(config) !== configuredEndpoint(existing.config);
+      const forgetLearnedProtocol = (next: Record<string, unknown>) => {
+        if (!endpointChanged || !("mcpProtocolVersion" in next)) return next;
+        const { mcpProtocolVersion: _forgotten, ...rest } = next;
+        return rest;
+      };
       assertLocalStdioCanBeEnabled(
         existing.transport,
         input.enabled ?? existing.enabled,
@@ -18903,10 +18983,10 @@ export function toolAccessService(
           status: input.status ?? existing.status,
           enabled: input.enabled ?? existing.enabled,
           ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
-          config,
-          transportConfig: isGoogleSheetsConnectionConfig(config)
+          config: forgetLearnedProtocol(config),
+          transportConfig: forgetLearnedProtocol(isGoogleSheetsConnectionConfig(config)
             ? config
-            : (input.transportConfig ?? config),
+            : (input.transportConfig ?? config)),
           credentialRefs: input.credentialRefs ?? existing.credentialRefs,
           credentialSecretRefs:
             input.credentialSecretRefs ?? existing.credentialSecretRefs,
