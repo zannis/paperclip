@@ -5881,6 +5881,30 @@ describeEmbeddedPostgres("tool access service", () => {
       expect(versions).not.toContain("2026-07-28");
     });
 
+    it("probes a legacy server that answers 400 once, and keeps its 400", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      const versions: Array<string | null> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        versions.push(new Headers(init?.headers).get("mcp-protocol-version"));
+        return new Response("{}", { status: 400, headers: { "content-type": "application/json" } });
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" })).rejects.toThrow("Remote app returned HTTP 400");
+      expect(versions.filter((version) => version === "2026-07-28")).toHaveLength(1);
+    });
+
+    it("keeps the legacy 400 when the probe cannot reach the server", async () => {
+      const company = await createCompany(db);
+      const service = createTestToolAccessService(db);
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        if (new Headers(init?.headers).get("mcp-protocol-version") === "2026-07-28") throw new TypeError("fetch failed");
+        return new Response("{}", { status: 400, headers: { "content-type": "application/json" } });
+      });
+      const connection = await createStatelessConnection(service, company.id);
+      await expect(service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" })).rejects.toThrow("Remote app returned HTTP 400");
+    });
+
     it("forgets the learned protocol when the server URL changes", async () => {
       const company = await createCompany(db);
       const service = createTestToolAccessService(db);

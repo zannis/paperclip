@@ -7170,12 +7170,19 @@ export function toolAccessService(
     // try tools/list once in that form; it is read-only. Success keeps the
     // mode. Before the credential refreshes below, so does a 401 or 403: the
     // server read the version and now judges the credential, and the
-    // refreshes and scope check run in this mode. Any other answer keeps the
-    // original 400, as before.
+    // refreshes and scope check run in this mode. Any other answer, or no
+    // answer at all, keeps the original 400, as before. Each credential is
+    // probed at most once.
+    let probedHeaders: Record<string, string> | null = null;
     const probeStateless = async (keepOnAuthFailure: boolean) => {
-      if (stateless || response.status !== 400) return;
+      if (stateless || response.status !== 400 || probedHeaders === headers) return;
+      probedHeaders = headers;
       stateless = true;
-      const probe = await sendToolsList(headers);
+      const probe = await sendToolsList(headers).catch(() => null);
+      if (!probe) {
+        stateless = false;
+        return;
+      }
       if (probe.ok || (keepOnAuthFailure && (probe.status === 401 || probe.status === 403))) {
         await response.body?.cancel().catch(() => undefined);
         response = probe;
