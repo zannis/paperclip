@@ -7160,24 +7160,7 @@ export function toolAccessService(
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);
     }
-    if (!stateless && response.status === 400) {
-      // Neither a plain request nor the initialize handshake was accepted. A
-      // 2026-07-28 server refuses both for lacking a version header, so try
-      // tools/list once in that form; it is read-only. If that fails too, the
-      // original 400 is reported as before.
-      stateless = true;
-      const probe = await sendToolsList(headers);
-      if (probe.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        response = probe;
-        learnedStateless = true;
-      } else {
-        await probe.body?.cancel().catch(() => undefined);
-        stateless = false;
-      }
-    }
     if (
-      !learnedStateless &&
       usedInitializedSession &&
       connection.config.mcpSessionRequired !== true
     ) {
@@ -7248,6 +7231,23 @@ export function toolAccessService(
               ),
             );
         }
+      }
+    }
+    if (!stateless && response.status === 400) {
+      // Neither a plain request nor the initialize handshake was accepted. A
+      // 2026-07-28 server refuses both for lacking a version header, so try
+      // tools/list once in that form; it is read-only. It runs after the
+      // credential refreshes above so it carries the current credential. If
+      // it fails too, the original 400 is reported as before.
+      stateless = true;
+      const probe = await sendToolsList(headers);
+      if (probe.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        response = probe;
+        learnedStateless = true;
+      } else {
+        await probe.body?.cancel().catch(() => undefined);
+        stateless = false;
       }
     }
     if (!response.ok) {

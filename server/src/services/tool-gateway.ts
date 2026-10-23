@@ -5870,7 +5870,8 @@ export function createToolGatewayService(
                 // Defer this interaction to the user. Do not claim that consent
                 // was granted or repeat a potentially state-changing tool call.
                 await dispatchRemote(endpoint, {
-                  method: "POST", headers: stateless ? statelessMcpHeaders(requestHeaders) : mcpHttpRequestHeaders(requestHeaders),
+                  // A stateless call has no session, so its current credential is `headers`.
+                  method: "POST", headers: stateless ? statelessMcpHeaders(headers) : mcpHttpRequestHeaders(requestHeaders),
                   body: JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "cancel" } }),
                 });
                 throw new ToolGatewayHttpError(409, "This tool needs authorization in the provider.", "provider_interaction_required", { upstreamPending: pending, invocationId });
@@ -5953,14 +5954,18 @@ export function createToolGatewayService(
       const statelessCallError = stateless ? asRecord(payloadRecord.error) : null;
       if (statelessCallError && (statelessCallError.code === -32602 || statelessCallError.code === -32603)) {
         // A 2026-07-28 server reports bad arguments, unknown or inactive tools
-        // this way. It is about this call, not the connection, so the agent
-        // gets the server's message and the connection's tools stay listed.
+        // this way (ext-mcp uses -32603 for some bad arguments too). It is
+        // about this call, so the agent gets the server's message and the
+        // connection's tools stay listed. An internal error says nothing good
+        // about the server, so only -32602 records a healthy check.
         const detail = [
           typeof statelessCallError.message === "string" ? statelessCallError.message : "The server rejected this call.",
           ...(statelessCallError.data !== undefined ? [JSON.stringify(statelessCallError.data)] : []),
         ].join(" ");
         const result = normalizeMcpToolResult({ content: [{ type: "text", text: detail }], isError: true });
-        await markRemoteConnectionHealth(connection, "ok", "Remote MCP server responded to tools/call.");
+        if (statelessCallError.code === -32602) {
+          await markRemoteConnectionHealth(connection, "ok", "Remote MCP server responded to tools/call.");
+        }
         return { result, headerSummary, execution };
       }
       if (payloadRecord.error !== undefined) {
@@ -6001,9 +6006,10 @@ export function createToolGatewayService(
         typeof connection.config.sourceTemplateKey === "string"
           ? connection.config.sourceTemplateKey
           : null;
-      // A call that ended without completing (e.g. the server asked for
-      // confirmation) changed nothing; report it as an error, not a success.
-      const incomplete = incompleteMcpResult(payloadRecord.result);
+      // A 2026-07-28 call that ended without completing (e.g. the server asked
+      // for confirmation) changed nothing; report it as an error, not a
+      // success. Older protocols have no resultType, so theirs is left alone.
+      const incomplete = stateless ? incompleteMcpResult(payloadRecord.result) : null;
       const result = normalizeMcpToolResult(
         incomplete
           ? { content: [{ type: "text", text: incomplete.message }], isError: true }

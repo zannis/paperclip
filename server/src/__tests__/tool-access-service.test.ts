@@ -5892,6 +5892,50 @@ describeEmbeddedPostgres("tool access service", () => {
       expect(moved.config).not.toHaveProperty("mcpProtocolVersion");
       expect(moved.transportConfig).not.toHaveProperty("mcpProtocolVersion");
     });
+
+    it("learns the protocol after a credential refresh, using the fresh credential", async () => {
+      const company = await createCompany(db);
+      const vercelConnectClient: VercelConnectClient = {
+        getConnectorMetadata: vi.fn(),
+        getToken: vi.fn<VercelConnectClient["getToken"]>(async (_request, options) => ({
+          token: options?.forceRefresh ? "fresh" : "stale", tokenId: "stk", expiresAt: Date.now() + 60_000,
+          connector: { id: "scl_crm", uid: "crm", type: "api-key" },
+        })),
+        startAuthorization: vi.fn(),
+        revoke: vi.fn(),
+        evict: vi.fn(),
+      };
+      const service = createTestToolAccessService(db, { vercelConnectClient });
+      const connection = await createStatelessConnection(service, company.id);
+      await db.update(toolConnections).set({
+        credentialSource: "vercel_connect",
+        externalCredential: {
+          provider: "vercel_connect", connectorId: "scl_crm", connectorUid: "crm", service: "crm", connectorType: "api-key",
+          principalMode: "app", headerName: "Authorization", headerPrefix: "Bearer ", scopes: ["*"],
+        },
+        credentialRefs: [],
+        credentialSecretRefs: [],
+      }).where(eq(toolConnections.id, connection.id));
+      await db.update(connectionGrants).set({ externalCredential: { provider: "vercel_connect", subjectType: "app" }, credentialSecretRefs: [] })
+        .where(eq(connectionGrants.connectionId, connection.id));
+      const seen: Array<[string | null, string | null]> = [];
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+        const headers = new Headers(init?.headers);
+        const payload = JSON.parse(String(init?.body ?? "{}")) as { id?: string };
+        seen.push([headers.get("authorization"), headers.get("mcp-protocol-version")]);
+        if (headers.get("authorization") !== "Bearer fresh") return new Response(null, { status: 401 });
+        if (headers.get("mcp-protocol-version") !== "2026-07-28") {
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id ?? null, error: { code: -32020, message: "No MCP-Protocol-Version header." } }),
+            { status: 400, headers: { "content-type": "application/json" } });
+        }
+        return mcpHttpResponse({ jsonrpc: "2.0", id: payload.id, result: { resultType: "complete", tools: [{ name: "find_Account", inputSchema: { type: "object" } }] } });
+      });
+
+      const refresh = await service.refreshCatalog(connection.id, { actorType: "user", actorId: "board" });
+      expect(refresh.catalog.map((entry) => entry.toolName)).toEqual(["find_Account"]);
+      expect(seen.at(-1)).toEqual(["Bearer fresh", "2026-07-28"]);
+      expect((await service.getConnection(connection.id)).config).toMatchObject({ mcpProtocolVersion: "2026-07-28" });
+    });
   });
 
   it("serves persisted MCP actions until the cache expires and then refreshes them", async () => {
