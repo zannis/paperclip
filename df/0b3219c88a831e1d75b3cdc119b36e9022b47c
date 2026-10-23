@@ -1,0 +1,19 @@
+.github/workflows/pr-trusted.yml
+  s_c31409a29c92c2::t_a0816ed0204d50 340
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "df0b3219c88a831e1d75b3cdc119b36e9022b47c",
+  "prompts": {},
+  "sessions": {
+    "s_c31409a29c92c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "65c0dde8-99ad-4ccb-b1d5-a18eb623377d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
