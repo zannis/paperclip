@@ -13,6 +13,7 @@
  * CSS motion tokens in ui/src/index.css.
  */
 import type {
+  TaskBrowser,
   IssueAttachment,
   IssueCommentMetadata,
   IssueCommentPresentation,
@@ -100,12 +101,17 @@ export interface TaskChatTokenUsage {
 
 /** A human/agent/system message bubble. */
 export interface TaskChatMessageItem {
+  origin?: "comment" | "fast_response";
   /** Stable UI identity through optimistic acknowledgement; id remains canonical. */
   renderKey?: string;
   id: string;
   kind: "message";
   author: TaskChatAuthorKind;
   authorName?: string;
+  /** Human identity comes from the company directory, matched by stored user ID. */
+  authorUserId?: string | null;
+  authorAvatarUrl?: string | null;
+  isCurrentUser?: boolean;
   text: string;
   /** Runner-authored output channel. Legacy adapters leave this unset. */
   channel?: "progress" | "final" | "unknown";
@@ -246,6 +252,8 @@ export interface TaskChatMarkerItem {
   variant: "session_start" | "interrupted" | "turn_boundary";
   label: string;
   detail?: string;
+  /** False when the recorded run cannot be retried, even after the chat continues. */
+  retryable?: boolean;
   /** Renders the marker as a quiet disclosure row with detail beneath it. */
   collapsible?: boolean;
   /** Expected cancellation is neutral; unexpected failures remain destructive. */
@@ -253,6 +261,14 @@ export interface TaskChatMarkerItem {
   runId?: string;
   createdAtIso?: string;
   runHref?: string;
+  planHref?: string;
+  /** An actionable credential denial is always expanded in the task conversation. */
+  credentialAccess?: {
+    agentName: string;
+    credentialName?: string;
+    deniedUser: string;
+    settingsHref: string;
+  };
 }
 
 /** A second-tier live token/cost readout (ACP UsageUpdate). */
@@ -504,6 +520,8 @@ export interface TaskChatTurnItem {
   kind: "turn";
   items: TaskChatTurnChildItem[];
   settled: boolean;
+  /** Superseded execution status is omitted; activity remains inspectable. */
+  historical?: boolean;
   /** Agent identity retained when a live runner turn becomes durable history. */
   agentName?: string;
   agentIcon?: string | null;
@@ -555,7 +573,16 @@ export interface TaskChatSkillCreatedItem {
   timestamp: string;
 }
 
+export interface TaskChatBrowserItem {
+  id: string;
+  kind: "browser";
+  browser: TaskBrowser;
+  label: string;
+  timestamp: string;
+}
+
 export type TaskChatItem =
+  | TaskChatBrowserItem
   | TaskChatProjectCreatedItem
   | TaskChatSkillCreatedItem
   | TaskChatMessageItem

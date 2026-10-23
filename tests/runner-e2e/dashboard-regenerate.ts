@@ -21,6 +21,7 @@ interface PublishedResult extends RunnerE2EResult {
 interface PublishedCampaign {
   schema?: string;
   campaignId?: string;
+  source?: RunnerE2ECampaign["source"];
   generatedAt: string;
   expected: string[];
   results: PublishedResult[];
@@ -56,7 +57,6 @@ export async function regenerateRunnerDashboard(input: {
   historyFile?: string | null;
   outputDirectory?: string;
   evidenceHrefPrefix?: string;
-  publicSummaryImageHref?: string;
 }) {
   const bundle = path.resolve(input.bundle);
   const outputDirectory = path.resolve(input.outputDirectory ?? bundle);
@@ -94,6 +94,16 @@ export async function regenerateRunnerDashboard(input: {
     expected,
     results,
   });
+  // A rendering refresh must not inherit the renderer's checkout or CI event.
+  const retainedSource = results.find((result) =>
+    result.source?.sha || result.source?.ref || result.source?.workflowRunUrl,
+  )?.source;
+  campaign.source = normalized.source ?? {
+    sha: retainedSource?.sha ?? null,
+    ref: retainedSource?.ref ?? null,
+    workflowRunUrl: retainedSource?.workflowRunUrl ?? null,
+    eventName: null,
+  };
   const history =
     input.historyFile === null
       ? undefined
@@ -147,7 +157,6 @@ export async function regenerateRunnerDashboard(input: {
     entries,
     campaign,
     history,
-    publicSummaryImageHref: input.publicSummaryImageHref,
   });
   const upgraded = {
     ...campaign,

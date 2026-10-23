@@ -120,6 +120,34 @@ from the default branch and provide:
 - `max_infrastructure_retries`: zero through three, applied only when an
   attempt explicitly reports a retryable infrastructure failure.
 
+Native suspension failures are non-retryable infrastructure failures. The CLI
+retains only allowlisted close diagnostics: suspension and provider-drain
+booleans, the suspension-command status, the durable Runner lifecycle, and
+whether its identity matches. Missing or conflicting suspension evidence never
+becomes a pass. Preserve the original artifact before correcting a close defect
+and explicitly authorizing a new attempt.
+
+Pi cleanup stops an idle provider during close preparation through the exact
+native process owner. Native code rejects active turns or pending callbacks on
+that idle path. It proves release of the original inherited lifetime fence and
+preserves the attested provider identity. The subsequent drain and suspension
+barriers still require their durable receipts. An unconfirmed provider exit
+cannot certify a reusable checkpoint.
+- `grok_authentication`: `api_key` (the compatibility default) or `subscription`.
+  Subscription requires an explicitly selected Grok roster and the owner-approved
+  `GROK_AUTH_JSON` secret in the protected `runner-e2e-paid` environment. API mode
+  uses only `XAI_API_KEY`. A missing selected credential fails; it never changes
+  authentication mode or falls back to another credential.
+
+For subscription qualification, pass `-f grok_authentication=subscription` when
+dispatching the default-branch workflow. The immutable catalog, retained cell,
+campaign roster, and result record carry `authenticationMode`. The cell reads it
+from the pinned eval program's actual roster summary, and aggregation rejects
+missing or mismatched authentication evidence. Select an eval revision that
+supports Grok subscription admission and records this summary field. Keep API
+and subscription campaigns separate when interpreting results. Remove temporary
+subscription test secrets after the authorized qualification completes.
+
 The authorization job resolves the Paperclip branch to a commit and verifies
 the supplied eval commit before any checkout. A short-lived bot token generated
 from `COMMITPERCLIP_KEY` authorizes each checkout of the private eval repository;
@@ -139,6 +167,16 @@ versions and patched ACP server bytes. Do not replace this step with a fresh
 `npm install` of the packed Runner tarball: npm cannot apply the workspace's
 `patchedDependencies`, so the resulting ACPX executables no longer match their
 qualified digests.
+
+Candidate ACPX evals require both `--candidate-profile <agent>` and
+`--expected-acpx-profile <JSON>`. The eval program supplies the exact configured
+profile as the JSON argument. Before creating a runtime context or provider
+service, the built CLI compares every profile field, including model, version
+and command digest, with its own resolved profile. Missing, extra or mismatched
+fields fail admission. Older CLIs reject the new flag before execution; there
+is no retry without the check. The daemon's own profile admission and binary
+digest check remain independent gates. Post-run scoring still compares the
+retained profile as evidence, but cannot replace this pre-launch check.
 
 The direct eval CLI also materializes a minimal immutable native runtime
 context in each isolated attempt workspace. This keeps the direct layer on the
@@ -172,6 +210,9 @@ replacement objective or proof that a newly requested action is already done.
 Finishing the provider turn does not authorize an unrequested mock task-state
 change or completion comment. These harness instructions keep single-operation
 cases bounded while leaving their operation and state-effect assertions intact.
+For a bounded request, the harness also asks for only the context needed to act.
+A brief progress request does not require an investigation of unrelated history
+or documents. Its grader still requires the actual successful mutation.
 
 ACPX accounting uses the qualified server's billable token semantics: Claude
 and Codex already include reasoning in output, and Codex has no cache-write
@@ -205,6 +246,7 @@ The paid jobs read only the credential selected for each roster:
 - `OPENAI_API_KEY` for native Codex and ACPX Codex;
 - `ANTHROPIC_API_KEY` for ACPX Claude and Claude Managed;
 - `OPENROUTER_API_KEY` for native OpenCode and ACPX Pi;
+- `XAI_API_KEY` for an explicitly selected ACPX Grok roster;
 - short-lived GitHub OIDC workload identity for AWS AgentCore.
 
 Claude Managed also requires the four nonsecret
@@ -308,3 +350,14 @@ pnpm --filter @paperclipai/paperclip-runner \
   --campaign-id gha-1-1 \
   --output /tmp/runner-protocol-eval-catalog.json
 ```
+
+
+For Grok qualification, select `protocol-live-acpx-grok` and its exact eval
+revision. Set `max_parallel: 2` when the API key has a low custom rate limit;
+this admits one case per shard. The override can only lower the configured
+campaign ceiling and cannot change the key's provider limits. Retain any
+rate-limited attempts as failures. The build installs the target's pinned,
+checksum-verified Grok binary before packaging the portable runtime. Targets
+without the Grok package keep their existing build behavior. This protocol
+workflow uses the explicitly selected API key; subscription credentials are
+not delivered by it.

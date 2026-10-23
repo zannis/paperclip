@@ -1,4 +1,7 @@
+import { connectionCheckpoints, connectionEvidencePasses, connectionRunSignals } from "./connection-evidence.js";
+import { STARTUP_REUSE_LAYERS, STARTUP_REUSE_REASONS } from "../../packages/adapter-utils/src/startup-reuse.js";
 import type { RunnerE2EResult } from "./types.js";
+import { DEPENDABLE_CELLS } from "./dependable-qualification.js";
 
 type Rule = (value: unknown, at: string) => void;
 const invalid = (at: string): never => {
@@ -6,6 +9,10 @@ const invalid = (at: string): never => {
 };
 const string: Rule = (value, at) => {
   if (typeof value !== "string") invalid(at);
+};
+const matching = (pattern: RegExp): Rule => (value, at) => {
+  string(value, at);
+  if (!pattern.test(value as string)) invalid(at);
 };
 const number: Rule = (value, at) => {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
@@ -51,9 +58,33 @@ const shape =
     for (const [key, rule] of Object.entries(fields))
       rule((value as Record<string, unknown>)[key], `${at}.${key}`);
   };
+const closedShape = (fields: Record<string, Rule>): Rule => (value, at) => {
+  shape(fields)(value, at);
+  for (const key of Object.keys(value as object)) if (!Object.hasOwn(fields, key)) invalid(`${at} (unexpected field)`);
+};
 const date: Rule = (value, at) => {
   string(value, at);
   if (!Number.isFinite(Date.parse(value as string))) invalid(at);
+};
+const finite: Rule = (value, at) => {
+  if (typeof value !== "number" || !Number.isFinite(value)) invalid(at);
+};
+// Finite invalid bounds remain inspectable evidence with an inconclusive verdict.
+const timingBound = nullable(shape({ ms: finite, inclusive: boolean }));
+const latencyProbe: Rule = (value, at) => {
+  shape({
+    event: oneOf("acknowledgement", "first_visible_response", "message_creation", "final_settlement"),
+    interval: shape({ lower: timingBound, upper: timingBound }),
+    lastAbsentMs: nullable(finite), firstPresentMs: nullable(finite), resolutionMs: nullable(finite),
+    invalid: optional(boolean),
+    observationFailures: optional(integer),
+    observationTimeouts: optional(integer),
+    messageTimestamps: optional(shape({ createdAt: optional(string), editedAt: optional(string) })),
+    target: shape({ operator: oneOf("<", "<="), ms: finite }),
+    verdict: oneOf("pass", "fail", "inconclusive"),
+    recordedVerdict: optional(oneOf("pass", "fail", "inconclusive")),
+    reason: oneOf("within_target", "outside_target", "threshold_overlap", "missing_observations", "invalid_evidence", "unknown_resolution"),
+  })(value, at);
 };
 const url: Rule = (value, at) => {
   string(value, at);
@@ -98,6 +129,7 @@ const runtime = shape({
   pricingAsOf: optional(string),
   pricingUrl: optional(url),
 });
+const assistant = shape({ provider: oneOf("openai", "anthropic"), model: string, observedModels: array(string), requests: integer, inputTokens: number, outputTokens: number, cachedInputTokens: number, estimatedCostUsd: number, pricingAsOf: string, pricingUrl: url });
 const llm = shape({
   runCount: integer,
   runsWithTokenUsage: integer,
@@ -111,6 +143,7 @@ const llm = shape({
 });
 const billing = shape({
   judge: optional(shape({ inputTokens: nullable(number), outputTokens: nullable(number), estimatedCostUsd: nullable(number), reservedCostUsd: number })),
+  assistant: optional(assistant),
   llm,
   runtime,
   reportedCostUsd: number,
@@ -136,6 +169,7 @@ const matcher: Rule = (value, at) => {
     file_exact: shape({ path: string, expected: string }),
     file_contains: shape({ path: string, expected: string }),
     artifact_exists: shape({ name: string, mimeType: optional(string) }),
+    artifact_exact: shape({ name: string, expected: string, mimeType: optional(string) }),
     json_path: shape({ path: string }),
     json_schema: shape({ schema: object }),
   };
@@ -144,6 +178,7 @@ const matcher: Rule = (value, at) => {
   rule(value, at);
 };
 const fields = {
+  publicMcp: optional(assistant),
   schema: oneOf(
     "paperclip.runner-e2e.result/v1",
     "paperclip.runner-e2e.result/v2",
@@ -189,6 +224,23 @@ const fields = {
   issueId: optional(string),
   issueIdentifier: optional(nullable(string)),
   runIds: optional(array(string)),
+  dependableWork: optional(closedShape({
+    campaignId: matching(/^[A-Za-z0-9_.-]{1,120}$/), cell: oneOf(...DEPENDABLE_CELLS), phase: oneOf("candidate", "staging"),
+    evidence: closedShape({ definitionHash: matching(/^[a-f0-9]{64}$/), settingsHash: matching(/^[a-f0-9]{64}$/),
+      instructionsHash: matching(/^[a-f0-9]{64}$/), runnerArtifact: matching(/^sha256:[a-f0-9]{64}$/),
+      revisionAtStart: matching(/^[a-f0-9]{40}$/), revisionAtEnd: matching(/^[a-f0-9]{40}$/),
+      target: oneOf("isolated-candidate", "isolated-staging") }),
+  })),
+  latencyProbes: optional(array(latencyProbe)),
+  startupReuse: optional(array(shape({
+    runId: string,
+    warmth: oneOf("cold", "warm", "partial_reuse", "unknown"),
+    providerLaunchCount: nullable(integer),
+    layers: shape(Object.fromEntries(STARTUP_REUSE_LAYERS.map(layer => [layer, shape({
+      state: oneOf("fresh", "reused", "unknown", "not_applicable"),
+      reason: oneOf(...STARTUP_REUSE_REASONS),
+    })]))),
+  }))),
   turnTimings: optional(
     array(
       shape({
@@ -240,6 +292,26 @@ const fields = {
       tasks: array(object), agents: array(object), comments: array(object), interactions: array(object), documents: array(object), attachments: optional(array(object)), runs: array(object) })),
     checks: array(shape({ id: string, passed: boolean, notReached: optional(string), evidence: array(string), detail: string })),
   })),
+  providerConnection: optional(shape({
+    version: integer,
+    outcome: oneOf("running", "passed", "failed", "awaiting_user", "missing_credential", "blocked_target"),
+    phase: string, assisted: boolean, authFreshness: oneOf("signed-in", "signed-out"),
+    target: shape({ mode: oneOf("managed-local", "attach"), origin: url, commit: nullable(string), deploymentMode: nullable(string) }),
+    entry: oneOf("apps", "agent"), method: string, checkpoints: shape(Object.fromEntries(connectionCheckpoints.map(key => [key, optional(boolean)]))),
+    waits: array(shape({ kind: oneOf("board_login", "provider_login"), startedAt: date, finishedAt: optional(date) })),
+    artifactChecks: optional(array(shape({ filename: string, runId: string, sha256: string, fields: object, exactFields: boolean }))),
+    inputTransport: optional(oneOf("prompt_base64")),
+    setupChecks: optional(array(shape({ code: string, level: oneOf("info", "warn", "error") }))),
+    runDiagnostics: optional(array(shape({ runId: string, status: oneOf("succeeded", "failed", "cancelled", "interrupted", "timed_out", "unknown"), signals: array(oneOf(...connectionRunSignals)), logAvailable: boolean }))),
+    creationFailure: optional(shape({ status: integer, code: oneOf("ai_connection_api_key_rejected", "ai_connection_verification_failed", "connection_request_rejected") })),
+    connectionId: optional(string), agentId: optional(string), companyId: optional(string), artifactSha256: optional(string), model: optional(string), cleanupRetained: optional(boolean), companyArchived: optional(boolean),
+  })),
+  completionQuality: optional(array(shape({
+    name: string, purpose: optional(oneOf("product", "calibration")), expectedPass: boolean, passed: boolean, status: oneOf("completed", "failed", "pending"), config: object, configHash: string, evidenceHash: string,
+    criteria: array(shape({ id: string, passed: boolean, rationale: string, evidenceIds: array(string) })),
+    reports: optional(array(shape({ replyId: string, rationale: string, completedTaskIdsReferenced: array(string), resultAccessTaskIds: optional(array(string)), correctsReplyIds: array(string) }))),
+    inputTokens: nullable(integer), outputTokens: nullable(integer), estimatedCostUsd: nullable(number), reservedCostUsd: number, recordedAt: date, error: optional(string), rejectedVerdict: optional(string),
+  }))),
   firstTaskQuality: optional(shape({
     status: oneOf("completed", "failed", "pending"), informational: boolean, config: object, configHash: string, evidenceHash: string,
     scores: array(shape({ dimension: oneOf("questionRelevance", "useOfFacts", "proposalUsefulness", "clarity", "lowFriction"), score: integer, rationale: string, evidence: array(string) })),
@@ -254,4 +326,6 @@ export function validateRetainedRunnerResult(
   value: unknown,
 ): asserts value is RunnerE2EResult {
   result(value, "result");
+  const checked = value as RunnerE2EResult;
+  if (checked.suiteId === "provider-connections" && checked.status === "passed" && (!checked.providerConnection || !connectionEvidencePasses(checked.providerConnection))) invalid("result.providerConnection");
 }

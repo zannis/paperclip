@@ -43,7 +43,6 @@ const PUBLISH_ROOT_FILES = new Set([
   "normalized-results.json",
   "summary.md",
 ]);
-const PUBLIC_EVIDENCE_EXTENSIONS = new Set([".json", ".log", ".md", ".txt"]);
 const MAX_PUBLIC_RASTER_BYTES = 12 * 1024 * 1024;
 const EMPTY_PUBLIC_SCREENSHOTS: ReadonlySet<string> = new Set();
 const PRIVATE_EVIDENCE_DIRECTORIES = new Set([
@@ -73,10 +72,13 @@ function publicEvidencePath(
   ) {
     return false;
   }
+  // A text extension and credential scan do not establish a public projection.
+  // API snapshots and process logs can still hold hidden reasoning and provider
+  // session identities. Keep those diagnostics in the retained Actions artifact;
+  // normalized-results.json already carries the graded result contract.
   return (
-    PUBLIC_EVIDENCE_EXTENSIONS.has(
-      path.posix.extname(evidencePath).toLowerCase(),
-    ) || publicScreenshots.has(relative)
+    path.posix.extname(evidencePath).toLowerCase() === ".png" &&
+    publicScreenshots.has(relative)
   );
 }
 
@@ -546,8 +548,8 @@ async function main() {
   // file left in a reused local directory. The root landing page below is the
   // only dashboard that embeds navigation across campaigns. S3 gets its own
   // staged copy. Only screenshots declared by normalized results (plus the
-  // fixed failure screenshot for failed executions) cross the public boundary;
-  // all other target-produced files remain subject to the structured allowlist.
+  // fixed failure screenshot for failed executions) cross the public evidence
+  // boundary. Raw per-attempt text stays in the retained Actions artifact.
   const s3ReportRoot = path.join(temporary, "s3-campaign");
   await cp(reportRoot, s3ReportRoot, { recursive: true, errorOnExist: true });
   await prunePrivateHistoryEvidence(s3ReportRoot, publicScreenshots);
@@ -565,7 +567,6 @@ async function main() {
   await regenerateRunnerDashboard({
     bundle: s3ReportRoot,
     historyFile: null,
-    publicSummaryImageHref: "public-images/campaign-summary.png",
   });
   const manifest = await createBundleManifest(
     s3ReportRoot,
@@ -633,16 +634,10 @@ async function main() {
     historyFile,
     outputDirectory: landingDirectory,
     evidenceHrefPrefix: `campaigns/${campaign.campaignId}`,
-    publicSummaryImageHref: `campaigns/${campaign.campaignId}/public-images/campaign-summary.png`,
   });
   await writeFile(
     path.join(landingDirectory, "index.html"),
-    renderRunnerHistoryIndex(history, {
-      latestSummaryImageHref:
-        history.latestCampaignId === campaign.campaignId
-          ? `campaigns/${campaign.campaignId}/public-images/campaign-summary.png`
-          : undefined,
-    }),
+    renderRunnerHistoryIndex(history),
     "utf8",
   );
   await Promise.all([

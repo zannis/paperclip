@@ -1,3 +1,4 @@
+import { useWorkspaceIsolationControls } from "@/hooks/useWorkspaceIsolationControls";
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -773,6 +774,7 @@ function ExecutionWorkspaceRoutinesList({
 }
 
 export function ExecutionWorkspaceDetail() {
+  const { visible: workspaceIsolationControlsVisible, loaded: workspaceVisibilityLoaded } = useWorkspaceIsolationControls();
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
@@ -801,8 +803,8 @@ export function ExecutionWorkspaceDetail() {
   const workspace = workspaceQuery.data ?? null;
 
   const projectQuery = useQuery({
-    queryKey: workspace ? [...queryKeys.projects.detail(workspace.projectId), workspace.companyId] : ["projects", "detail", "__pending__"],
-    queryFn: () => projectsApi.get(workspace!.projectId, workspace!.companyId),
+    queryKey: workspace?.projectId ? [...queryKeys.projects.detail(workspace.projectId), workspace.companyId] : ["projects", "detail", "__pending__"],
+    queryFn: () => projectsApi.get(workspace!.projectId!, workspace!.companyId),
     enabled: Boolean(workspace?.projectId),
   });
   const project = projectQuery.data ?? null;
@@ -856,8 +858,11 @@ export function ExecutionWorkspaceDetail() {
     [workspacePluginDetailSlots],
   );
   const workspaceTabItems = useMemo(
-    () => orderExecutionWorkspaceTabItems([...EXECUTION_WORKSPACE_BASE_TAB_ITEMS, ...workspacePluginTabItems]),
-    [workspacePluginTabItems],
+    () => orderExecutionWorkspaceTabItems([
+      ...EXECUTION_WORKSPACE_BASE_TAB_ITEMS.filter((item) => item.value !== "configuration" || workspaceIsolationControlsVisible),
+      ...workspacePluginTabItems,
+    ]),
+    [workspacePluginTabItems, workspaceIsolationControlsVisible],
   );
   const inheritedRuntimeConfig = linkedProjectWorkspace?.runtimeConfig?.workspaceRuntime ?? null;
   const effectiveRuntimeConfig = workspace?.config?.workspaceRuntime ?? inheritedRuntimeConfig;
@@ -953,7 +958,7 @@ export function ExecutionWorkspaceDetail() {
       queryClient.setQueryData(queryKeys.executionWorkspaces.detail(result.workspace.id), result.workspace);
       queryClient.invalidateQueries({ queryKey: queryKeys.executionWorkspaces.overview(result.workspace.companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.executionWorkspaces.workspaceOperations(result.workspace.id) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(result.workspace.projectId) });
+      if (result.workspace.projectId) queryClient.invalidateQueries({ queryKey: queryKeys.projects.detail(result.workspace.projectId) });
       setRuntimeActionErrorMessage(null);
       setRuntimeActionMessage(
         request.action === "run"
@@ -1005,6 +1010,11 @@ export function ExecutionWorkspaceDetail() {
     entityType: "execution_workspace" as const,
   };
   const activePluginTab = workspacePluginTabItems.find((item) => item.value === activeTab) ?? null;
+
+  if (activeTab === "configuration" && !workspaceVisibilityLoaded) return null;
+  if (workspaceId && activeTab === "configuration" && !workspaceIsolationControlsVisible) {
+    return <LegacyWorkspaceTabRedirect workspaceId={workspaceId} />;
+  }
 
   if (workspaceId && activeTab === null) {
     return <LegacyWorkspaceTabRedirect workspaceId={workspaceId} />;
@@ -1416,7 +1426,7 @@ export function ExecutionWorkspaceDetail() {
               </CardHeader>
               <CardContent>
               <DetailRow label="Project">
-                {project ? <Link to={`/projects/${projectRef}`} className="hover:underline">{project.name}</Link> : <MonoValue value={workspace.projectId} />}
+                {project ? <Link to={`/projects/${projectRef}`} className="hover:underline">{project.name}</Link> : <MonoValue value={workspace.projectId ?? "No project"} />}
               </DetailRow>
               <DetailRow label="Project workspace">
                 {project && linkedProjectWorkspace ? (
@@ -1440,7 +1450,7 @@ export function ExecutionWorkspaceDetail() {
               </DetailRow>
               <DetailRow label="Derived from">
                 {derivedWorkspace ? (
-                  <Link to={executionWorkspaceTabPath(derivedWorkspace.id, "configuration")} className="hover:underline">
+                  <Link to={executionWorkspaceTabPath(derivedWorkspace.id, workspaceIsolationControlsVisible ? "configuration" : "issues")} className="hover:underline">
                     {derivedWorkspace.name}
                   </Link>
                 ) : workspace.derivedFromExecutionWorkspaceId ? (

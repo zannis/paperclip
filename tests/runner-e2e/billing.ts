@@ -29,6 +29,7 @@ export interface AgentRunUsageInput {
 }
 
 export interface CampaignBillingSummary {
+  assistant?: import("./types.js").RunnerE2EAggregateBillingSummary["assistant"];
   judge?: import("./types.js").RunnerE2EJudgeBillingSummary;
   testCount: number;
   agentRunDurationMs: number;
@@ -38,6 +39,14 @@ export interface CampaignBillingSummary {
   estimatedRuntimeCostUsd: number;
   observedAndEstimatedCostUsd: number | null;
   testsWithCompleteBilling: number;
+}
+
+/** Render observed subtotals without presenting absent measurements as zero. */
+export function billingCoverageLabel(value: string, covered: number, total: number): string {
+  if (!Number.isInteger(covered) || !Number.isInteger(total) || covered <= 0 || total <= 0 || covered > total) {
+    return "Unavailable";
+  }
+  return covered < total ? `${value} (partial: ${covered}/${total} runs)` : value;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -249,7 +258,7 @@ export function fallbackRuntimeUsage(
 export function summarizeExecutionBilling(
   result: Pick<
     RunnerE2EResult,
-    "runIds" | "usage" | "environmentId" | "durationMs" | "runtimeUsage" | "firstTaskQuality"
+    "runIds" | "usage" | "environmentId" | "durationMs" | "runtimeUsage" | "firstTaskQuality" | "completionQuality" | "publicMcp"
   >,
 ): RunnerE2EBillingSummary {
   const requestedRunCount = Math.max(result.runIds?.length ?? 0, 1);
@@ -298,13 +307,16 @@ export function summarizeExecutionBilling(
           : "unavailable";
   const runtime = fallbackRuntimeUsage(result);
   const estimatedRuntimeCostUsd = runtime.estimatedListCostUsd ?? 0;
-  const quality = result.firstTaskQuality;
+  const judgments = [...(result.firstTaskQuality ? [result.firstTaskQuality] : []), ...(result.completionQuality ?? [])];
+  const sumKnown = (key: "inputTokens" | "outputTokens" | "estimatedCostUsd") => judgments.some(q => q[key] === null) ? null : judgments.reduce((sum, q) => sum + (q[key] ?? 0), 0);
+  const quality = judgments.length ? { inputTokens: sumKnown("inputTokens"), outputTokens: sumKnown("outputTokens"), estimatedCostUsd: sumKnown("estimatedCostUsd"), reservedCostUsd: judgments.reduce((sum, q) => sum + q.reservedCostUsd, 0) } : undefined;
   const complete =
     (!quality || quality.estimatedCostUsd !== null) &&
     runsWithTokenUsage === runCount &&
     runsWithReportedCost === runCount &&
     runtime.costStatus !== "unavailable";
   return {
+    ...(result.publicMcp ? { assistant: result.publicMcp } : {}),
     llm: {
       runCount,
       runsWithTokenUsage,
@@ -320,7 +332,7 @@ export function summarizeExecutionBilling(
     reportedCostUsd,
     estimatedRuntimeCostUsd,
     ...(quality ? { judge: { inputTokens: quality.inputTokens, outputTokens: quality.outputTokens, estimatedCostUsd: quality.estimatedCostUsd, reservedCostUsd: quality.reservedCostUsd } } : {}),
-    observedAndEstimatedCostUsd: quality?.estimatedCostUsd === null ? null : reportedCostUsd + estimatedRuntimeCostUsd + (quality?.estimatedCostUsd ?? 0),
+    observedAndEstimatedCostUsd: quality?.estimatedCostUsd === null ? null : reportedCostUsd + estimatedRuntimeCostUsd + (quality?.estimatedCostUsd ?? 0) + (result.publicMcp?.estimatedCostUsd ?? 0),
     complete,
   };
 }
@@ -350,7 +362,15 @@ export function aggregateCampaignBilling(
     0,
   );
   const judges = summaries.flatMap(summary => summary.judge ? [summary.judge] : []);
+  const assistants = summaries.flatMap(summary => summary.assistant ? [summary.assistant] : []);
   return {
+    ...(assistants.length ? { assistant: {
+      requests: assistants.reduce((n, u) => n + u.requests, 0),
+      inputTokens: assistants.reduce((n, u) => n + u.inputTokens, 0),
+      outputTokens: assistants.reduce((n, u) => n + u.outputTokens, 0),
+      cachedInputTokens: assistants.reduce((n, u) => n + u.cachedInputTokens, 0),
+      estimatedCostUsd: assistants.reduce((n, u) => n + u.estimatedCostUsd, 0),
+    } } : {}),
     ...(judges.length ? { judge: {
       attempts: judges.length,
       inputTokens: judges.reduce((n, q) => n + (q.inputTokens ?? 0), 0),

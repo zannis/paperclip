@@ -14,6 +14,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type {
+  ChatExecutionDefaults,
   ChatAdapterCapabilities,
   ChatConcurrencyPolicy,
   ChatDeliveryState,
@@ -64,9 +65,12 @@ export const chatEndpoints = pgTable(
     botUsername: text("bot_username"),
     botDisplayName: text("bot_display_name"),
     botAvatarUrl: text("bot_avatar_url"),
+    communicationInstructions: text("communication_instructions").notNull().default(""),
+    executionDefaults: jsonb("execution_defaults").$type<ChatExecutionDefaults>(),
     allowDirectMessages: boolean("allow_direct_messages")
       .notNull()
       .default(true),
+    requireAtMention: boolean("require_at_mention").notNull().default(false),
     allowGroupChats: boolean("allow_group_chats").notNull().default(false),
     allowUnlinkedPeople: boolean("allow_unlinked_people")
       .notNull()
@@ -116,7 +120,7 @@ export const chatEndpoints = pgTable(
     check("chat_endpoints_email_policy_check", sql`${table.provider} <> 'agentmail' or (${table.publicationMode} = 'explicit' and ${table.externalExecutionPolicy} = 'agent')`),
     check(
       "chat_endpoints_provider_check",
-      sql`${table.provider} in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'agentmail', 'imessage-photon')`,
+      sql`${table.provider} in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'speko', 'agentmail', 'imessage-photon')`,
     ),
     check(
       "chat_endpoints_status_check",
@@ -218,6 +222,7 @@ export const chatEndpointResources = pgTable(
       .notNull()
       .default("available"),
     enabled: boolean("enabled").notNull().default(false),
+    executionDefaults: jsonb("execution_defaults").$type<ChatExecutionDefaults>(),
     metadata: jsonb("metadata")
       .$type<Record<string, unknown>>()
       .notNull()
@@ -281,7 +286,7 @@ export const chatExternalPrincipals = pgTable(
   (table) => [
     check(
       "chat_external_principals_provider_check",
-      sql`${table.provider} in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'agentmail', 'imessage-photon')`,
+      sql`${table.provider} in ('slack', 'github', 'discord', 'microsoft-teams', 'telegram', 'speko', 'agentmail', 'imessage-photon')`,
     ),
     check(
       "chat_external_principals_kind_check",
@@ -378,6 +383,8 @@ export const chatConversations = pgTable(
     externalLabel: text("external_label").notNull(),
     providerUrl: text("provider_url"),
     isDirectMessage: boolean("is_direct_message").notNull().default(false),
+    // Immutable initial task context, never refreshed from endpoint settings.
+    communicationGuidance: text("communication_guidance"),
     state: text("state").notNull().default("active"),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })

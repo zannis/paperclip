@@ -16,6 +16,9 @@ describe("Codex CI sandbox trust boundary", () => {
     ["everyday-workflows.runner-codex.daytona.build-revise", false],
     ["core-compatibility.legacy-codex.local.message-marker", false],
     ["core-compatibility.runner-acpx-codex.local.message-marker", true],
+    ["case-handoffs.runner-codex-subscription.local.same-task-roundtrip", true],
+    ["case-handoffs.runner-codex-subscription.local.receipt-smoke", true],
+    ["case-handoffs.runner-codex.local.receipt-smoke", true],
   ] as const)("qualifies the native local Codex sandbox for %s: %s", (id, expected) => {
     const execution = runnerMatrix.find((cell) => cell.id === id);
     expect(execution, id).toBeDefined();
@@ -37,9 +40,9 @@ describe("Codex CI sandbox trust boundary", () => {
       [...condition!.matchAll(/matrix\.profileId == '([^']+)'/g)].map((match) => match[1]),
     );
     expect([...provisionedProfiles].sort()).toEqual(
-      [...new Set(runnerMatrix.filter(requiresCodexCiSandbox).map((cell) => cell.profile.id))].sort(),
+      [...new Set(runnerMatrix.filter(cell => cell.task.flow !== "provider_connection").filter(requiresCodexCiSandbox).map((cell) => cell.profile.id))].sort(),
     );
-    for (const cell of runnerMatrix) {
+    for (const cell of runnerMatrix.filter(cell => cell.task.flow !== "provider_connection")) {
       expect(
         cell.environment.id === "local" && provisionedProfiles.has(cell.profile.id),
         cell.id,
