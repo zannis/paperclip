@@ -96,14 +96,14 @@ export function statelessMcpRequest(input: {
 }
 
 /**
- * A 2026-07-28 result can end without completing, e.g. `input_required` when
- * the server wants confirmation. Nothing was done, so it must not read as a
- * success. Servers on older protocols never send `resultType`.
+ * A 2026-07-28 result can end without completing: `input_required` when the
+ * server wants confirmation. Nothing was done, so it must not read as a
+ * success. Any other `resultType` (or none) is a result to read as usual.
  */
 export function incompleteMcpResult(result: unknown): { message: string } | null {
   if (!result || typeof result !== "object") return null;
   const record = result as Record<string, unknown>;
-  if (record.resultType === undefined || record.resultType === "complete") return null;
+  if (record.resultType !== "input_required") return null;
   const requests = record.inputRequests && typeof record.inputRequests === "object"
     ? Object.values(record.inputRequests as Record<string, unknown>) : [];
   const question = requests

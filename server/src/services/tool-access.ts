@@ -3016,8 +3016,13 @@ function sanitizeHttpFailure(error: unknown): {
   };
 }
 
+/** The endpoint as configured, before parsing; see remoteEndpoint(). */
+function configuredEndpoint(config: Record<string, unknown>): unknown {
+  return config.url ?? config.endpoint ?? config.remoteUrl;
+}
+
 function remoteEndpoint(config: Record<string, unknown>): string {
-  const value = config.url ?? config.endpoint ?? config.remoteUrl;
+  const value = configuredEndpoint(config);
   const parsed = parseRemoteHttpEndpoint(value, (message, code) =>
     badRequest(message, { code }),
   );
@@ -7103,8 +7108,8 @@ export function toolAccessService(
     const sendRemote = (init: RequestInit) => requestRemoteHttpEndpoint(new URL(endpoint), init);
     // Servers on MCP 2026-07-28 have no initialize and need every request to
     // carry the version. A connection that learned this skips the session flow.
-    let stateless = usesStatelessMcpProtocol(connection.config);
-    let learnedStateless = false;
+    const startedStateless = usesStatelessMcpProtocol(connection.config);
+    let stateless = startedStateless;
     const sendToolsList = (requestHeaders: Record<string, string>, cursor?: string) => {
       sessionHeaders = requestHeaders;
       const params = cursor ? { cursor } : {};
@@ -7160,7 +7165,28 @@ export function toolAccessService(
       response = await sendToolsList(sessionHeaders);
       if (response.status === 404) forgetMcpHttpSessions(connection.id);
     }
+    // Neither a plain request nor the initialize handshake was accepted. A
+    // 2026-07-28 server refuses both with 400 for lacking a version header, so
+    // try tools/list once in that form; it is read-only. Success keeps the
+    // mode. Before the credential refreshes below, so does a 401 or 403: the
+    // server read the version and now judges the credential, and the
+    // refreshes and scope check run in this mode. Any other answer keeps the
+    // original 400, as before.
+    const probeStateless = async (keepOnAuthFailure: boolean) => {
+      if (stateless || response.status !== 400) return;
+      stateless = true;
+      const probe = await sendToolsList(headers);
+      if (probe.ok || (keepOnAuthFailure && (probe.status === 401 || probe.status === 403))) {
+        await response.body?.cancel().catch(() => undefined);
+        response = probe;
+        return;
+      }
+      await probe.body?.cancel().catch(() => undefined);
+      stateless = false;
+    };
+    await probeStateless(true);
     if (
+      !stateless &&
       usedInitializedSession &&
       connection.config.mcpSessionRequired !== true
     ) {
@@ -7233,27 +7259,9 @@ export function toolAccessService(
         }
       }
     }
-    if (!stateless && response.status === 400) {
-      // Neither a plain request nor the initialize handshake was accepted. A
-      // 2026-07-28 server refuses both for lacking a version header, so try
-      // tools/list once in that form; it is read-only. It runs after the
-      // credential refreshes above so it carries the current credential. A
-      // 401 or 403 is the server's real answer once it reads the version, so
-      // it is reported in place of the 400; any other failure keeps the 400.
-      stateless = true;
-      const probe = await sendToolsList(headers);
-      if (probe.ok) {
-        await response.body?.cancel().catch(() => undefined);
-        response = probe;
-        learnedStateless = true;
-      } else if (probe.status === 401 || probe.status === 403) {
-        await response.body?.cancel().catch(() => undefined);
-        response = probe;
-      } else {
-        await probe.body?.cancel().catch(() => undefined);
-        stateless = false;
-      }
-    }
+    // A server that judges the credential first only shows the version
+    // problem once a refreshed credential is accepted.
+    await probeStateless(false);
     if (!response.ok) {
       if ((response.status === 401 || response.status === 403)
         && connection.authKind === "api_key" && isMemoryConnectorId(connection.config.sourceTemplateKey)) {
@@ -7329,7 +7337,7 @@ export function toolAccessService(
       const record = asRecord(payload);
       if (record.error) throw new HttpError(502, "Remote MCP tool discovery failed", { code: "mcp_catalog_error" });
       const result = asRecord(record.result);
-      if (stateless && result.resultType !== undefined && result.resultType !== "complete") {
+      if (stateless && result.resultType === "input_required") {
         throw new HttpError(502, "Remote MCP did not complete tool discovery", { code: "mcp_catalog_incomplete" });
       }
       if (!Array.isArray(result.tools)) throw new HttpError(502, "Remote MCP returned an invalid tool catalog", { code: "mcp_catalog_invalid" });
@@ -7342,9 +7350,10 @@ export function toolAccessService(
       response = await sendToolsList(sessionHeaders, cursor);
       if (!response.ok) throw new HttpError(502, "Remote MCP catalog page could not be read", { status: response.status });
     }
-    if (learnedStateless) {
-      // Stored only once a full, valid catalog came back in this form.
-      const current = await getConnectionRow(connection.id);
+    const current = stateless && !startedStateless ? await getConnectionRow(connection.id) : null;
+    // Stored only once a full, valid catalog came back in this form, and only
+    // while the row still points at the server that gave it.
+    if (current && configuredEndpoint(current.config) === configuredEndpoint(connection.config)) {
       await db
         .update(toolConnections)
         .set({
@@ -7353,6 +7362,10 @@ export function toolAccessService(
           updatedAt: now(),
         })
         .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)));
+      // Later writes from this connection object (Railway's below, the caller's
+      // catalog refresh) start from it, so they keep what was learned.
+      connection.config = { ...connection.config, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION };
+      connection.transportConfig = { ...connection.transportConfig, mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION };
     }
     if (!isRailwayConnection(connection)) return descriptors;
     if (descriptors.some((tool) => normalizeRailwayToolName(tool.name).startsWith(RAILWAY_TOOL_PREFIX))) {
@@ -7947,25 +7960,16 @@ export function toolAccessService(
       }
     }
 
-    // Discovery may have learned the protocol and stored it on the row after
-    // `connection` was read; keep it rather than writing the stale copy back.
-    const learnedProtocol = usesStatelessMcpProtocol(connection.config)
-      ? {}
-      : usesStatelessMcpProtocol((await getConnectionRow(connection.id)).config)
-      ? { mcpProtocolVersion: MCP_STATELESS_PROTOCOL_VERSION }
-      : {};
-    const baseConfig = { ...connection.config, ...learnedProtocol };
-    const baseTransportConfig = { ...connection.transportConfig, ...learnedProtocol };
     const normalizedConfig = isRailwayEndpoint(connection.config.url)
-      ? { ...baseConfig, quarantineNewEntries: true }
+      ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
-      ? { ...baseConfig, quarantineNewEntries: false }
-      : baseConfig;
+      ? { ...connection.config, quarantineNewEntries: false }
+      : connection.config;
     const normalizedTransportConfig = isRailwayEndpoint(connection.config.url)
-      ? { ...baseTransportConfig, quarantineNewEntries: true }
+      ? { ...connection.transportConfig, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
-      ? { ...baseTransportConfig, quarantineNewEntries: false }
-      : baseTransportConfig;
+      ? { ...connection.transportConfig, quarantineNewEntries: false }
+      : connection.transportConfig;
     const [updatedConnection] = await db
       .update(toolConnections)
       .set({
@@ -18946,8 +18950,7 @@ export function toolAccessService(
       // A protocol learned from one server says nothing about another; the
       // next catalog refresh learns it again if it still applies. The endpoint
       // is resolved as remoteEndpoint() does, and decides for both configs.
-      const endpointOf = (value: Record<string, unknown>) => value.url ?? value.endpoint ?? value.remoteUrl;
-      const endpointChanged = endpointOf(config) !== endpointOf(existing.config);
+      const endpointChanged = configuredEndpoint(config) !== configuredEndpoint(existing.config);
       const forgetLearnedProtocol = (next: Record<string, unknown>) => {
         if (!endpointChanged || !("mcpProtocolVersion" in next)) return next;
         const { mcpProtocolVersion: _forgotten, ...rest } = next;

@@ -183,6 +183,9 @@ describe("incompleteMcpResult", () => {
     expect(incompleteMcpResult({ content: [] })).toBeNull();
     expect(incompleteMcpResult({ resultType: "complete", content: [] })).toBeNull();
     expect(incompleteMcpResult(null)).toBeNull();
+    // Only input_required means "not done"; anything else is a result to read.
+    expect(incompleteMcpResult({ resultType: "task", content: [] })).toBeNull();
+    expect(incompleteMcpResult({ resultType: null, content: [] })).toBeNull();
   });
 
   it("explains an input_required result, including the server's question and links", () => {
