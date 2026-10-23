@@ -127,13 +127,13 @@ describe("probeRuntimeApiUrl", () => {
     expect(result.ok === false && result.reason).toContain("https://auth.example.com/cdn-cgi/access/login");
   });
 
-  it("redacts credentials an auth proxy put in its sign-in redirect", async () => {
+  it("drops every query value an auth proxy put in its sign-in redirect", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       new Response(null, {
         status: 302,
         headers: {
           location:
-            "https://auth.example.com/cdn-cgi/access/login?code=oauth-grant-value&state=csrf-state-value&kid=team",
+            "https://auth.example.com/cdn-cgi/access/login?code=oauth-grant-value&state=csrf-state-value",
         },
       }),
     );
@@ -144,10 +144,55 @@ describe("probeRuntimeApiUrl", () => {
     const reason = result.ok === false ? result.reason : "";
     expect(reason).not.toContain("oauth-grant-value");
     expect(reason).not.toContain("csrf-state-value");
-    // The proxy still has to be identifiable: origin, path, and its non-secret
-    // query configuration are what name the misconfiguration.
-    expect(reason).toContain("https://auth.example.com/cdn-cgi/access/login");
-    expect(reason).toContain("kid=team");
+    // The proxy still has to be identifiable: origin and path are what name the
+    // misconfiguration. The query never is.
+    expect(reason).toContain("https://auth.example.com/cdn-cgi/access/login (+2 query parameters)");
+  });
+
+  it("drops query values whose parameter names no redactor could enumerate", async () => {
+    // Cloudflare Access carries its sign-in material in `kid` and `meta`, which
+    // match no sensitive-name pattern. A name list fails open against any proxy
+    // it has not seen, so the target keeps nothing but origin and path.
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location:
+            "https://access-team.cloudflareaccess.com/cdn-cgi/access/login/board.example.com" +
+            "?kid=52a5351c82c27d6e&meta=eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9&redirect_url=%2Fapi%2Fhealth",
+        },
+      }),
+    );
+
+    const result = await probeRuntimeApiUrl("https://board.example.com", { fetchImpl: fetchImpl as any });
+
+    expect(result.ok).toBe(false);
+    const reason = result.ok === false ? result.reason : "";
+    expect(reason).not.toContain("52a5351c82c27d6e");
+    expect(reason).not.toContain("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9");
+    expect(reason).toContain(
+      "https://access-team.cloudflareaccess.com/cdn-cgi/access/login/board.example.com (+3 query parameters)",
+    );
+  });
+
+  it("bounds a multi-kilobyte redirect target so a boot log line is not sized by a third party", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: `https://auth.example.com/cdn-cgi/access/${"login-".repeat(1_000)}?meta=${"x".repeat(4_000)}`,
+        },
+      }),
+    );
+
+    const result = await probeRuntimeApiUrl("https://board.example.com", { fetchImpl: fetchImpl as any });
+
+    expect(result.ok).toBe(false);
+    const reason = result.ok === false ? result.reason : "";
+    expect(reason).not.toContain("xxxxxxxxxx");
+    expect(reason.length).toBeLessThan(300);
+    expect(reason).toContain("https://auth.example.com/cdn-cgi/access/login-");
+    expect(reason).toContain("(+1 query parameter)");
   });
 
   it("resolves a relative redirect target so the path still names the front door", async () => {
@@ -163,7 +208,7 @@ describe("probeRuntimeApiUrl", () => {
     expect(result.ok).toBe(false);
     const reason = result.ok === false ? result.reason : "";
     expect(reason).not.toContain("proxy-ticket-value");
-    expect(reason).toContain("https://board.example.com/cdn-cgi/access/login");
+    expect(reason).toContain("https://board.example.com/cdn-cgi/access/login (+1 query parameter)");
   });
 
   it("rejects a JSON content-type carrying a non-JSON body", async () => {

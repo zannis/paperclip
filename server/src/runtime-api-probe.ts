@@ -121,6 +121,8 @@ export function loggableApiUrl(apiUrl: string): string {
   return redactRemoteUrlCredential(apiUrl, "the configured API URL");
 }
 
+const MAX_LOGGABLE_REDIRECT_TARGET_CHARS = 200;
+
 /**
  * Render a redirect target for a rejection reason.
  *
@@ -130,6 +132,22 @@ export function loggableApiUrl(apiUrl: string): string {
  * boot, durably, by the caller. The `Location` header is attacker-influenced
  * and unvetted, so it never reaches the log unredacted.
  *
+ * Holding that invariant rules out {@link redactRemoteUrlCredential} here. That
+ * helper masks parameters it recognises by name, which is the right trade for
+ * its own callers — an operator-authored remote URL, where the non-sensitive
+ * query is reviewed configuration worth keeping. A third party chooses the
+ * names in a `Location`, so a name list fails open against the first proxy it
+ * has not seen: Cloudflare Access carries its sign-in material in `kid` and
+ * `meta`, neither of which any such list has a reason to hold. So drop the
+ * query wholesale, the call `scrubGitCredentialText` already makes for the same
+ * reason, and keep only origin and path — which is all that names the proxy.
+ * The count of dropped parameters stays, so the log still shows there was a
+ * query without showing any of it.
+ *
+ * The result is capped for the same reason it is redacted: a `Location` is
+ * third-party input, Cloudflare's is already ~1 kB, and a boot log line should
+ * not be sized by whatever answered the probe.
+ *
  * A `Location` may legitimately be relative. Resolving it against the probe URL
  * keeps the path — the part that names the proxy — instead of collapsing the
  * whole target to the unparseable fallback.
@@ -137,13 +155,28 @@ export function loggableApiUrl(apiUrl: string): string {
 function loggableRedirectTarget(location: string, probeUrl: string): string | null {
   const trimmed = location.trim();
   if (!trimmed) return null;
-  let absolute: string;
+  let url: URL;
   try {
-    absolute = new URL(trimmed, probeUrl).toString();
+    url = new URL(trimmed, probeUrl);
   } catch {
     return "an unparseable target";
   }
-  return redactRemoteUrlCredential(absolute, "an unparseable target");
+
+  const droppedParameters = [...url.searchParams.keys()].length;
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  // A fragment never reaches the server, so it cannot name the front door, and
+  // an implicit-flow proxy puts its token there.
+  url.hash = "";
+
+  const target = url.toString();
+  const bounded =
+    target.length > MAX_LOGGABLE_REDIRECT_TARGET_CHARS
+      ? `${target.slice(0, MAX_LOGGABLE_REDIRECT_TARGET_CHARS - 1)}…`
+      : target;
+  if (droppedParameters === 0) return bounded;
+  return `${bounded} (+${droppedParameters} query parameter${droppedParameters === 1 ? "" : "s"})`;
 }
 
 export type RuntimeApiProbeResult =
