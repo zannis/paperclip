@@ -29,6 +29,7 @@ const {
   issueThreadInteractionServiceFactoryMock,
   issueThreadInteractionServiceMock,
   loadConfigMock,
+  probeRuntimeApiUrlMock,
   resolveHeartbeatSchedulingSuppressionMock,
   routineServiceFactoryMock,
   routineServiceMock,
@@ -123,17 +124,29 @@ const {
     flushPendingFeedbackTraces: vi.fn(async () => ({ attempted: 0, sent: 0, failed: 0 })),
   };
   const feedbackServiceFactoryMock = vi.fn(() => feedbackExportServiceMock);
+  let boundAddress: { address: string; port: number } | null = null;
   const fakeServer = {
     on: vi.fn().mockReturnThis(),
     once: vi.fn().mockReturnThis(),
     off: vi.fn().mockReturnThis(),
-    listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
+    listen: vi.fn((port: number, host: string, callback?: () => void) => {
+      boundAddress = { address: host, port };
       callback?.();
       return fakeServer;
     }),
+    // The runtime API-URL resolution authenticates its fallback by the address
+    // this process actually bound, so the fake has to report one.
+    address: vi.fn(() => boundAddress),
     close: vi.fn((callback?: (error?: Error) => void) => callback?.()),
   };
   const loadConfigMock = vi.fn();
+  // Startup probes the runtime API base over the network. Reject by default so
+  // no suite reaches for a real origin; the resolution then keeps the
+  // configured value, which is what every pre-existing expectation assumes.
+  const probeRuntimeApiUrlMock = vi.fn(async (_apiUrl: string) => ({
+    ok: false as const,
+    reason: "not configured by this test",
+  }));
 
   return {
     createAppMock,
@@ -155,6 +168,7 @@ const {
     issueThreadInteractionServiceFactoryMock,
     issueThreadInteractionServiceMock,
     loadConfigMock,
+    probeRuntimeApiUrlMock,
     resolveHeartbeatSchedulingSuppressionMock,
     routineServiceFactoryMock,
     routineServiceMock,
@@ -227,6 +241,11 @@ vi.mock("@paperclipai/db", () => ({
 
 vi.mock("../app.js", () => ({
   createApp: createAppMock,
+}));
+
+vi.mock("../runtime-api-probe.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../runtime-api-probe.js")>()),
+  probeRuntimeApiUrl: probeRuntimeApiUrlMock,
 }));
 
 vi.mock("../services/native-runtime/native-session-executor.js", () => ({
@@ -409,6 +428,7 @@ vi.mock("../auth/better-auth.js", () => ({
   resolveBetterAuthSessionFromHeaders: vi.fn(async () => null),
 }));
 
+import { buildPaperclipEnv } from "@paperclipai/adapter-utils/server-utils";
 import { startServer } from "../index.ts";
 import { reconcileSafeNativeReplacements } from "../services/native-runtime/native-safe-replacement.js";
 import { EXECUTION_RECONCILIATION_INTERVAL_MS } from "../services/execution-control-deadline.js";
@@ -860,6 +880,70 @@ describe("startServer PAPERCLIP_API_URL handling", () => {
     expect(started.listenPort).toBe(3110);
     expect(started.apiUrl).toBe("http://my-host.ts.net:3100");
     expect(process.env.PAPERCLIP_RUNTIME_API_URL).toBe("http://my-host.ts.net:3100");
+  });
+
+  // `resumeQueuedRuns` is the boot's first dispatch: startup heartbeat
+  // recovery reaches it before the scheduler's first tick. Observe the boot
+  // from inside it to see what a run spawned at that moment would get.
+  async function startServerObservingFirstDispatch(
+    observe: () => void,
+  ): Promise<Awaited<ReturnType<typeof startServer>>> {
+    heartbeatServiceMock.resumeQueuedRuns.mockImplementation(async () => {
+      observe();
+    });
+    try {
+      return await startServer();
+    } finally {
+      heartbeatServiceMock.resumeQueuedRuns.mockImplementation(async () => undefined);
+    }
+  }
+
+  it("hands the first run dispatched on a boot the verified base, not the configured one", async () => {
+    // A host with no PAPERCLIP_API_URL pin derives an edge origin that answers
+    // HTML rather than the board API. Correcting that at the end of startup
+    // was too late for a run the boot had already spawned, because
+    // `buildPaperclipEnv` reads `process.env` at spawn time.
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    resolveHeartbeatSchedulingSuppressionMock.mockReturnValue({ suppressed: false, reason: null });
+    process.env.PAPERCLIP_API_URL = "https://edge.example.com";
+    probeRuntimeApiUrlMock.mockImplementation(async (apiUrl: string) =>
+      apiUrl === "http://127.0.0.1:3210"
+        ? { ok: true as const, status: 200 }
+        : { ok: false as const, reason: "answered HTTP 200 with content-type text/html instead of JSON" },
+    );
+
+    // Read the real env builder, so this is the base the child would carry.
+    let firstDispatchChildApiUrl: string | undefined;
+    try {
+      const started = await startServerObservingFirstDispatch(() => {
+        firstDispatchChildApiUrl = buildPaperclipEnv({
+          id: "agent-1",
+          companyId: "company-1",
+        }).PAPERCLIP_API_URL;
+      });
+
+      expect(firstDispatchChildApiUrl).toBe("http://127.0.0.1:3210");
+      expect(started.apiUrl).toBe("http://127.0.0.1:3210");
+    } finally {
+      probeRuntimeApiUrlMock.mockImplementation(async () => ({
+        ok: false as const,
+        reason: "not configured by this test",
+      }));
+    }
+  });
+
+  it("binds the listener before the boot dispatches its first run", async () => {
+    // A run dispatched ahead of the bind calls its own board API and gets
+    // ECONNREFUSED. Nothing else guards this ordering.
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true }));
+    resolveHeartbeatSchedulingSuppressionMock.mockReturnValue({ suppressed: false, reason: null });
+
+    let listenCallsAtFirstDispatch = -1;
+    await startServerObservingFirstDispatch(() => {
+      listenCallsAtFirstDispatch = fakeServer.listen.mock.calls.length;
+    });
+
+    expect(listenCallsAtFirstDispatch).toBe(1);
   });
 
   it("keeps no-port auth public URLs stable when detect-port selects a new port", async () => {

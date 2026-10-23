@@ -1007,6 +1007,73 @@ async function startServerWithDatabaseTeardown(
   });
   startupListenerBound = true;
 
+  // Settle the base spawned runs inherit before anything can spawn one.
+  //
+  // `buildPaperclipEnv` reads `process.env` at spawn time, so this correction
+  // only reaches children spawned after it lands. Running it at the end of
+  // startup left the boot window uncovered: startup heartbeat recovery, the
+  // first scheduler tick, and any request the now-bound listener accepts can
+  // all dispatch a run first, and those runs inherited the *unvalidated*
+  // value. On a host without the `PAPERCLIP_API_URL` pin — a new instance, a
+  // fresh host, an env-file rewrite, which is exactly what this check exists
+  // for — that value is the edge origin, and the probe's rejection was logged
+  // too late to have helped them.
+  //
+  // So it belongs here, in the one place that is after `listen` (the probe
+  // authenticates its fallback by the address this process actually bound) and
+  // before every dispatch path. Listener-bound and API-base-settled are then a
+  // single startup signal rather than two, and "did the probe run in time" is
+  // no longer a question about dispatch timing.
+  let resolvedApiUrl = configuredApiUrl;
+  try {
+    const runtimeApiResolution = await resolveVerifiedRuntimeApiUrl({
+      configuredApiUrl,
+      selfOriginApiUrl: runtimeSelfOriginApiUrl(
+        server.address() ?? { address: runtimeListenHost, port: listenPort },
+      ),
+      probe: (apiUrl) => probeRuntimeApiUrl(apiUrl),
+    });
+    const loggableConfiguredApiUrl = loggableApiUrl(configuredApiUrl);
+    const loggableRejected = runtimeApiResolution.rejected.map((entry) => ({
+      apiUrl: loggableApiUrl(entry.apiUrl),
+      reason: entry.reason,
+    }));
+    if (runtimeApiResolution.unverified) {
+      logger.error(
+        {
+          configuredApiUrl: loggableConfiguredApiUrl,
+          probePath: RUNTIME_API_PROBE_PATH,
+          rejected: loggableRejected,
+        },
+        `Neither PAPERCLIP_API_URL=${loggableConfiguredApiUrl} nor this server's own bound origin served the Paperclip API; spawned agents keep that PAPERCLIP_API_URL and may be unable to reach their own board`,
+      );
+    } else if (runtimeApiResolution.changed) {
+      resolvedApiUrl = runtimeApiResolution.apiUrl;
+      logger.error(
+        {
+          configuredApiUrl: loggableConfiguredApiUrl,
+          fallbackApiUrl: resolvedApiUrl,
+          probePath: RUNTIME_API_PROBE_PATH,
+          rejected: loggableRejected,
+        },
+        `PAPERCLIP_API_URL=${loggableConfiguredApiUrl} does not serve the Paperclip API; spawned agents will use ${resolvedApiUrl} instead`,
+      );
+      process.env.PAPERCLIP_API_URL = resolvedApiUrl;
+      process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = JSON.stringify([
+        resolvedApiUrl,
+        ...runtimeApiCandidates.filter(
+          (candidate) => candidate !== resolvedApiUrl && candidate !== configuredApiUrl,
+        ),
+      ]);
+      updateRunnerPrpApiUrl(resolvedApiUrl);
+    }
+  } catch (err) {
+    logger.error(
+      { err, configuredApiUrl: loggableApiUrl(configuredApiUrl) },
+      "runtime API URL startup validation failed; keeping the configured URL",
+    );
+  }
+
   try {
     const result = await workspaceOperationService(db as any)
       .reconcileStaleRuntimeControlOperations();
@@ -1901,55 +1968,6 @@ async function startServerWithDatabaseTeardown(
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,
         databaseBackupDir: config.databaseBackupDir,
   });
-  let resolvedApiUrl = configuredApiUrl;
-  try {
-    const runtimeApiResolution = await resolveVerifiedRuntimeApiUrl({
-      configuredApiUrl,
-      selfOriginApiUrl: runtimeSelfOriginApiUrl(
-        server.address() ?? { address: runtimeListenHost, port: listenPort },
-      ),
-      probe: (apiUrl) => probeRuntimeApiUrl(apiUrl),
-    });
-    const loggableConfiguredApiUrl = loggableApiUrl(configuredApiUrl);
-    const loggableRejected = runtimeApiResolution.rejected.map((entry) => ({
-      apiUrl: loggableApiUrl(entry.apiUrl),
-      reason: entry.reason,
-    }));
-    if (runtimeApiResolution.unverified) {
-      logger.error(
-        {
-          configuredApiUrl: loggableConfiguredApiUrl,
-          probePath: RUNTIME_API_PROBE_PATH,
-          rejected: loggableRejected,
-        },
-        `Neither PAPERCLIP_API_URL=${loggableConfiguredApiUrl} nor this server's own bound origin served the Paperclip API; spawned agents keep that PAPERCLIP_API_URL and may be unable to reach their own board`,
-      );
-    } else if (runtimeApiResolution.changed) {
-      resolvedApiUrl = runtimeApiResolution.apiUrl;
-      logger.error(
-        {
-          configuredApiUrl: loggableConfiguredApiUrl,
-          fallbackApiUrl: resolvedApiUrl,
-          probePath: RUNTIME_API_PROBE_PATH,
-          rejected: loggableRejected,
-        },
-        `PAPERCLIP_API_URL=${loggableConfiguredApiUrl} does not serve the Paperclip API; spawned agents will use ${resolvedApiUrl} instead`,
-      );
-      process.env.PAPERCLIP_API_URL = resolvedApiUrl;
-      process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = JSON.stringify([
-        resolvedApiUrl,
-        ...runtimeApiCandidates.filter(
-          (candidate) => candidate !== resolvedApiUrl && candidate !== configuredApiUrl,
-        ),
-      ]);
-      updateRunnerPrpApiUrl(resolvedApiUrl);
-    }
-  } catch (err) {
-    logger.error(
-      { err, configuredApiUrl: loggableApiUrl(configuredApiUrl) },
-      "runtime API URL startup validation failed; keeping the configured URL",
-    );
-  }
   const boardClaimUrl = getBoardClaimWarningUrl(config.host, listenPort);
   if (boardClaimUrl) {
     const red = "\x1b[41m\x1b[30m";
