@@ -1,0 +1,21 @@
+server/src/__tests__/agent-instructions-routes.test.ts
+  s_19952912252a40::t_5916d65295c02b 295-296
+server/src/__tests__/document-annotation-routes.test.ts
+  s_19952912252a40::t_830b353854f13b 232-233
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "29283fb581904f82fb28a446e9267ae36cf42f94",
+  "prompts": {},
+  "sessions": {
+    "s_19952912252a40": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8ee9b19-a1bf-4bf7-a1d0-5d7975faf288",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
