@@ -1,0 +1,14 @@
+server/src/services/heartbeat/recovery.test.ts
+  h_f81d3033687456 8,60
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aaf5308583d951db9a48fe40e8f019752eee2407",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
