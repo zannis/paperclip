@@ -1,0 +1,25 @@
+packages/paperclip-runner/onlybots-acpx-patch.json
+  s_19952912252a40::t_46d7a37452ebcb 1-5
+packages/paperclip-runner/scripts/generate-acpx-profiles.mjs
+  s_19952912252a40::t_37e0687fcda9f1 40-42
+packages/paperclip-runner/src/drivers/acpx/copilot-installation.test.ts
+  s_19952912252a40::t_2206e22a7862ab 107,110-112
+packages/paperclip-runner/src/drivers/acpx/pi-installation.test.ts
+  s_19952912252a40::t_594661c57d67cb 109-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "990f304df12cf5eaf90a2ed641722093954de96d",
+  "prompts": {},
+  "sessions": {
+    "s_19952912252a40": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8ee9b19-a1bf-4bf7-a1d0-5d7975faf288",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
