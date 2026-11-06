@@ -241,6 +241,45 @@ tool access, AI connections, the npm override and acpx packaging scripts, and
 the runner's provider backend tests). The full `pnpm test:run` and the
 serialized server suite were not run.
 
+## Upstream update (November 6, 2026)
+
+The queue moved from upstream `v2026.1012.0` to the release tag `v2026.1023.0`
+(`1b4c803816`, 200 upstream commits; master was deliberately not used). The old
+queue tip `46ce2ee4e4` is anchored at `refs/onlybots-backups/sync/onlybots-20261106`.
+These resolutions need review:
+
+- **Claude subscription credentials are retired.** PRs #20, #22 and #29 are
+  dropped in favour of upstream's setup-token flow: the stored credential is the
+  bare token and reaches the run through `CLAUDE_CODE_OAUTH_TOKEN`. A connection
+  saved under those patches stores a credential document, which that delivery
+  cannot use, so it must be reconnected once. The host runner gate (#21) stays.
+- **Migration renumbering.** Upstream added 0306–0333. The lane task primitives
+  and grouped children migrations moved from 0306–0308 to 0334–0336 with
+  byte-identical SQL, snapshots rebuilt as before.
+- **Heartbeat split.** Upstream moved most of `heartbeat.ts` into
+  `services/heartbeat/`. Zombie-aware liveness moved to `recovery.ts`, the
+  transient family to `retries.ts`, the grouped-child blocker filter to
+  `queue.ts` and `run-lifecycle.ts`, the sandbox reclaim sweeps to `recovery.ts`,
+  self-close teardown to `run-control.ts`, resume-failure retry to
+  `run-completion.ts`.
+- **Acpx patch attestation.** Upstream hashes `patches/acpx@0.13.1.patch` in the
+  Cursor, Pi and Copilot profiles. Their proofs ran on upstream's patch, so they
+  are not re-hashed. `packages/paperclip-runner/onlybots-acpx-patch.json` records
+  the qualified and queue hashes; update it when the acpx patch is rebuilt.
+- **Claude ACP pin.** Upstream moved pins to `acpx-profiles.json`; 0.81.2 and its
+  digest live there and in the generated profiles. The historical provider-pack
+  fixture keeps its captured 0.73.0.
+- **Project inference.** A project the agent cannot read is no longer inferred,
+  matching upstream's `project:read` check on explicit selection. Upstream parents
+  an agent's task under its run's issue, so only a parent the agent named counts
+  as an explicit choice, and an implied parent's project wins.
+- **Host gate.** The Test route guard moved with `testManagedEnvironment` to
+  `agent-environment-test.ts`.
+- **Sandbox teardown.** Upstream's `destroyScopedReusableSandboxLease` replaces
+  the patch's inline claims; it also drops stop state and honours a resume claim.
+- **Stateless MCP.** Upstream no longer replays a call after an OAuth refresh, so
+  the retry is explicit for stateless servers too.
+
 ## Queue CI repair (October 5, 2026)
 
 The October 3 tip failed six pull request checks that the pre-rebase queue
