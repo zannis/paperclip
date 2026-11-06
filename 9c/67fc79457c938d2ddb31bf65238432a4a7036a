@@ -1,0 +1,19 @@
+server/src/services/heartbeat/run-control.test.ts
+  s_19952912252a40::t_d14d02afa195ac 133-136,141
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9c67fc79457c938d2ddb31bf65238432a4a7036a",
+  "prompts": {},
+  "sessions": {
+    "s_19952912252a40": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8ee9b19-a1bf-4bf7-a1d0-5d7975faf288",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
