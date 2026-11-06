@@ -1,0 +1,14 @@
+server/src/__tests__/tool-access-service.test.ts
+  h_f81d3033687456 6784,11142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e359eb38fbed60c1a4ee07c61518a753f3842148",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
