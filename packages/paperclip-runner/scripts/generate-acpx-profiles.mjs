@@ -37,7 +37,9 @@ const canonicalJson = value => value && typeof value === "object"
   : JSON.stringify(value);
 const { commandDigest, ...attestation } = contract;
 assert.equal(commandDigest, `sha256:${createHash("sha256").update(canonicalJson(attestation)).digest("hex")}`);
-assert.equal(contract.acpxPatchSha256, createHash("sha256")
+const queuePatch = await readJson("onlybots-acpx-patch.json");
+assert.equal(contract.acpxPatchSha256, queuePatch.qualifiedPatchSha256);
+assert.equal(queuePatch.queuePatchSha256, createHash("sha256")
   .update(await readFile(new URL("../../patches/acpx@0.13.1.patch", root))).digest("hex"));
 for (const [agent, path] of [["pi", "test-fixtures/pi-acp/profile-v22-identity.json"], ["copilot", "test/fixtures/copilot-profile-v17-identity.json"]]) {
   const identity = await readJson(path);

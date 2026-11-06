@@ -104,9 +104,12 @@ describe("Copilot build-owned installation", () => {
     expect(QUALIFIED_ACPX_PROFILES.copilot.commandDigest).toBe(identity.commandDigest);
     const sorted = Object.fromEntries(Object.entries(identity.declaration).sort(([a], [b]) => a.localeCompare(b)));
     expect(`sha256:${createHash("sha256").update(JSON.stringify(sorted)).digest("hex")}`).toBe(identity.commandDigest);
-    for (const [relative, field] of [...PERMISSION_POLICY_SOURCES, ...SEMANTIC_RECEIPT_SOURCES, ["copilot-policy.ts", "policySha256"], ["../../../scripts/materialize-copilot-binary.mjs", "distributionSourceSha256"], ["../../../scripts/copilot-inner-distribution.mjs", "innerDistributionSourceSha256"], ["../../../../../patches/acpx@0.13.1.patch", "acpxPatchSha256"]]) {
+    for (const [relative, field] of [...PERMISSION_POLICY_SOURCES, ...SEMANTIC_RECEIPT_SOURCES, ["copilot-policy.ts", "policySha256"], ["../../../scripts/materialize-copilot-binary.mjs", "distributionSourceSha256"], ["../../../scripts/copilot-inner-distribution.mjs", "innerDistributionSourceSha256"]]) {
       expect(createHash("sha256").update(readFileSync(new URL(relative!, import.meta.url))).digest("hex")).toBe(identity.declaration[field!]);
     }
+    const queuePatch = JSON.parse(readFileSync(new URL("../../../onlybots-acpx-patch.json", import.meta.url), "utf8"));
+    expect(createHash("sha256").update(readFileSync(new URL("../../../../../patches/acpx@0.13.1.patch", import.meta.url))).digest("hex")).toBe(queuePatch.queuePatchSha256);
+    expect(identity.declaration.acpxPatchSha256).toBe(queuePatch.qualifiedPatchSha256);
     expect(readFileSync(new URL("../../../acpx-profiles.json", import.meta.url), "utf8")).toContain(identity.commandDigest);
     expect(readFileSync(new URL("../../../runner/crates/runner-core/src/generated_acpx_profiles.rs", import.meta.url), "utf8")).toContain(identity.commandDigest);
   });

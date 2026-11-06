@@ -106,7 +106,9 @@ describe("Pi installation factory", () => {
     for (const [path, field] of [["pi-provider-config.ts", "providerConfigurationSourceSha256"], ["environment.ts", "credentialEnvironmentSourceSha256"], ["runtime-sandbox.ts", "runtimeSandboxSourceSha256"], ["recovery-identity.ts", "recoveryIdentitySourceSha256"]]) {
       expect(hash(await readFile(new URL(`./${path}`, import.meta.url)))).toBe(declaration[field!]);
     }
-    expect(hash(await readFile(new URL("../../../../../patches/acpx@0.13.1.patch", import.meta.url)))).toBe(declaration.acpxPatchSha256);
+    const queuePatch = JSON.parse(await readFile(new URL("../../../onlybots-acpx-patch.json", import.meta.url), "utf8"));
+    expect(hash(await readFile(new URL("../../../../../patches/acpx@0.13.1.patch", import.meta.url)))).toBe(queuePatch.queuePatchSha256);
+    expect(declaration.acpxPatchSha256).toBe(queuePatch.qualifiedPatchSha256);
     expect(hash(await readFile(new URL("./pi-message-projection.ts", import.meta.url)))).toBe(declaration.messageProjectionSha256);
     expect(hash(await readFile(new URL("./pi-extension-adapter.ts", import.meta.url)))).toBe(declaration.noticeProjectionSha256);
     const helper = stripTypeScriptTypes(await readFile(new URL("./pi-acp-runtime.ts", import.meta.url), "utf8")).split("\n").map(line => line.trimEnd()).join("\n");
