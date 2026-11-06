@@ -1,0 +1,5 @@
+{
+  "qualifiedPatchSha256": "00d6af17216cb0cad902b48633eb19bf0ec6b05837a984cb24661fca593f09c1",
+  "queuePatchSha256": "886f82b8f3e40462bdaa3ea63baad2a8e2c3347ecf35a88ca5e4edfb2c1e75a3",
+  "reason": "Cursor, Pi and Copilot were qualified on upstream's acpx patch. The queue's patch adds only the Claude SDK plugin-loading hunks. Their recorded proofs are not re-attested, because they never ran on it."
+}
