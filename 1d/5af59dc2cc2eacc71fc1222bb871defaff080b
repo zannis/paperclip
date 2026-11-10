@@ -1,0 +1,19 @@
+scripts/acpx-patch-packaging.test.mjs
+  s_a0ad5143ebb918::t_c2917706e837aa 73,85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1d5af59dc2cc2eacc71fc1222bb871defaff080b",
+  "prompts": {},
+  "sessions": {
+    "s_a0ad5143ebb918": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aa7f01e1-461b-4323-beec-7ee0691feb55",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
