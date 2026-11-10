@@ -1,0 +1,36 @@
+server/src/services/heartbeat.ts
+  s_19952912252a40::t_93d3986cc7e193 448
+server/src/services/heartbeat/recovery.test.ts
+  h_f81d3033687456 8,61
+server/src/__tests__/issue-create-project-inference-routes.test.ts
+  s_19952912252a40::t_58fa7ade66ed3b 27
+server/src/routes/issues.ts
+  s_19952912252a40::t_f03dc4f2d81476 13139-13145
+server/src/__tests__/tool-access-service.test.ts
+  h_f81d3033687456 6969,11742
+server/src/__tests__/tool-gateway-service.test.ts
+  h_f81d3033687456 1627,1633,1646,1649
+server/src/services/heartbeat/run-control.test.ts
+  s_19952912252a40::t_d14d02afa195ac 109-112,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "64daa9358f6806254185b2422c6075b9bc5c9dee",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_19952912252a40": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8ee9b19-a1bf-4bf7-a1d0-5d7975faf288",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
