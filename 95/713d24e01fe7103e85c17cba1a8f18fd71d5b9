@@ -1,0 +1,21 @@
+doc/connections/TYPESAFE.md
+  s_a0ad5143ebb918::t_6e8d743272a8b4 145
+ui/storybook/stories/connection-setup/typesafe-connect-flow.stories.tsx
+  s_a0ad5143ebb918::t_f3c0668de6753f 34,653-664
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "95713d24e01fe7103e85c17cba1a8f18fd71d5b9",
+  "prompts": {},
+  "sessions": {
+    "s_a0ad5143ebb918": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "aa7f01e1-461b-4323-beec-7ee0691feb55",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
