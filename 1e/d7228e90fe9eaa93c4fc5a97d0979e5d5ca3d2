@@ -1,0 +1,28 @@
+doc/ONLYBOTS-PATCHES.md
+  s_19952912252a40::t_164e83981746db 244-282
+server/src/__tests__/document-annotation-routes.test.ts
+  s_19952912252a40::t_830b353854f13b 232-233
+server/src/__tests__/heartbeat-suppressed-execution-workspace-policy.test.ts
+  h_f81d3033687456 9,250
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1ed7228e90fe9eaa93c4fc5a97d0979e5d5ca3d2",
+  "prompts": {},
+  "humans": {
+    "h_f81d3033687456": {
+      "author": "zannis <zkalampoukis@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_19952912252a40": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f8ee9b19-a1bf-4bf7-a1d0-5d7975faf288",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
