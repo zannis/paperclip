@@ -280,6 +280,44 @@ These resolutions need review:
 - **Stateless MCP.** Upstream no longer replays a call after an OAuth refresh, so
   the retry is explicit for stateless servers too.
 
+## Upstream update (November 10, 2026)
+
+The queue moved from upstream `v2026.1023.0` to the release tag `v2026.1106.0`
+(`d69631b01b`, 515 upstream commits). The old queue tip `6c9fe00f92` is
+anchored at `refs/onlybots-backups/sync/onlybots-20261110`. All 81 patches
+remain. These resolutions need review:
+
+- **Migration renumbering.** Upstream added 0334–0374. The lane task primitives
+  and grouped children migrations moved from 0334–0336 to 0375–0377 with
+  byte-identical SQL, snapshots rebuilt as before.
+- **Tool access split.** Upstream split `tool-access.ts` into
+  `services/tool-access/`. The remote MCP header policy, the TypeSafe health
+  check and the MCP 2026-07-28 stateless probe now live in
+  `catalog/discovery.ts`, `catalog/health.ts`, `catalog/failures.ts`,
+  `catalog/publication.ts` and `connection-methods.ts`. The TypeSafe identity
+  helpers live in `typesafe-api.ts`, and its connector declares a
+  `connectors.typesafe.resolve` timing phase.
+- **Claude ACP pin.** Upstream bundles claude-agent-acp in the server package at
+  0.73.0; the server now pins 0.81.2 like the runner, and the packaging
+  fixtures use 0.81.2.
+- **Heartbeat split.** The host gate's AI-connection catch moved to
+  `heartbeat/execution-configuration.ts`. The idle-retained lease check moved
+  into `hasPendingRunCleanup` in `execution-blocker.ts`, and the chat retry
+  guard into `chat-channels/failed-run-retry.ts`. A cancelled native run keeps
+  upstream's workspace preservation before the closed-issue destroy.
+- **Project derivation.** Upstream no longer derives an issue's project from its
+  execution workspace on update, so the watchdog test's control case is gone.
+- **Serialized imports.** Upstream's new route tests resolved
+  `vi.importActual` concurrently; they now await one at a time.
+- **Storybook catalog.** The TypeSafe stories moved to `connection-setup/` with
+  a meta ID and `parameters.paperclip` metadata.
+
+On the rebased tip, with Node 26.5.0 and pnpm 9.15.4: the frozen install,
+`pnpm -r typecheck` and `pnpm build` (including the Rust runner) pass, as do the
+targeted suites for every resolved conflict (37 files, 2302 tests), the
+runner and adapter projects, and the packaging script tests. The full
+`pnpm test:run` and the serialized server suite were not run.
+
 ## Queue CI repair (October 5, 2026)
 
 The October 3 tip failed six pull request checks that the pre-rebase queue
