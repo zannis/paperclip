@@ -1,0 +1,19 @@
+server/src/services/heartbeat-stop-metadata.ts
+  s_632db739cb5825::t_ab8db8367579ef 15-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9d38cc631592e1d4128b2c114c744d555912578b",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
