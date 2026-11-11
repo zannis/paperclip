@@ -1,0 +1,21 @@
+server/src/__tests__/connection-intents-service.test.ts
+  s_632db739cb5825::t_eddaf0a1d5c929 38,813-844
+server/src/services/satisfied-connection-intents.ts
+  s_632db739cb5825::t_4ee68049e581e3 14,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6c9b3293999c9da73e317108f566ba8e91729de1",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
