@@ -1,0 +1,21 @@
+server/src/middleware/http-log-policy.ts
+  s_632db739cb5825::t_73d43b3132b526 70
+server/src/services/tool-access/connections/installs.ts
+  s_632db739cb5825::t_3bbf4fd8eb5b09 70
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c5b3c4248fd9db43b557bc57d56fdab465f55c09",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
