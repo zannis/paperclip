@@ -1,0 +1,21 @@
+scripts/restore-smoke.sh
+  s_632db739cb5825::t_466215a8aa916c 329
+scripts/restore-smoke.test.mjs
+  s_632db739cb5825::t_d3852eef431509 3-4,105-157
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "236de7d7cb7bb1d36ea2d762b5e2ecd5daa4b406",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
