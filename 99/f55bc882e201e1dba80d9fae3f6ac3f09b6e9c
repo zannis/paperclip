@@ -1,0 +1,29 @@
+server/src/services/tool-access/oauth/vercel-callback.ts
+  s_632db739cb5825::t_d1c01a0339fa32 5
+server/src/services/tool-gateway.ts
+  s_632db739cb5825::t_96ae7c94bb773b 157-160,5303-5307,5311,6077-6082,6086,6235-6237,6241,6256-6258,6262,6291-6293,6297
+doc/connections/CONNECTOR-PLAYBOOK.md
+  s_632db739cb5825::t_9bb8e077174987 1303-1309
+server/src/services/tool-connection-headers.ts
+  s_632db739cb5825::t_edfca3a49164a8 1-317
+server/src/services/tool-access/catalog/discovery.ts
+  s_632db739cb5825::t_a9629b7a8c564f 8,76-85,223-224,226-227,235-236,238-239
+server/src/__tests__/tool-access-service.test.ts
+  s_632db739cb5825::t_2283777652e5c3 3293-3412,6383-6385,7052,7092-7099,7491,7494-7496,7553,7556-7558,7564-7622,11105-11106,12010,12743-12744,12972-12973,13461-13462,13738-13739,14909-14910,15253-15254,16723-16728,17252-17253,17576-17581
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "99f55bc882e201e1dba80d9fae3f6ac3f09b6e9c",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
