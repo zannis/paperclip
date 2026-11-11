@@ -1,0 +1,29 @@
+scripts/restore-smoke.sh
+  s_632db739cb5825::t_29f3f4f1365b88 15-71,85
+scripts/restore-smoke.test.mjs
+  s_632db739cb5825::t_43def1f6adbd84 32-39
+scripts/restore-verify-logs.sh
+  s_632db739cb5825::t_6e021fcefc32ff 5-92,163,409-411,445
+scripts/restore-verify-logs.test.mjs
+  s_632db739cb5825::t_f857a451f68bef 18,122,496-507
+scripts/restore-verify-secrets.mjs
+  s_632db739cb5825::t_701803b06b08fb 5-35,38,46-49
+scripts/restore-verify-secrets.test.mjs
+  s_632db739cb5825::t_12bea60ce9bbff 111-120
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21a80959fabc2b6900a94eb523f2a53f4b14d1f3",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
