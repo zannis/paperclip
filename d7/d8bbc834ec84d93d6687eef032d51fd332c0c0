@@ -1,0 +1,24 @@
+server/src/__tests__/http-log-redaction.test.ts
+  s_bb59cae3bb56bf::t_e88901db29d146 86-94,100
+  s_bb59cae3bb56bf::t_c1b77155851744 101
+server/src/middleware/http-log-policy.ts
+  s_bb59cae3bb56bf::t_1b0cfaa42414ff 70-71,75
+server/src/middleware/logger.ts
+  s_bb59cae3bb56bf::t_fc34881b3bc111 9,104,188-189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d7d8bbc834ec84d93d6687eef032d51fd332c0c0",
+  "prompts": {},
+  "sessions": {
+    "s_bb59cae3bb56bf": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f065f25d-8909-4232-bdc5-f5839a13a225",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
