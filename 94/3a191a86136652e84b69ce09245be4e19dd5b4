@@ -1,0 +1,19 @@
+server/src/__tests__/heartbeat-process-recovery.test.ts
+  s_632db739cb5825::t_04078be8a2fd2a 5685,6355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "943a191a86136652e84b69ce09245be4e19dd5b4",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
