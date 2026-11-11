@@ -1,0 +1,21 @@
+server/src/services/managed-ai-gate-settings.test.ts
+  s_632db739cb5825::t_65d927136837ff 152-195,274-281
+server/src/services/managed-ai-gate-settings.ts
+  s_632db739cb5825::t_a219db315c0488 2,98,145-154,168-178,193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "52b361cdabf06b7920d5d94ceef7580e04383af0",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
