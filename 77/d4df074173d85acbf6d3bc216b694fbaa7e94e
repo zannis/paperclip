@@ -1,0 +1,25 @@
+server/src/services/heartbeat-stop-metadata.ts
+  s_632db739cb5825::t_ab8db8367579ef 15-36
+server/src/__tests__/heartbeat-process-recovery.test.ts
+  s_632db739cb5825::t_e752d8b2ea5a74 1461,1485,1497-1499,1501,1503,1505-1507,1528,1529-1539,1541-1575,11912,12411,12455-12467,12468-12489
+server/src/__tests__/issue-recovery-actions.test.ts
+  s_632db739cb5825::t_0bb58f708bb447 1097-1100,1101-1118,1119-1145,1146-1149,1150-1175,1176-1183
+server/src/services/recovery/service.ts
+  s_632db739cb5825::t_05c0ce29a1e430 160,301,324,357-358,448-451,458,610,2557-2558,2571,2593,2599-2600,2633,2643,2674,2679,2681-2684,2702-2704,2705-2707,2717,2722-2723,2730,2749,2754-2756,4129-4130,4133-4134,4139,4153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "77d4df074173d85acbf6d3bc216b694fbaa7e94e",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
