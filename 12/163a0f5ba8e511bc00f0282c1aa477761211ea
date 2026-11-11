@@ -1,0 +1,45 @@
+server/src/__tests__/adapter-model-refresh-routes.test.ts
+  s_632db739cb5825::t_4adb66fd05ceb3 105-110
+server/src/__tests__/agent-device-login-routes.test.ts
+  s_632db739cb5825::t_180cf4da8542a5 367-372
+server/src/__tests__/agent-instructions-routes.test.ts
+  s_632db739cb5825::t_6380f7f3190717 110-115
+server/src/__tests__/agent-skills-routes.test.ts
+  s_632db739cb5825::t_2463be4352685c 281-286
+server/src/__tests__/agent-test-environment-routes.test.ts
+  s_632db739cb5825::t_27e60b0fb1f661 199-205
+server/src/__tests__/document-annotation-routes.test.ts
+  s_632db739cb5825::t_d240379da1b7ef 232-235
+server/src/__tests__/instance-settings-routes.test.ts
+  s_632db739cb5825::t_764e7497ac818f 92-99
+server/src/__tests__/invite-summary-route.test.ts
+  s_632db739cb5825::t_185b454279b72c 48-54
+server/src/__tests__/issue-agent-mutation-ownership-routes.test.ts
+  s_632db739cb5825::t_1e8c618d80cdbe 500-505
+server/src/__tests__/issue-comment-cancel-routes.test.ts
+  s_632db739cb5825::t_5f9ace7ac0385a 203-208
+server/src/__tests__/issue-telemetry-routes.test.ts
+  s_632db739cb5825::t_6f19ae11c205b6 123-129
+server/src/__tests__/issue-update-comment-wakeup-routes.test.ts
+  s_632db739cb5825::t_6d5ab5f3cf0ed1 228-233
+server/src/__tests__/skill-update-diff-routes.test.ts
+  s_632db739cb5825::t_9aa21560261129 35-40
+server/src/routes/setup-token-route.test.ts
+  s_632db739cb5825::t_a0e89b09c02895 364-372,375
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "12163a0f5ba8e511bc00f0282c1aa477761211ea",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
