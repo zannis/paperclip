@@ -1,0 +1,21 @@
+server/src/services/issues.ts
+  s_632db739cb5825::t_4d14a0873539db 11708-11711
+server/src/__tests__/issues-execution-workspace-gate-routes.test.ts
+  s_632db739cb5825::t_191081dc0de7d4 393-415
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bfb7d4e6590b0d255a99435dad7ec4dbd1dbc142",
+  "prompts": {},
+  "sessions": {
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
