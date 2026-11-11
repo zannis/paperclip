@@ -1,0 +1,32 @@
+docs/deploy/backup-restore.md
+  s_632db739cb5825::t_b7a3cdbb52188f 833-839
+  s_5919507455c19c::t_ad4e62c764b505 269-270,439-440,443-445,448-453,759-777,793-794
+scripts/restore-swap-db.sh
+  s_632db739cb5825::t_bb91eeeff95840 8,11-52,61,63,69-72,114-141,151-152
+scripts/restore-swap-db.test.mjs
+  s_632db739cb5825::t_0fdb7085a36d47 79-93,191-229
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7346b79a00368ec33093503b0fe601d6a537d898",
+  "prompts": {},
+  "sessions": {
+    "s_5919507455c19c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a66708b8f39e11299",
+        "model": "unknown"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    },
+    "s_632db739cb5825": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9052e9f3-3679-4f86-950c-0abd55a94849",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "zannis <zkalampoukis@gmail.com>"
+    }
+  }
+}
